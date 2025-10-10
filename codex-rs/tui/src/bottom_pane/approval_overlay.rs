@@ -11,10 +11,11 @@ use crate::bottom_pane::list_selection_view::SelectionViewParams;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::history_cell;
+use crate::key_hint;
+use crate::key_hint::KeyBinding;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
-use crate::text_formatting::truncate_text;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::Op;
 use codex_core::protocol::ReviewDecision;
@@ -93,13 +94,19 @@ impl ApprovalOverlay {
         header: Box<dyn Renderable>,
     ) -> (Vec<ApprovalOption>, SelectionViewParams) {
         let (options, title) = match &variant {
-            ApprovalVariant::Exec { .. } => (exec_options(), "Allow command?".to_string()),
-            ApprovalVariant::ApplyPatch { .. } => (patch_options(), "Apply changes?".to_string()),
+            ApprovalVariant::Exec { .. } => (
+                exec_options(),
+                "Would you like to run the following command?".to_string(),
+            ),
+            ApprovalVariant::ApplyPatch { .. } => (
+                patch_options(),
+                "Would you like to make the following edits?".to_string(),
+            ),
         };
 
-        let header = Box::new(ColumnRenderable::new([
-            Box::new(Line::from(title.bold())),
-            Box::new(Line::from("")),
+        let header = Box::new(ColumnRenderable::with([
+            Line::from(title.bold()).into(),
+            Line::from("").into(),
             header,
         ]));
 
@@ -107,16 +114,20 @@ impl ApprovalOverlay {
             .iter()
             .map(|opt| SelectionItem {
                 name: opt.label.clone(),
-                description: Some(opt.description.clone()),
-                is_current: false,
-                actions: Vec::new(),
+                display_shortcut: opt.display_shortcut,
                 dismiss_on_select: false,
-                search_value: None,
+                ..Default::default()
             })
             .collect();
 
         let params = SelectionViewParams {
-            footer_hint: Some("Press Enter to confirm or Esc to cancel".to_string()),
+            footer_hint: Some(Line::from(vec![
+                "Press ".into(),
+                key_hint::plain(KeyCode::Enter).into(),
+                " to confirm or ".into(),
+                key_hint::plain(KeyCode::Esc).into(),
+                " to cancel".into(),
+            ])),
             items,
             header,
             ..Default::default()
@@ -148,11 +159,8 @@ impl ApprovalOverlay {
     }
 
     fn handle_exec_decision(&self, id: &str, command: &[String], decision: ReviewDecision) {
-        if let Some(lines) = build_exec_history_lines(command.to_vec(), decision) {
-            self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                history_cell::new_user_approval_decision(lines),
-            )));
-        }
+        let cell = history_cell::new_approval_decision_cell(command.to_vec(), decision);
+        self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
         self.app_event_tx.send(AppEvent::CodexOp(Op::ExecApproval {
             id: id.to_string(),
             decision,
@@ -190,28 +198,18 @@ impl ApprovalOverlay {
                     false
                 }
             }
-            KeyEvent {
-                kind: KeyEventKind::Press,
-                code: KeyCode::Char(c),
-                modifiers,
-                ..
-            } if !modifiers.contains(KeyModifiers::CONTROL)
-                && !modifiers.contains(KeyModifiers::ALT) =>
-            {
-                let lower = c.to_ascii_lowercase();
-                match self
+            e => {
+                if let Some(idx) = self
                     .options
                     .iter()
-                    .position(|opt| opt.shortcut.map(|s| s == lower).unwrap_or(false))
+                    .position(|opt| opt.shortcuts().any(|s| s.is_press(*e)))
                 {
-                    Some(idx) => {
-                        self.apply_selection(idx);
-                        true
-                    }
-                    None => false,
+                    self.apply_selection(idx);
+                    true
+                } else {
+                    false
                 }
             }
-            _ => false,
         }
     }
 }
@@ -292,7 +290,7 @@ impl From<ApprovalRequest> for ApprovalRequestState {
                 if let Some(reason) = reason
                     && !reason.is_empty()
                 {
-                    header.push(reason.italic().into());
+                    header.push(Line::from(vec!["Reason: ".into(), reason.italic()]));
                     header.push(Line::from(""));
                 }
                 let full_cmd = strip_bash_lc_and_escape(&command);
@@ -313,18 +311,19 @@ impl From<ApprovalRequest> for ApprovalRequestState {
                 changes,
             } => {
                 let mut header: Vec<Box<dyn Renderable>> = Vec::new();
-                header.push(DiffSummary::new(changes, cwd).into());
                 if let Some(reason) = reason
                     && !reason.is_empty()
                 {
-                    header.push(Box::new(Line::from("")));
                     header.push(Box::new(
-                        Paragraph::new(reason.italic()).wrap(Wrap { trim: false }),
+                        Paragraph::new(Line::from_iter(["Reason: ".into(), reason.italic()]))
+                            .wrap(Wrap { trim: false }),
                     ));
+                    header.push(Box::new(Line::from("")));
                 }
+                header.push(DiffSummary::new(changes, cwd).into());
                 Self {
                     variant: ApprovalVariant::ApplyPatch { id },
-                    header: Box::new(ColumnRenderable::new(header)),
+                    header: Box::new(ColumnRenderable::with(header)),
                 }
             }
         }
@@ -340,31 +339,38 @@ enum ApprovalVariant {
 #[derive(Clone)]
 struct ApprovalOption {
     label: String,
-    description: String,
     decision: ReviewDecision,
-    shortcut: Option<char>,
+    display_shortcut: Option<KeyBinding>,
+    additional_shortcuts: Vec<KeyBinding>,
+}
+
+impl ApprovalOption {
+    fn shortcuts(&self) -> impl Iterator<Item = KeyBinding> + '_ {
+        self.display_shortcut
+            .into_iter()
+            .chain(self.additional_shortcuts.iter().copied())
+    }
 }
 
 fn exec_options() -> Vec<ApprovalOption> {
     vec![
         ApprovalOption {
-            label: "Approve and run now".to_string(),
-            description: "Run this command one time".to_string(),
+            label: "Yes, proceed".to_string(),
             decision: ReviewDecision::Approved,
-            shortcut: Some('y'),
+            display_shortcut: None,
+            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
         },
         ApprovalOption {
-            label: "Always approve this session".to_string(),
-            description: "Automatically approve this command for the rest of the session"
-                .to_string(),
+            label: "Yes, and don't ask again for this command".to_string(),
             decision: ReviewDecision::ApprovedForSession,
-            shortcut: Some('a'),
+            display_shortcut: None,
+            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('a'))],
         },
         ApprovalOption {
-            label: "Cancel".to_string(),
-            description: "Do not run the command".to_string(),
+            label: "No, and tell Codex what to do differently".to_string(),
             decision: ReviewDecision::Abort,
-            shortcut: Some('n'),
+            display_shortcut: Some(key_hint::plain(KeyCode::Esc)),
+            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
         },
     ]
 }
@@ -372,105 +378,25 @@ fn exec_options() -> Vec<ApprovalOption> {
 fn patch_options() -> Vec<ApprovalOption> {
     vec![
         ApprovalOption {
-            label: "Approve".to_string(),
-            description: "Apply the proposed changes".to_string(),
+            label: "Yes, proceed".to_string(),
             decision: ReviewDecision::Approved,
-            shortcut: Some('y'),
+            display_shortcut: None,
+            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('y'))],
         },
         ApprovalOption {
-            label: "Cancel".to_string(),
-            description: "Do not apply the changes".to_string(),
+            label: "No, and tell Codex what to do differently".to_string(),
             decision: ReviewDecision::Abort,
-            shortcut: Some('n'),
+            display_shortcut: Some(key_hint::plain(KeyCode::Esc)),
+            additional_shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
         },
     ]
-}
-
-fn build_exec_history_lines(
-    command: Vec<String>,
-    decision: ReviewDecision,
-) -> Option<Vec<Line<'static>>> {
-    use ReviewDecision::*;
-
-    let (symbol, summary): (Span<'static>, Vec<Span<'static>>) = match decision {
-        Approved => {
-            let snippet = Span::from(exec_snippet(&command)).dim();
-            (
-                "✔ ".green(),
-                vec![
-                    "You ".into(),
-                    "approved".bold(),
-                    " codex to run ".into(),
-                    snippet,
-                    " this time".bold(),
-                ],
-            )
-        }
-        ApprovedForSession => {
-            let snippet = Span::from(exec_snippet(&command)).dim();
-            (
-                "✔ ".green(),
-                vec![
-                    "You ".into(),
-                    "approved".bold(),
-                    " codex to run ".into(),
-                    snippet,
-                    " every time this session".bold(),
-                ],
-            )
-        }
-        Denied => {
-            let snippet = Span::from(exec_snippet(&command)).dim();
-            (
-                "✗ ".red(),
-                vec![
-                    "You ".into(),
-                    "did not approve".bold(),
-                    " codex to run ".into(),
-                    snippet,
-                ],
-            )
-        }
-        Abort => {
-            let snippet = Span::from(exec_snippet(&command)).dim();
-            (
-                "✗ ".red(),
-                vec![
-                    "You ".into(),
-                    "canceled".bold(),
-                    " the request to run ".into(),
-                    snippet,
-                ],
-            )
-        }
-    };
-
-    let mut lines = Vec::new();
-    let mut spans = Vec::new();
-    spans.push(symbol);
-    spans.extend(summary);
-    lines.push(Line::from(spans));
-    Some(lines)
-}
-
-fn truncate_exec_snippet(full_cmd: &str) -> String {
-    let mut snippet = match full_cmd.split_once('\n') {
-        Some((first, _)) => format!("{first} ..."),
-        None => full_cmd.to_string(),
-    };
-    snippet = truncate_text(&snippet, 80);
-    snippet
-}
-
-fn exec_snippet(command: &[String]) -> String {
-    let full_cmd = strip_bash_lc_and_escape(command);
-    truncate_exec_snippet(&full_cmd)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use pretty_assertions::assert_eq;
     use tokio::sync::mpsc::unbounded_channel;
 
     fn make_exec_request() -> ApprovalRequest {
@@ -538,6 +464,34 @@ mod tests {
                 .any(|line| line.contains("echo hello world")),
             "expected header to include command snippet, got {rendered:?}"
         );
+    }
+
+    #[test]
+    fn exec_history_cell_wraps_with_two_space_indent() {
+        let command = vec![
+            "/bin/zsh".into(),
+            "-lc".into(),
+            "git add tui/src/render/mod.rs tui/src/render/renderable.rs".into(),
+        ];
+        let cell = history_cell::new_approval_decision_cell(command, ReviewDecision::Approved);
+        let lines = cell.display_lines(28);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        let expected = vec![
+            "✔ You approved codex to".to_string(),
+            "  run /bin/zsh -lc 'git add".to_string(),
+            "  tui/src/render/mod.rs tui/".to_string(),
+            "  src/render/renderable.rs'".to_string(),
+            "  this time".to_string(),
+        ];
+        assert_eq!(rendered, expected);
     }
 
     #[test]

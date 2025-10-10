@@ -87,5 +87,14 @@ impl SessionState {
         self.undo_snapshots.push(gc);
     }
 
+    pub(crate) fn set_token_usage_full(&mut self, context_window: u64) {
+        match &mut self.token_info {
+            Some(info) => info.fill_to_context_window(context_window),
+            None => {
+                self.token_info = Some(TokenUsageInfo::full_context_window(context_window));
+            }
+        }
+    }
+
     // Pending input/approval moved to TurnState.
 }
