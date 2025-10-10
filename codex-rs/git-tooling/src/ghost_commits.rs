@@ -269,7 +269,7 @@ fn remove_new_untracked(
     }
 
     let preserved_file_set: HashSet<PathBuf> = preserved_files.iter().cloned().collect();
-    let preserved_dirs_vec: Vec<PathBuf> = preserved_dirs.iter().cloned().collect();
+    let preserved_dirs_vec: Vec<PathBuf> = preserved_dirs.to_vec();
 
     for path in current.files {
         if should_preserve(&path, &preserved_file_set, &preserved_dirs_vec) {
