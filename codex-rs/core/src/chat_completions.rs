@@ -31,6 +31,7 @@ use tracing::debug;
 use tracing::trace;
 
 /// Implementation for the classic Chat Completions API.
+#[allow(dead_code)]
 pub(crate) async fn stream_chat_completions(
     prompt: &Prompt,
     model_family: &ModelFamily,
@@ -361,6 +362,7 @@ pub(crate) async fn stream_chat_completions(
 /// Lightweight SSE processor for the Chat Completions streaming format. The
 /// output is mapped onto Codex's internal [`ResponseEvent`] so that the rest
 /// of the pipeline can stay agnostic of the underlying wire format.
+#[allow(dead_code)]
 async fn process_chat_sse<S>(
     stream: S,
     tx_event: mpsc::Sender<Result<ResponseEvent>>,
@@ -660,6 +662,7 @@ async fn process_chat_sse<S>(
 /// [`AggregateStreamExt::aggregate()`] keep receiving the original unmodified
 /// events.
 #[derive(Copy, Clone, Eq, PartialEq)]
+#[allow(dead_code)]
 enum AggregateMode {
     AggregatedOnly,
     Streaming,
@@ -885,6 +888,7 @@ impl<S> AggregatedChatStream<S> {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn streaming_mode(inner: S) -> Self {
         Self::new(inner, AggregateMode::Streaming)
     }

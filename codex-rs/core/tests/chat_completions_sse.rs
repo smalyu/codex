@@ -102,7 +102,7 @@ async fn run_stream_with_bytes(sse_body: &[u8]) -> Vec<ResponseEvent> {
         }],
     }];
 
-    let mut stream = match client.stream(&prompt).await {
+    let mut stream = match client.stream(&prompt, ()).await {
         Ok(s) => s,
         Err(e) => panic!("stream chat failed: {e}"),
     };
@@ -115,6 +115,9 @@ async fn run_stream_with_bytes(sse_body: &[u8]) -> Vec<ResponseEvent> {
         }
     }
     events
+        .into_iter()
+        .filter(|ev| !matches!(ev, ResponseEvent::RateLimits(_)))
+        .collect()
 }
 
 fn assert_message(item: &ResponseItem, expected: &str) {

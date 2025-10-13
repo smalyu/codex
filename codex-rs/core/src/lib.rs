@@ -93,7 +93,13 @@ pub use codex_protocol::protocol;
 // as those in the protocol crate when constructing protocol messages.
 pub use codex_protocol::config_types as protocol_config_types;
 
+pub use client::CallOpts;
+pub use client::Client;
 pub use client::ModelClient;
+pub use client::StreamMode;
+pub use client::TurnResult;
+pub use client::TurnStream;
+pub use client::WireDialect;
 pub use client_common::Prompt;
 pub use client_common::REVIEW_PROMPT;
 pub use client_common::ResponseEvent;

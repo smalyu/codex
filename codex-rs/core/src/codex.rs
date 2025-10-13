@@ -2109,7 +2109,7 @@ async fn try_run_turn(
         summary: turn_context.client.get_reasoning_summary(),
     });
     sess.persist_rollout_items(&[rollout_item]).await;
-    let mut stream = turn_context.client.clone().stream(&prompt).await?;
+    let mut stream = turn_context.client.clone().stream(&prompt, ()).await?;
 
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&router),
