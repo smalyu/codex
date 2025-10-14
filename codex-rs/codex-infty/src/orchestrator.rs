@@ -84,6 +84,8 @@ struct VerificationRequestPayload<'a> {
     claim_path: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     notes: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objective: Option<&'a str>,
 }
 
 struct SessionCleanup {
@@ -525,8 +527,14 @@ impl InftyOrchestrator {
         notes: Option<&str>,
         options: &RunExecutionOptions,
     ) -> Result<bool> {
+        let objective = options
+            .objective
+            .as_deref()
+            .map(str::trim)
+            .filter(|objective| !objective.is_empty());
+
         let summary = self
-            .collect_verification_summary(sessions, claim_path, notes, options)
+            .collect_verification_summary(sessions, claim_path, notes, objective, options)
             .await?;
         self.emit_verification_summary(&summary);
         self.post_verification_summary_to_solver(sessions, &summary)
@@ -547,17 +555,25 @@ impl InftyOrchestrator {
             .and_then(|p| p.to_str().map(|s| s.to_string()));
         let claim_path = relative.unwrap_or_else(|| deliverable_path.display().to_string());
 
+        let objective = options
+            .objective
+            .as_deref()
+            .map(str::trim)
+            .filter(|objective| !objective.is_empty());
+
         let summary_result = self
-            .collect_verification_summary(sessions, claim_path.as_str(), summary, options)
+            .collect_verification_summary(
+                sessions,
+                claim_path.as_str(),
+                summary,
+                objective,
+                options,
+            )
             .await?;
         self.emit_verification_summary(&summary_result);
-        if summary_result.overall.is_pass() {
-            Ok(true)
-        } else {
-            self.post_verification_summary_to_solver(sessions, &summary_result)
-                .await?;
-            Ok(false)
-        }
+        self.post_verification_summary_to_solver(sessions, &summary_result)
+            .await?;
+        Ok(summary_result.overall.is_pass())
     }
 
     async fn request_solver_signal(&self, run_id: &str, solver_role: &str) -> Result<()> {
@@ -580,6 +596,7 @@ impl InftyOrchestrator {
         sessions: &RunSessions,
         claim_path: &str,
         notes: Option<&str>,
+        objective: Option<&str>,
         options: &RunExecutionOptions,
     ) -> Result<AggregatedVerifierVerdict> {
         if sessions.verifiers.is_empty() {
@@ -590,6 +607,7 @@ impl InftyOrchestrator {
             kind: "verification_request",
             claim_path,
             notes,
+            objective,
         };
         let request_text = serde_json::to_string_pretty(&request)?;
         let mut collected = Vec::with_capacity(sessions.verifiers.len());

@@ -1,12 +1,8 @@
 use codex_core::config::Config;
+pub(crate) const DIRECTOR_PROMPT: &str = include_str!("director.md");
+pub(crate) const SOLVER_PROMPT: &str = include_str!("solver.md");
+pub(crate) const VERIFIER_PROMPT: &str = include_str!("verifier.md");
 
-mod director;
-mod solver;
-mod verifier;
-
-pub(crate) use director::DIRECTOR_PROMPT;
-pub(crate) use solver::SOLVER_PROMPT;
-pub(crate) use verifier::VERIFIER_PROMPT;
 
 pub fn ensure_instructions(role: &str, config: &mut Config) {
     if config.base_instructions.is_none()
