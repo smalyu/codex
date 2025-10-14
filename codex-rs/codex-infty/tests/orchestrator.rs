@@ -246,8 +246,10 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
     let director_config = build_config(&server).await?;
     let verifier_config = build_config(&server).await?;
 
-    let mut options = RunExecutionOptions::default();
-    options.objective = Some("Implement feature".to_string());
+    let options = RunExecutionOptions {
+        objective: Some("Implement feature".to_string()),
+        ..RunExecutionOptions::default()
+    };
 
     let outcome = orchestrator
         .execute_new_run(

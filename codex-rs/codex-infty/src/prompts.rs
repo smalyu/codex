@@ -71,10 +71,10 @@ Use `"fail"` when the claim is not ready. Populate `reasons` with concrete block
 Do not include extra commentary outside the JSON payload."#;
 
 pub fn ensure_instructions(role: &str, config: &mut Config) {
-    if config.base_instructions.is_none() {
-        if let Some(text) = default_instructions_for_role(role) {
-            config.base_instructions = Some(text.to_string());
-        }
+    if config.base_instructions.is_none()
+        && let Some(text) = default_instructions_for_role(role)
+    {
+        config.base_instructions = Some(text.to_string());
     }
 }
 
