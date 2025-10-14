@@ -961,6 +961,7 @@ dependencies = [
  "codex-responses-api-proxy",
  "codex-rmcp-client",
  "codex-tui",
+ "crossterm",
  "ctor 0.5.0",
  "owo-colors",
  "predicates",
@@ -969,6 +970,7 @@ dependencies = [
  "serde_json",
  "supports-color",
  "tempfile",
+ "textwrap 0.16.2",
  "tokio",
  "tracing",
 ]

@@ -113,8 +113,8 @@ impl ConversationManager {
 
         let new_conversation = self.finalize_spawn(codex, conversation_id).await?;
 
-        if let Some((defaults, params)) = cross_session {
-            if let Err(err) = self
+        if let Some((defaults, params)) = cross_session
+            && let Err(err) = self
                 .register_cross_session(
                     conversation_id,
                     defaults,
@@ -122,16 +122,12 @@ impl ConversationManager {
                     Arc::clone(&new_conversation.conversation),
                 )
                 .await
-            {
-                self.abort_conversation(
-                    conversation_id,
-                    Arc::clone(&new_conversation.conversation),
-                )
+        {
+            self.abort_conversation(conversation_id, Arc::clone(&new_conversation.conversation))
                 .await;
-                return Err(CodexErr::Fatal(format!(
-                    "failed to register cross-session for conversation {conversation_id}: {err}"
-                )));
-            }
+            return Err(CodexErr::Fatal(format!(
+                "failed to register cross-session for conversation {conversation_id}: {err}"
+            )));
         }
 
         Ok(new_conversation)

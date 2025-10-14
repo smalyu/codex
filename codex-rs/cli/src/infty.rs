@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -14,6 +15,7 @@ use chrono::Utc;
 use clap::Parser;
 use clap::Subcommand;
 use codex_common::CliConfigOverrides;
+use codex_common::elapsed::format_duration;
 use codex_core::CodexAuth;
 use codex_core::auth::read_codex_api_key_from_env;
 use codex_core::auth::read_openai_api_key_from_env;
@@ -32,7 +34,12 @@ use codex_infty::RunParams;
 use codex_infty::RunStore;
 use codex_infty::VerifierDecision;
 use codex_infty::VerifierVerdict;
+use crossterm::terminal;
+use owo_colors::OwoColorize;
 use serde::Serialize;
+use supports_color::Stream;
+use textwrap::Options as WrapOptions;
+use textwrap::wrap;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
@@ -121,8 +128,9 @@ struct RunSummary {
     roles: Vec<String>,
 }
 
-#[derive(Default)]
-struct TerminalProgressReporter;
+struct TerminalProgressReporter {
+    color_enabled: bool,
+}
 
 impl TerminalProgressReporter {
     fn decision_label(decision: VerifierDecision) -> &'static str {
@@ -131,15 +139,39 @@ impl TerminalProgressReporter {
             VerifierDecision::Fail => "fail",
         }
     }
+
+    fn with_color(color_enabled: bool) -> Self {
+        Self { color_enabled }
+    }
+
+    fn format_decision(&self, decision: VerifierDecision) -> String {
+        let label = Self::decision_label(decision);
+        if !self.color_enabled {
+            return label.to_string();
+        }
+        match decision {
+            VerifierDecision::Pass => format!("{}", label.green().bold()),
+            VerifierDecision::Fail => format!("{}", label.red().bold()),
+        }
+    }
 }
 
 impl ProgressReporter for TerminalProgressReporter {
     fn objective_posted(&self, objective: &str) {
-        println!("→ objective sent to solver: {objective}");
+        let line = format!("→ objective sent to solver: {objective}");
+        if self.color_enabled {
+            println!("{}", line.cyan());
+        } else {
+            println!("{line}");
+        }
     }
 
     fn waiting_for_solver(&self) {
-        println!("Waiting for solver response...");
+        if self.color_enabled {
+            println!("{}", "Waiting for solver response...".dimmed());
+        } else {
+            println!("Waiting for solver response...");
+        }
     }
 
     fn solver_event(&self, event: &EventMsg) {
@@ -154,83 +186,158 @@ impl ProgressReporter for TerminalProgressReporter {
     }
 
     fn solver_agent_message(&self, agent_msg: &AgentMessageEvent) {
-        println!("[solver] {}", agent_msg.message);
+        let prefix = if self.color_enabled {
+            format!("{}", "[solver]".magenta().bold())
+        } else {
+            "[solver]".to_string()
+        };
+        println!("{prefix} {}", agent_msg.message);
     }
 
     fn direction_request(&self, prompt: &str) {
-        println!("→ solver requested direction: {prompt}");
+        let line = format!("→ solver requested direction: {prompt}");
+        if self.color_enabled {
+            println!("{}", line.yellow().bold());
+        } else {
+            println!("{line}");
+        }
     }
 
     fn director_response(&self, directive: &DirectiveResponse) {
         match directive.rationale.as_deref() {
             Some(rationale) if !rationale.is_empty() => {
-                println!(
-                    "[director] directive: {} (rationale: {})",
-                    directive.directive, rationale
+                let line = format!(
+                    "[director] directive: {} (rationale: {rationale})",
+                    directive.directive
                 );
+                if self.color_enabled {
+                    println!("{}", line.blue());
+                } else {
+                    println!("{line}");
+                }
             }
             _ => {
-                println!("[director] directive: {}", directive.directive);
+                let line = format!("[director] directive: {}", directive.directive);
+                if self.color_enabled {
+                    println!("{}", line.blue());
+                } else {
+                    println!("{line}");
+                }
             }
         }
     }
 
     fn verification_request(&self, claim_path: &str, notes: Option<&str>) {
-        println!("→ solver requested verification for {claim_path}");
+        let line = format!("→ solver requested verification for {claim_path}");
+        if self.color_enabled {
+            println!("{}", line.yellow().bold());
+        } else {
+            println!("{line}");
+        }
         if let Some(notes) = notes {
             if !notes.is_empty() {
-                println!("  notes: {notes}");
+                let notes_line = format!("  notes: {notes}");
+                if self.color_enabled {
+                    println!("{}", notes_line.dimmed());
+                } else {
+                    println!("{notes_line}");
+                }
             }
         }
     }
 
     fn verifier_verdict(&self, role: &str, verdict: &VerifierVerdict) {
-        println!(
-            "[{role}] verdict: {}",
-            Self::decision_label(verdict.verdict)
-        );
+        let decision = self.format_decision(verdict.verdict);
+        let prefix = if self.color_enabled {
+            format!("{}", format!("[{role}]").magenta().bold())
+        } else {
+            format!("[{role}]")
+        };
+        println!("{prefix} verdict: {decision}");
         if !verdict.reasons.is_empty() {
-            println!("  reasons: {}", verdict.reasons.join("; "));
+            let reasons = verdict.reasons.join("; ");
+            let line = format!("  reasons: {reasons}");
+            if self.color_enabled {
+                println!("{}", line.dimmed());
+            } else {
+                println!("{line}");
+            }
         }
         if !verdict.suggestions.is_empty() {
-            println!("  suggestions: {}", verdict.suggestions.join("; "));
+            let suggestions = verdict.suggestions.join("; ");
+            let line = format!("  suggestions: {suggestions}");
+            if self.color_enabled {
+                println!("{}", line.dimmed());
+            } else {
+                println!("{line}");
+            }
         }
     }
 
     fn verification_summary(&self, summary: &AggregatedVerifierVerdict) {
-        println!(
-            "Verification summary: {}",
-            Self::decision_label(summary.overall)
-        );
+        println!();
+        let decision = self.format_decision(summary.overall);
+        let heading = if self.color_enabled {
+            format!("{}", "Verification summary".bold())
+        } else {
+            "Verification summary".to_string()
+        };
+        println!("{heading}: {decision}");
         for report in &summary.verdicts {
-            println!(
-                "  {} → {}",
-                report.role,
-                Self::decision_label(report.verdict)
-            );
+            let report_decision = self.format_decision(report.verdict);
+            let line = format!("  {} → {report_decision}", report.role);
+            println!("{line}");
             if !report.reasons.is_empty() {
-                println!("    reasons: {}", report.reasons.join("; "));
+                let reasons = report.reasons.join("; ");
+                let reason_line = format!("    reasons: {reasons}");
+                if self.color_enabled {
+                    println!("{}", reason_line.dimmed());
+                } else {
+                    println!("{reason_line}");
+                }
             }
             if !report.suggestions.is_empty() {
-                println!("    suggestions: {}", report.suggestions.join("; "));
+                let suggestions = report.suggestions.join("; ");
+                let suggestion_line = format!("    suggestions: {suggestions}");
+                if self.color_enabled {
+                    println!("{}", suggestion_line.dimmed());
+                } else {
+                    println!("{suggestion_line}");
+                }
             }
         }
     }
 
     fn final_delivery(&self, deliverable_path: &Path, summary: Option<&str>) {
-        println!(
+        println!();
+        let line = format!(
             "✓ solver reported final delivery at {}",
             deliverable_path.display()
         );
+        if self.color_enabled {
+            println!("{}", line.green().bold());
+        } else {
+            println!("{line}");
+        }
         if let Some(summary) = summary {
             if !summary.is_empty() {
-                println!("  summary: {summary}");
+                let hint = "  (final summary will be shown below)";
+                if self.color_enabled {
+                    println!("{}", hint.dimmed());
+                } else {
+                    println!("{hint}");
+                }
             }
         }
     }
 
     fn run_interrupted(&self) {
-        println!("Run interrupted by Ctrl+C. Shutting down sessions…");
+        let line = "Run interrupted by Ctrl+C. Shutting down sessions…";
+        if self.color_enabled {
+            println!("{}", line.red().bold());
+        } else {
+            println!("{line}");
+        }
     }
 }
 
@@ -265,6 +372,7 @@ async fn run_create(
     let config = load_config(config_overrides).await?;
     let auth = load_auth(&config)?;
     let runs_root = resolve_runs_root(runs_root_override)?;
+    let color_enabled = supports_color::on(Stream::Stdout).is_some();
 
     let mut run_id = if let Some(id) = args.run_id {
         id
@@ -279,8 +387,9 @@ async fn run_create(
         bail!("run {run_id} already exists at {}", run_path.display());
     }
 
-    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root.clone())
-        .with_progress(Arc::new(TerminalProgressReporter::default()));
+    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root.clone()).with_progress(
+        Arc::new(TerminalProgressReporter::with_color(color_enabled)),
+    );
     let run_params = RunParams {
         run_id: run_id.clone(),
         run_root: Some(run_path.clone()),
@@ -296,22 +405,46 @@ async fn run_create(
         options.director_timeout = timeout;
         options.verifier_timeout = timeout;
 
-        println!("Starting run {run_id} at {}", run_path.display());
-        println!(
-            "Objective: {}",
-            options.objective.as_deref().unwrap_or_default()
-        );
+        let start = Instant::now();
+        let start_header = format!("Starting run {run_id}");
+        if color_enabled {
+            println!("{}", start_header.blue().bold());
+        } else {
+            println!("{start_header}");
+        }
+        let location_line = format!("  run directory: {}", run_path.display());
+        if color_enabled {
+            println!("{}", location_line.dimmed());
+        } else {
+            println!("{location_line}");
+        }
+        if let Some(objective_text) = options.objective.as_deref() {
+            if !objective_text.trim().is_empty() {
+                let objective_line = format!("  objective: {objective_text}");
+                if color_enabled {
+                    println!("{}", objective_line.dimmed());
+                } else {
+                    println!("{objective_line}");
+                }
+            }
+        }
+        println!();
+
+        let objective_snapshot = options.objective.clone();
         let outcome = orchestrator
             .execute_new_run(run_params, options)
             .await
             .with_context(|| format!("failed to execute run {run_id}"))?;
-        println!(
-            "Run {run_id} completed. Deliverable: {}",
-            outcome.deliverable_path.display()
+        let duration = start.elapsed();
+        print_run_summary_box(
+            color_enabled,
+            &run_id,
+            &run_path,
+            &outcome.deliverable_path,
+            outcome.summary.as_deref(),
+            objective_snapshot.as_deref(),
+            duration,
         );
-        if let Some(summary) = outcome.summary {
-            println!("Summary: {summary}");
-        }
     } else {
         let sessions = orchestrator
             .spawn_run(run_params)
@@ -545,6 +678,131 @@ fn collect_run_summaries(root: &Path) -> Result<Vec<RunSummary>> {
 
     summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(summaries)
+}
+
+impl Default for TerminalProgressReporter {
+    fn default() -> Self {
+        Self::with_color(supports_color::on(Stream::Stdout).is_some())
+    }
+}
+
+fn print_run_summary_box(
+    color_enabled: bool,
+    run_id: &str,
+    run_path: &Path,
+    deliverable_path: &Path,
+    summary: Option<&str>,
+    objective: Option<&str>,
+    duration: Duration,
+) {
+    let mut items = Vec::new();
+    items.push(("Run ID".to_string(), run_id.to_string()));
+    items.push(("Run Directory".to_string(), run_path.display().to_string()));
+    if let Some(objective) = objective {
+        if !objective.trim().is_empty() {
+            items.push(("Objective".to_string(), objective.trim().to_string()));
+        }
+    }
+    items.push((
+        "Deliverable".to_string(),
+        deliverable_path.display().to_string(),
+    ));
+    items.push(("Total Time".to_string(), format_duration(duration)));
+    if let Some(summary) = summary {
+        let trimmed = summary.trim();
+        if !trimmed.is_empty() {
+            items.push(("Summary".to_string(), trimmed.to_string()));
+        }
+    }
+
+    let label_width = items
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0)
+        .max(12);
+    const DEFAULT_MAX_WIDTH: usize = 84;
+    const MIN_VALUE_WIDTH: usize = 20;
+    let label_padding = label_width + 7;
+    let min_total_width = label_padding + MIN_VALUE_WIDTH;
+    let available_width = terminal::size()
+        .ok()
+        .map(|(cols, _)| usize::from(cols).saturating_sub(2))
+        .unwrap_or(DEFAULT_MAX_WIDTH);
+    let max_width = available_width.min(DEFAULT_MAX_WIDTH);
+    let lower_bound = min_total_width.min(available_width);
+    let mut total_width = max_width.max(lower_bound).max(label_padding + 1);
+    let mut value_width = total_width.saturating_sub(label_padding);
+    if value_width < MIN_VALUE_WIDTH {
+        value_width = MIN_VALUE_WIDTH;
+        total_width = label_padding + value_width;
+    }
+    let inner_width = total_width.saturating_sub(4);
+    let top_border = format!("+{}+", "=".repeat(total_width.saturating_sub(2)));
+    let separator = format!("+{}+", "-".repeat(total_width.saturating_sub(2)));
+    let title_line = format!(
+        "| {:^inner_width$} |",
+        "Run Summary",
+        inner_width = inner_width
+    );
+
+    println!();
+    println!("{top_border}");
+    if color_enabled {
+        println!("{}", title_line.bold());
+    } else {
+        println!("{title_line}");
+    }
+    println!("{separator}");
+
+    for (index, (label, value)) in items.iter().enumerate() {
+        let mut rows = Vec::new();
+        for (idx, paragraph) in value.split('\n').enumerate() {
+            let trimmed = paragraph.trim();
+            if trimmed.is_empty() {
+                if idx > 0 {
+                    rows.push(String::new());
+                }
+                continue;
+            }
+            let wrapped = wrap(trimmed, WrapOptions::new(value_width).break_words(false));
+            if wrapped.is_empty() {
+                rows.push(String::new());
+            } else {
+                rows.extend(wrapped.into_iter().map(|line| line.into_owned()));
+            }
+        }
+        if rows.is_empty() {
+            rows.push(String::new());
+        }
+
+        for (line_idx, line) in rows.iter().enumerate() {
+            let label_cell = if line_idx == 0 { label.as_str() } else { "" };
+            let row_line = format!(
+                "| {label_cell:<label_width$} | {line:<value_width$} |",
+                label_cell = label_cell,
+                line = line,
+                label_width = label_width,
+                value_width = value_width
+            );
+            if color_enabled {
+                match label.as_str() {
+                    "Deliverable" => println!("{}", row_line.green()),
+                    "Summary" => println!("{}", row_line.bold()),
+                    _ => println!("{row_line}"),
+                }
+            } else {
+                println!("{row_line}");
+            }
+        }
+
+        if index + 1 < items.len() {
+            println!("{separator}");
+        }
+    }
+
+    println!("{top_border}");
+    println!();
 }
 
 #[cfg(test)]
