@@ -1,0 +1,22 @@
+use std::path::Path;
+
+use codex_core::protocol::AgentMessageEvent;
+use codex_core::protocol::EventMsg;
+
+use crate::signals::AggregatedVerifierVerdict;
+use crate::signals::DirectiveResponse;
+use crate::signals::VerifierVerdict;
+
+pub trait ProgressReporter: Send + Sync {
+    fn objective_posted(&self, _objective: &str) {}
+    fn waiting_for_solver(&self) {}
+    fn solver_event(&self, _event: &EventMsg) {}
+    fn solver_agent_message(&self, _message: &AgentMessageEvent) {}
+    fn direction_request(&self, _prompt: &str) {}
+    fn director_response(&self, _directive: &DirectiveResponse) {}
+    fn verification_request(&self, _claim_path: &str, _notes: Option<&str>) {}
+    fn verifier_verdict(&self, _role: &str, _verdict: &VerifierVerdict) {}
+    fn verification_summary(&self, _summary: &AggregatedVerifierVerdict) {}
+    fn final_delivery(&self, _deliverable_path: &Path, _summary: Option<&str>) {}
+    fn run_interrupted(&self) {}
+}

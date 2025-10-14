@@ -1,0 +1,108 @@
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::Parser;
+use clap::Subcommand;
+use codex_common::CliConfigOverrides;
+
+use super::commands;
+
+#[derive(Debug, Parser)]
+pub struct InftyCli {
+    #[clap(flatten)]
+    pub config_overrides: CliConfigOverrides,
+
+    /// Override the default runs root (`~/.codex/infty`).
+    #[arg(long = "runs-root", value_name = "DIR")]
+    pub runs_root: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: InftyCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum InftyCommand {
+    /// Create a new run store and spawn solver/director sessions.
+    Create(CreateArgs),
+
+    /// List stored runs.
+    List(ListArgs),
+
+    /// Show metadata for a stored run.
+    Show(ShowArgs),
+
+    /// Send a message to a role within a run and print the first reply.
+    Drive(DriveArgs),
+}
+
+#[derive(Debug, Parser)]
+pub(crate) struct CreateArgs {
+    /// Explicit run id. If omitted, a timestamp-based id is generated.
+    #[arg(long = "run-id", value_name = "RUN_ID")]
+    pub run_id: Option<String>,
+
+    /// Optional objective to send to the solver immediately after creation.
+    #[arg(long)]
+    pub objective: Option<String>,
+
+    /// Timeout in seconds when waiting for the solver reply to --objective.
+    #[arg(long = "timeout-secs", default_value_t = super::commands::DEFAULT_TIMEOUT_SECS)]
+    pub timeout_secs: u64,
+}
+
+#[derive(Debug, Parser)]
+pub(crate) struct ListArgs {
+    /// Emit JSON describing the stored runs.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub(crate) struct ShowArgs {
+    /// Run id to display.
+    #[arg(value_name = "RUN_ID")]
+    pub run_id: String,
+
+    /// Emit JSON metadata instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub(crate) struct DriveArgs {
+    /// Run id to resume.
+    pub run_id: String,
+
+    /// Role to address (e.g. solver, director).
+    pub role: String,
+
+    /// Message to send to the role.
+    pub message: String,
+
+    /// Timeout in seconds to await the first assistant message.
+    #[arg(long = "timeout-secs", default_value_t = super::commands::DEFAULT_TIMEOUT_SECS)]
+    pub timeout_secs: u64,
+}
+
+impl InftyCli {
+    pub async fn run(self) -> Result<()> {
+        let InftyCli {
+            config_overrides,
+            runs_root,
+            command,
+        } = self;
+
+        match command {
+            InftyCommand::Create(args) => {
+                commands::run_create(config_overrides, runs_root, args).await?;
+            }
+            InftyCommand::List(args) => commands::run_list(runs_root, args)?,
+            InftyCommand::Show(args) => commands::run_show(runs_root, args)?,
+            InftyCommand::Drive(args) => {
+                commands::run_drive(config_overrides, runs_root, args).await?;
+            }
+        }
+
+        Ok(())
+    }
+}
