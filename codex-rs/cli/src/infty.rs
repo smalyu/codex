@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -18,12 +19,19 @@ use codex_core::auth::read_codex_api_key_from_env;
 use codex_core::auth::read_openai_api_key_from_env;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
+use codex_core::protocol::AgentMessageEvent;
+use codex_core::protocol::EventMsg;
+use codex_infty::AggregatedVerifierVerdict;
+use codex_infty::DirectiveResponse;
 use codex_infty::InftyOrchestrator;
+use codex_infty::ProgressReporter;
 use codex_infty::ResumeParams;
 use codex_infty::RoleConfig;
 use codex_infty::RunExecutionOptions;
 use codex_infty::RunParams;
 use codex_infty::RunStore;
+use codex_infty::VerifierDecision;
+use codex_infty::VerifierVerdict;
 use serde::Serialize;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
@@ -113,6 +121,119 @@ struct RunSummary {
     roles: Vec<String>,
 }
 
+#[derive(Default)]
+struct TerminalProgressReporter;
+
+impl TerminalProgressReporter {
+    fn decision_label(decision: VerifierDecision) -> &'static str {
+        match decision {
+            VerifierDecision::Pass => "pass",
+            VerifierDecision::Fail => "fail",
+        }
+    }
+}
+
+impl ProgressReporter for TerminalProgressReporter {
+    fn objective_posted(&self, objective: &str) {
+        println!("→ objective sent to solver: {objective}");
+    }
+
+    fn waiting_for_solver(&self) {
+        println!("Waiting for solver response...");
+    }
+
+    fn solver_event(&self, event: &EventMsg) {
+        match serde_json::to_string_pretty(event) {
+            Ok(json) => {
+                println!("[solver:event]\n{json}");
+            }
+            Err(err) => {
+                println!("[solver:event] (failed to serialize: {err}) {event:?}");
+            }
+        }
+    }
+
+    fn solver_agent_message(&self, agent_msg: &AgentMessageEvent) {
+        println!("[solver] {}", agent_msg.message);
+    }
+
+    fn direction_request(&self, prompt: &str) {
+        println!("→ solver requested direction: {prompt}");
+    }
+
+    fn director_response(&self, directive: &DirectiveResponse) {
+        match directive.rationale.as_deref() {
+            Some(rationale) if !rationale.is_empty() => {
+                println!(
+                    "[director] directive: {} (rationale: {})",
+                    directive.directive, rationale
+                );
+            }
+            _ => {
+                println!("[director] directive: {}", directive.directive);
+            }
+        }
+    }
+
+    fn verification_request(&self, claim_path: &str, notes: Option<&str>) {
+        println!("→ solver requested verification for {claim_path}");
+        if let Some(notes) = notes {
+            if !notes.is_empty() {
+                println!("  notes: {notes}");
+            }
+        }
+    }
+
+    fn verifier_verdict(&self, role: &str, verdict: &VerifierVerdict) {
+        println!(
+            "[{role}] verdict: {}",
+            Self::decision_label(verdict.verdict)
+        );
+        if !verdict.reasons.is_empty() {
+            println!("  reasons: {}", verdict.reasons.join("; "));
+        }
+        if !verdict.suggestions.is_empty() {
+            println!("  suggestions: {}", verdict.suggestions.join("; "));
+        }
+    }
+
+    fn verification_summary(&self, summary: &AggregatedVerifierVerdict) {
+        println!(
+            "Verification summary: {}",
+            Self::decision_label(summary.overall)
+        );
+        for report in &summary.verdicts {
+            println!(
+                "  {} → {}",
+                report.role,
+                Self::decision_label(report.verdict)
+            );
+            if !report.reasons.is_empty() {
+                println!("    reasons: {}", report.reasons.join("; "));
+            }
+            if !report.suggestions.is_empty() {
+                println!("    suggestions: {}", report.suggestions.join("; "));
+            }
+        }
+    }
+
+    fn final_delivery(&self, deliverable_path: &Path, summary: Option<&str>) {
+        println!(
+            "✓ solver reported final delivery at {}",
+            deliverable_path.display()
+        );
+        if let Some(summary) = summary {
+            if !summary.is_empty() {
+                println!("  summary: {summary}");
+            }
+        }
+    }
+
+    fn run_interrupted(&self) {
+        println!("Run interrupted by Ctrl+C. Shutting down sessions…");
+    }
+}
+
 impl InftyCli {
     pub async fn run(self) -> Result<()> {
         let InftyCli {
@@ -158,7 +279,8 @@ async fn run_create(
         bail!("run {run_id} already exists at {}", run_path.display());
     }
 
-    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root.clone());
+    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root.clone())
+        .with_progress(Arc::new(TerminalProgressReporter::default()));
     let run_params = RunParams {
         run_id: run_id.clone(),
         run_root: Some(run_path.clone()),
@@ -174,6 +296,11 @@ async fn run_create(
         options.director_timeout = timeout;
         options.verifier_timeout = timeout;
 
+        println!("Starting run {run_id} at {}", run_path.display());
+        println!(
+            "Objective: {}",
+            options.objective.as_deref().unwrap_or_default()
+        );
         let outcome = orchestrator
             .execute_new_run(run_params, options)
             .await
@@ -291,7 +418,8 @@ async fn run_drive(
         .map(|role| RoleConfig::new(role.role.clone(), config.clone()))
         .collect();
 
-    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root);
+    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root)
+        .with_progress(Arc::new(TerminalProgressReporter::default()));
     let sessions = orchestrator
         .resume_run(ResumeParams {
             run_path: run_path.clone(),
