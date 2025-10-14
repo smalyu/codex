@@ -130,7 +130,9 @@ async fn orchestrator_resumes_existing_run() -> anyhow::Result<()> {
             responses::ev_completed("solver-resp-2"),
         ]),
     ];
-    responses::mount_sse_sequence(&server, bodies).await;
+    for body in bodies {
+        responses::mount_sse_once(&server, body).await;
+    }
 
     let runs_root = TempDir::new()?;
     let orchestrator =
@@ -150,9 +152,18 @@ async fn orchestrator_resumes_existing_run() -> anyhow::Result<()> {
         })
         .await?;
 
+    sessions.solver.conversation.submit(Op::Shutdown).await.ok();
+    sessions
+        .director
+        .conversation
+        .submit(Op::Shutdown)
+        .await
+        .ok();
+    drop(sessions);
+
     let resume = orchestrator
         .resume_run(ResumeParams {
-            run_path: sessions.store.path().to_path_buf(),
+            run_path: runs_root.path().join("runs").join(&run_id),
             solver: RoleConfig::new("solver", solver_config),
             director: RoleConfig::new("director", director_config),
             verifiers: Vec::new(),
@@ -181,7 +192,7 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
             responses::ev_response_created("solver-resp-1"),
             responses::ev_assistant_message(
                 "solver-msg-1",
-                r#"{"type":"direction_request","prompt":"Need directive"}"#,
+                r#"{"type":"direction_request","prompt":"Need directive","claim_path":null,"notes":null,"deliverable_path":null,"summary":null}"#,
             ),
             responses::ev_completed("solver-resp-1"),
         ]),
@@ -197,7 +208,7 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
             responses::ev_response_created("solver-resp-2"),
             responses::ev_assistant_message(
                 "solver-msg-2",
-                r#"{"type":"verification_request","claim_path":"memory/claims/attempt1.json"}"#,
+                r#"{"type":"verification_request","prompt":null,"claim_path":"memory/claims/attempt1.json","notes":null,"deliverable_path":null,"summary":null}"#,
             ),
             responses::ev_completed("solver-resp-2"),
         ]),
@@ -213,7 +224,7 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
             responses::ev_response_created("solver-resp-3"),
             responses::ev_assistant_message(
                 "solver-msg-3",
-                r#"{"type":"verification_request","claim_path":"memory/claims/attempt2.json"}"#,
+                r#"{"type":"verification_request","prompt":null,"claim_path":"memory/claims/attempt2.json","notes":null,"deliverable_path":null,"summary":null}"#,
             ),
             responses::ev_completed("solver-resp-3"),
         ]),
@@ -229,12 +240,14 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
             responses::ev_response_created("solver-resp-4"),
             responses::ev_assistant_message(
                 "solver-msg-4",
-                r#"{"type":"final_delivery","deliverable_path":"deliverable","summary":"done"}"#,
+                r#"{"type":"final_delivery","prompt":null,"claim_path":null,"notes":null,"deliverable_path":"deliverable","summary":"done"}"#,
             ),
             responses::ev_completed("solver-resp-4"),
         ]),
     ];
-    responses::mount_sse_sequence(&server, bodies).await;
+    for body in bodies {
+        responses::mount_sse_once(&server, body).await;
+    }
 
     let runs_root = TempDir::new()?;
     let orchestrator =
@@ -267,8 +280,9 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
     assert_eq!(outcome.run_id, run_id);
     assert_eq!(outcome.summary.as_deref(), Some("done"));
     assert!(outcome.raw_message.contains("final_delivery"));
-    assert!(outcome.deliverable_path.starts_with(&run_root));
-    assert_eq!(outcome.deliverable_path, run_root.join("deliverable"));
+    let canonical_run_root = std::fs::canonicalize(&run_root)?;
+    let canonical_deliverable = std::fs::canonicalize(&outcome.deliverable_path)?;
+    assert!(canonical_deliverable.starts_with(&canonical_run_root));
 
     Ok(())
 }
@@ -292,7 +306,9 @@ async fn spawn_run_cleans_up_on_failure() -> anyhow::Result<()> {
             responses::ev_completed("dup-resp"),
         ]),
     ];
-    responses::mount_sse_sequence(&server, bodies).await;
+    for body in bodies {
+        responses::mount_sse_once(&server, body).await;
+    }
 
     let runs_root = TempDir::new()?;
     let orchestrator =
@@ -325,7 +341,9 @@ async fn spawn_run_cleans_up_on_failure() -> anyhow::Result<()> {
             responses::ev_completed("director-resp-2"),
         ]),
     ];
-    responses::mount_sse_sequence(&server, bodies).await;
+    for body in bodies {
+        responses::mount_sse_once(&server, body).await;
+    }
 
     let sessions = orchestrator
         .spawn_run(RunParams {

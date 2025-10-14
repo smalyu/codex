@@ -145,10 +145,10 @@ impl ProgressReporter for TerminalProgressReporter {
     fn solver_event(&self, event: &EventMsg) {
         match serde_json::to_string_pretty(event) {
             Ok(json) => {
-                println!("[solver:event]\n{json}");
+                tracing::trace!("[solver:event]\n{json}");
             }
             Err(err) => {
-                println!("[solver:event] (failed to serialize: {err}) {event:?}");
+                tracing::warn!("[solver:event] (failed to serialize: {err}) {event:?}");
             }
         }
     }

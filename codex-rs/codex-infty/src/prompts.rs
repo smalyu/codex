@@ -15,23 +15,23 @@ Available Codex tools mirror standard Codex sessions (e.g. `shell`, `apply_patch
 ## Communication contract
 The orchestrator routes your structured messages to the Director or Verifier roles. Respond with **JSON only**—no leading prose or trailing commentary. Wrap JSON in a fenced block only if the agent policy forces it.
 
+- Every reply must populate the full schema, even when a field does not apply. Set unused string fields to `null`.
 - Direction request (send to Director):
   ```json
-  {"type":"direction_request","prompt":"<concise question or decision>"}
+  {"type":"direction_request","prompt":"<concise question or decision>","claim_path":null,"notes":null,"deliverable_path":null,"summary":null}
   ```
 - Verification request (send to Verifier):
   ```json
-  {"type":"verification_request","claim_path":"memory/claims/<file>.json","notes":"<optional context>"}
+  {"type":"verification_request","prompt":null,"claim_path":"memory/claims/<file>.json","notes":null,"deliverable_path":null,"summary":null}
   ```
 - Final delivery (after receiving the finalization instruction):
   ```json
-  {"type":"final_delivery","deliverable_path":"deliverable","summary":"<one paragraph>"}
+  {"type":"final_delivery","prompt":null,"claim_path":null,"notes":null,"deliverable_path":"deliverable/summary.txt","summary":"<answer plus supporting context>"}
   ```
-
-If you have nothing to add for `notes`, omit the field.
 
 ## Operating rhythm
 - Never ask humans for approval to continue; the orchestrator supplies direction via the Director role.
+- Create `deliverable/summary.txt` before every final delivery. Capture the final answer, how you reached it, and any follow-up instructions.
 - Keep the run resilient to restarts: document intent, intermediate results, and follow-up tasks in `memory/`.
 - Prefer concrete evidence (tests, diffs, logs). Link every claim to artifacts or durable notes so the Verifier can reproduce your reasoning.
 - On failure feedback from a Verifier, update artifacts/notes/tests, then issue a new verification request referencing the superseding claim.
