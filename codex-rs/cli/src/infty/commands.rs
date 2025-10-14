@@ -106,14 +106,14 @@ pub(crate) async fn run_create(
         } else {
             println!("{location_line}");
         }
-        if let Some(objective_text) = options.objective.as_deref() {
-            if !objective_text.trim().is_empty() {
-                let objective_line = format!("  objective: {objective_text}");
-                if color_enabled {
-                    println!("{}", objective_line.dimmed());
-                } else {
-                    println!("{objective_line}");
-                }
+        if let Some(objective_text) = options.objective.as_deref()
+            && !objective_text.trim().is_empty()
+        {
+            let objective_line = format!("  objective: {objective_text}");
+            if color_enabled {
+                println!("{}", objective_line.dimmed());
+            } else {
+                println!("{objective_line}");
             }
         }
         println!();
@@ -315,7 +315,7 @@ fn resolve_runs_root(override_path: Option<PathBuf>) -> Result<PathBuf> {
     if let Some(path) = override_path {
         return Ok(path);
     }
-    Ok(codex_infty::default_runs_root()?)
+    codex_infty::default_runs_root()
 }
 
 fn collect_run_summaries(root: &Path) -> Result<Vec<RunSummary>> {

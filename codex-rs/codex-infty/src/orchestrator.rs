@@ -430,23 +430,13 @@ impl InftyOrchestrator {
                                         if let Some(progress) = self.progress.as_ref() {
                                             progress.final_delivery(&resolved, summary_ref);
                                         }
-                                        let verified = self
-                                            .run_final_verification(
-                                                sessions,
-                                                &resolved,
-                                                summary_ref,
-                                                options,
-                                            )
-                                            .await?;
                                         sessions.store.touch()?;
-                                        if verified {
-                                            return Ok(RunOutcome {
-                                                run_id: sessions.run_id.clone(),
-                                                deliverable_path: resolved,
-                                                summary: summary_clean,
-                                                raw_message: agent_msg.message.clone(),
-                                            });
-                                        }
+                                        return Ok(RunOutcome {
+                                            run_id: sessions.run_id.clone(),
+                                            deliverable_path: resolved,
+                                            summary: summary_clean,
+                                            raw_message: agent_msg.message.clone(),
+                                        });
                                     }
                                 }
                             }

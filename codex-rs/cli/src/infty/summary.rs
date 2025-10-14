@@ -19,10 +19,10 @@ pub(crate) fn print_run_summary_box(
     let mut items = Vec::new();
     items.push(("Run ID".to_string(), run_id.to_string()));
     items.push(("Run Directory".to_string(), run_path.display().to_string()));
-    if let Some(objective) = objective {
-        if !objective.trim().is_empty() {
-            items.push(("Objective".to_string(), objective.trim().to_string()));
-        }
+    if let Some(objective) = objective
+        && !objective.trim().is_empty()
+    {
+        items.push(("Objective".to_string(), objective.trim().to_string()));
     }
     items.push((
         "Deliverable".to_string(),
@@ -92,7 +92,7 @@ pub(crate) fn print_run_summary_box(
             if wrapped.is_empty() {
                 rows.push(String::new());
             } else {
-                rows.extend(wrapped.into_iter().map(|line| line.into_owned()));
+                rows.extend(wrapped.into_iter().map(std::borrow::Cow::into_owned));
             }
         }
         if rows.is_empty() {
@@ -101,13 +101,7 @@ pub(crate) fn print_run_summary_box(
 
         for (line_idx, line) in rows.iter().enumerate() {
             let label_cell = if line_idx == 0 { label.as_str() } else { "" };
-            let row_line = format!(
-                "| {label_cell:<label_width$} | {line:<value_width$} |",
-                label_cell = label_cell,
-                line = line,
-                label_width = label_width,
-                value_width = value_width
-            );
+            let row_line = format!("| {label_cell:<label_width$} | {line:<value_width$} |");
             if color_enabled {
                 match label.as_str() {
                     "Deliverable" => println!("{}", row_line.green()),

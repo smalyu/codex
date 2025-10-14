@@ -118,14 +118,14 @@ impl ProgressReporter for TerminalProgressReporter {
         } else {
             println!("{line}");
         }
-        if let Some(notes) = notes {
-            if !notes.is_empty() {
-                let notes_line = format!("  notes: {notes}");
-                if self.color_enabled {
-                    println!("{}", notes_line.dimmed());
-                } else {
-                    println!("{notes_line}");
-                }
+        if let Some(notes) = notes
+            && !notes.is_empty()
+        {
+            let notes_line = format!("  notes: {notes}");
+            if self.color_enabled {
+                println!("{}", notes_line.dimmed());
+            } else {
+                println!("{notes_line}");
             }
         }
     }
@@ -203,14 +203,14 @@ impl ProgressReporter for TerminalProgressReporter {
         } else {
             println!("{line}");
         }
-        if let Some(summary) = summary {
-            if !summary.is_empty() {
-                let hint = "  (final summary will be shown below)";
-                if self.color_enabled {
-                    println!("{}", hint.dimmed());
-                } else {
-                    println!("{hint}");
-                }
+        if let Some(summary) = summary
+            && !summary.is_empty()
+        {
+            let hint = "  (final summary will be shown below)";
+            if self.color_enabled {
+                println!("{}", hint.dimmed());
+            } else {
+                println!("{hint}");
             }
         }
     }
