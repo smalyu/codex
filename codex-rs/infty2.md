@@ -23,7 +23,7 @@ Key types from `codex-core::cross_session` that we lean on:
 - `SessionEventStream` - event stream for activity/idle timeouts
 
 In `codex-infty`, we expose tiny helpers that wrap these primitives in a role-centric API.
-
+[director.md](codex-infty/src/prompts/director.md)
 ---
 
 ## Minimal API (Facade)

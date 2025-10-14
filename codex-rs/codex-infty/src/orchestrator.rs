@@ -431,6 +431,18 @@ impl InftyOrchestrator {
                                         if let Some(progress) = self.progress.as_ref() {
                                             progress.final_delivery(&resolved, summary_ref);
                                         }
+                                        let verified = self
+                                            .run_final_verification(
+                                                sessions,
+                                                &resolved,
+                                                summary_ref,
+                                                options,
+                                            )
+                                            .await?;
+                                        if !verified {
+                                            pending_solver_turn_completion = true;
+                                            continue;
+                                        }
                                         sessions.store.touch()?;
                                         return Ok(RunOutcome {
                                             run_id: sessions.run_id.clone(),
