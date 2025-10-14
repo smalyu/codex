@@ -78,11 +78,18 @@ pub(crate) async fn run_create(
         .iter()
         .map(|role| RoleConfig::new(role.to_string(), config.clone()))
         .collect();
+    let mut director_config = config.clone();
+    if let Some(model) = args.director_model.as_deref() {
+        director_config.model = model.to_string();
+    }
+    if let Some(effort) = args.director_effort {
+        director_config.model_reasoning_effort = Some(effort);
+    }
     let run_params = RunParams {
         run_id: run_id.clone(),
         run_root: Some(run_path.clone()),
         solver: RoleConfig::new("solver", config.clone()),
-        director: RoleConfig::new("director", config.clone()),
+        director: RoleConfig::new("director", director_config),
         verifiers,
     };
 

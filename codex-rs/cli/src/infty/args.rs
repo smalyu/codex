@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
 use codex_common::CliConfigOverrides;
+use codex_protocol::config_types::ReasoningEffort;
 
 use super::commands;
 
@@ -48,6 +49,18 @@ pub(crate) struct CreateArgs {
     /// Timeout in seconds when waiting for the solver reply to --objective.
     #[arg(long = "timeout-secs", default_value_t = super::commands::DEFAULT_TIMEOUT_SECS)]
     pub timeout_secs: u64,
+
+    /// Override only the Director's model (solver and verifiers keep defaults).
+    #[arg(long = "director-model", value_name = "MODEL")]
+    pub director_model: Option<String>,
+
+    /// Override only the Director's reasoning effort (minimal|low|medium|high).
+    #[arg(
+        long = "director-effort",
+        value_name = "LEVEL",
+        value_parser = parse_reasoning_effort
+    )]
+    pub director_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Debug, Parser)]
@@ -104,5 +117,17 @@ impl InftyCli {
         }
 
         Ok(())
+    }
+}
+
+fn parse_reasoning_effort(s: &str) -> Result<ReasoningEffort, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "minimal" => Ok(ReasoningEffort::Minimal),
+        "low" => Ok(ReasoningEffort::Low),
+        "medium" => Ok(ReasoningEffort::Medium),
+        "high" => Ok(ReasoningEffort::High),
+        _ => Err(format!(
+            "invalid reasoning effort: {s}. Expected one of: minimal|low|medium|high"
+        )),
     }
 }
