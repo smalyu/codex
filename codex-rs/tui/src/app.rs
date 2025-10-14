@@ -302,8 +302,8 @@ impl App {
             AppEvent::ExitRequest => {
                 return Ok(false);
             }
+            #[cfg(not(debug_assertions))]
             AppEvent::RunUpdateAndExit(action) => {
-                // Record the requested update action and exit.
                 self.pending_update_action = Some(action);
                 return Ok(false);
             }
