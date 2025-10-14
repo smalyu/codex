@@ -53,8 +53,6 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
-use ratatui::style::Stylize as _;
-use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
@@ -78,12 +76,10 @@ use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
 use crate::get_git_diff::get_git_diff;
-use crate::get_update_action;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
-use crate::history_cell::padded_emoji;
 use crate::markdown::append_markdown;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
@@ -97,9 +93,6 @@ use self::agent::spawn_agent_from_existing;
 mod session_header;
 use self::session_header::SessionHeader;
 use crate::streaming::controller::StreamController;
-use std::path::Path;
-
-use crate::UpdateAction;
 use chrono::Local;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
@@ -117,6 +110,7 @@ use codex_git_tooling::GitToolingError;
 use codex_git_tooling::create_ghost_commit;
 use codex_git_tooling::restore_ghost_commit;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use std::path::Path;
 use strum::IntoEnumIterator;
 
 const MAX_TRACKED_GHOST_COMMITS: usize = 20;
@@ -1837,13 +1831,16 @@ impl ChatWidget {
     /// Open a simple modal asking to update Codex when an update action is available.
     #[cfg(not(debug_assertions))]
     pub(crate) fn handle_update_popup(&mut self) {
-        if let Some(update_action) = get_update_action() {
+        if let Some(update_action) = crate::get_update_action() {
             self.show_update_popup(update_action);
         }
     }
 
     #[cfg(not(debug_assertions))]
-    pub(crate) fn show_update_popup(&mut self, update_action: UpdateAction) {
+    pub(crate) fn show_update_popup(&mut self, update_action: crate::UpdateAction) {
+        use ratatui::style::Stylize as _;
+        use ratatui::text::Line;
+
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: None,
             footer_hint: Some(standard_popup_hint_line()),
@@ -1864,7 +1861,7 @@ impl ChatWidget {
             ],
             header: Box::new(ratatui::widgets::Paragraph::new(vec![
                 Line::from(vec![
-                    padded_emoji("✨").bold().cyan(),
+                    crate::history_cell::padded_emoji("✨").bold().cyan(),
                     "New version available! Would you like to update?".bold(),
                 ]),
                 Line::from(""),
