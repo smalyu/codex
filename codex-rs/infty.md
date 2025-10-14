@@ -12,7 +12,7 @@ Status: Proposed • Scope: New crates using `codex-core` • Compatibility: Non
 - No systematic review → we must verify before returning.
 
 ## 2) Approach (High‑Level)
-Run three coordinated roles as independent `codex-core` sessions. Reuse existing tools (shell, apply_patch, read_file, list_dir, grep_files) for persistence and retrieval. Add one clean, first‑class cross‑session facility in core for direction/verification — orchestrator‑driven, no model‑visible tool.
+Run three coordinated roles as independent `codex-core` sessions. Reuse existing tools (shell, apply_patch, read_file, list_dir, grep_files) for persistence and retrieval. Add one clean, first-class cross-session facility in core for direction/verification — orchestrator-driven, no model-visible tool. The CLI currently spawns a solver, a director, and three verifiers (`verifier-alpha`, `verifier-beta`, `verifier-gamma`) by default.
 
 - Solver (Model A): executes plan; writes all results to memory/artifacts; never asks humans to continue.
 - Director (Model B): answers Solver’s direction questions and re‑plans when needed.

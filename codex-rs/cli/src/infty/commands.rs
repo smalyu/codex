@@ -35,6 +35,8 @@ use super::args::ShowArgs;
 use super::progress::TerminalProgressReporter;
 use super::summary::print_run_summary_box;
 
+const DEFAULT_VERIFIER_ROLES: [&str; 3] = ["verifier-alpha", "verifier-beta", "verifier-gamma"];
+
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Debug, Serialize)]
@@ -69,15 +71,19 @@ pub(crate) async fn run_create(
         bail!("run {run_id} already exists at {}", run_path.display());
     }
 
-    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root.clone()).with_progress(
+    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root).with_progress(
         Arc::new(TerminalProgressReporter::with_color(color_enabled)),
     );
+    let verifiers: Vec<RoleConfig> = DEFAULT_VERIFIER_ROLES
+        .iter()
+        .map(|role| RoleConfig::new(role.to_string(), config.clone()))
+        .collect();
     let run_params = RunParams {
         run_id: run_id.clone(),
         run_root: Some(run_path.clone()),
         solver: RoleConfig::new("solver", config.clone()),
         director: RoleConfig::new("director", config.clone()),
-        verifiers: Vec::new(),
+        verifiers,
     };
 
     if let Some(objective) = args.objective {
@@ -366,6 +372,14 @@ fn collect_run_summaries(root: &Path) -> Result<Vec<RunSummary>> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn default_verifier_roles_are_stable() {
+        assert_eq!(
+            DEFAULT_VERIFIER_ROLES,
+            ["verifier-alpha", "verifier-beta", "verifier-gamma"]
+        );
+    }
 
     #[test]
     fn validates_run_ids() {
