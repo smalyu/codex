@@ -301,7 +301,13 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 config_overrides,
             );
             let exit_info = codex_tui::run_main(interactive, codex_linux_sandbox_exe).await?;
+            let action = exit_info.update_action;
             print_exit_messages(exit_info);
+            if let Some(action) = action {
+                run_update_action(action)?;
+                // After update completes, exit immediately.
+                return Ok(());
+            }
         }
         Some(Subcommand::Login(mut login_cli)) => {
             prepend_config_flags(
