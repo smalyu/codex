@@ -1717,9 +1717,9 @@ pub(crate) async fn run_task(
             .map(ResponseItem::from)
             .collect::<Vec<ResponseItem>>();
 
-        let prompt_input = sess.prepare_prompt_input(pending_input, task_kind).await;
+        let turn_input = sess.prepare_prompt_input(pending_input, task_kind).await;
 
-        let turn_input_messages: Vec<String> = prompt_input
+        let turn_input_messages: Vec<String> = turn_input
             .iter()
             .filter_map(|item| match item {
                 ResponseItem::Message { content, .. } => Some(content),
@@ -1737,7 +1737,7 @@ pub(crate) async fn run_task(
             Arc::clone(&turn_context),
             Arc::clone(&turn_diff_tracker),
             sub_id.clone(),
-            prompt_input,
+            turn_input,
             task_kind,
         )
         .await
