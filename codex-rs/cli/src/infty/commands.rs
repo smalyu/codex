@@ -71,9 +71,9 @@ pub(crate) async fn run_create(
         bail!("run {run_id} already exists at {}", run_path.display());
     }
 
-    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root).with_progress(
-        Arc::new(TerminalProgressReporter::with_color(color_enabled)),
-    );
+    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root).with_progress(Arc::new(
+        TerminalProgressReporter::with_color(color_enabled),
+    ));
     let verifiers: Vec<RoleConfig> = DEFAULT_VERIFIER_ROLES
         .iter()
         .map(|role| RoleConfig::new(role.to_string(), config.clone()))

@@ -3,7 +3,6 @@ pub(crate) const DIRECTOR_PROMPT: &str = include_str!("director.md");
 pub(crate) const SOLVER_PROMPT: &str = include_str!("solver.md");
 pub(crate) const VERIFIER_PROMPT: &str = include_str!("verifier.md");
 
-
 pub fn ensure_instructions(role: &str, config: &mut Config) {
     if config.base_instructions.is_none()
         && let Some(text) = default_instructions_for_role(role)
