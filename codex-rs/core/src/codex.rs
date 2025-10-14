@@ -57,6 +57,7 @@ use crate::exec_command::WriteStdinParams;
 use crate::executor::Executor;
 use crate::executor::ExecutorConfig;
 use crate::executor::normalize_exec_result;
+use crate::mcp::auth::compute_auth_statuses;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::model_family::find_family_for_model;
 use crate::openai_model_info::get_model_info;
@@ -98,6 +99,7 @@ use crate::rollout::RolloutRecorderParams;
 use crate::shell;
 use crate::state::ActiveTurn;
 use crate::state::SessionServices;
+use crate::state::TaskKind;
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
 use crate::tasks::ReviewTask;
@@ -363,7 +365,9 @@ impl Session {
 
         let mcp_fut = McpConnectionManager::new(
             config.mcp_servers.clone(),
-            config.use_experimental_use_rmcp_client,
+            config
+                .features
+                .enabled(crate::features::Feature::RmcpClient),
             config.mcp_oauth_credentials_store_mode,
         );
         let default_shell_fut = shell::default_user_shell();
@@ -445,12 +449,7 @@ impl Session {
             client,
             tools_config: ToolsConfig::new(&ToolsConfigParams {
                 model_family: &config.model_family,
-                include_plan_tool: config.include_plan_tool,
-                include_apply_patch_tool: config.include_apply_patch_tool,
-                include_web_search_request: config.tools_web_search_request,
-                use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
-                include_view_image_tool: config.include_view_image_tool,
-                experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+                features: &config.features,
             }),
             user_instructions,
             base_instructions,
@@ -1194,12 +1193,7 @@ async fn submission_loop(
 
                 let tools_config = ToolsConfig::new(&ToolsConfigParams {
                     model_family: &effective_family,
-                    include_plan_tool: config.include_plan_tool,
-                    include_apply_patch_tool: config.include_apply_patch_tool,
-                    include_web_search_request: config.tools_web_search_request,
-                    use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
-                    include_view_image_tool: config.include_view_image_tool,
-                    experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+                    features: &config.features,
                 });
 
                 let new_turn_context = TurnContext {
@@ -1296,14 +1290,7 @@ async fn submission_loop(
                         client,
                         tools_config: ToolsConfig::new(&ToolsConfigParams {
                             model_family: &model_family,
-                            include_plan_tool: config.include_plan_tool,
-                            include_apply_patch_tool: config.include_apply_patch_tool,
-                            include_web_search_request: config.tools_web_search_request,
-                            use_streamable_shell_tool: config
-                                .use_experimental_streamable_shell_tool,
-                            include_view_image_tool: config.include_view_image_tool,
-                            experimental_unified_exec_tool: config
-                                .use_experimental_unified_exec_tool,
+                            features: &config.features,
                         }),
                         user_instructions: turn_context.user_instructions.clone(),
                         base_instructions: turn_context.base_instructions.clone(),
@@ -1403,10 +1390,18 @@ async fn submission_loop(
 
                 // This is a cheap lookup from the connection manager's cache.
                 let tools = sess.services.mcp_connection_manager.list_all_tools();
+                let auth_statuses = compute_auth_statuses(
+                    config.mcp_servers.iter(),
+                    config.mcp_oauth_credentials_store_mode,
+                )
+                .await;
                 let event = Event {
                     id: sub_id,
                     msg: EventMsg::McpListToolsResponse(
-                        crate::protocol::McpListToolsResponseEvent { tools },
+                        crate::protocol::McpListToolsResponseEvent {
+                            tools,
+                            auth_statuses,
+                        },
                     ),
                 };
                 sess.send_event(event).await;
@@ -1527,14 +1522,15 @@ async fn spawn_review_thread(
     let model = config.review_model.clone();
     let review_model_family = find_family_for_model(&model)
         .unwrap_or_else(|| parent_turn_context.client.get_model_family());
+    // For reviews, disable plan, web_search, view_image regardless of global settings.
+    let mut review_features = config.features.clone();
+    review_features.disable(crate::features::Feature::PlanTool);
+    review_features.disable(crate::features::Feature::WebSearchRequest);
+    review_features.disable(crate::features::Feature::ViewImageTool);
+    review_features.disable(crate::features::Feature::StreamableShell);
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_family: &review_model_family,
-        include_plan_tool: false,
-        include_apply_patch_tool: config.include_apply_patch_tool,
-        include_web_search_request: false,
-        use_streamable_shell_tool: false,
-        include_view_image_tool: false,
-        experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+        features: &review_features,
     });
 
     let base_instructions = REVIEW_PROMPT.to_string();
@@ -1625,6 +1621,7 @@ pub(crate) async fn run_task(
     turn_context: Arc<TurnContext>,
     sub_id: String,
     input: Vec<InputItem>,
+    task_kind: TaskKind,
 ) -> Option<String> {
     if input.is_empty() {
         return None;
@@ -1708,6 +1705,7 @@ pub(crate) async fn run_task(
             Arc::clone(&turn_diff_tracker),
             sub_id.clone(),
             turn_input,
+            task_kind,
         )
         .await
         {
@@ -1860,6 +1858,7 @@ pub(crate) async fn run_task(
                     );
                     sess.notifier()
                         .notify(&UserNotification::AgentTurnComplete {
+                            thread_id: sess.conversation_id.to_string(),
                             turn_id: sub_id.clone(),
                             input_messages: turn_input_messages,
                             last_assistant_message: last_agent_message.clone(),
@@ -1933,6 +1932,7 @@ async fn run_turn(
     turn_diff_tracker: SharedTurnDiffTracker,
     sub_id: String,
     input: Vec<ResponseItem>,
+    task_kind: TaskKind,
 ) -> CodexResult<TurnRunResult> {
     let mcp_tools = sess.services.mcp_connection_manager.list_all_tools();
     let router = Arc::new(ToolRouter::from_config(
@@ -1962,6 +1962,7 @@ async fn run_turn(
             Arc::clone(&turn_diff_tracker),
             &sub_id,
             &prompt,
+            task_kind,
         )
         .await
         {
@@ -1999,9 +2000,7 @@ async fn run_turn(
                     // at a seemingly frozen screen.
                     sess.notify_stream_error(
                         &sub_id,
-                        format!(
-                            "stream error: {e}; retrying {retries}/{max_retries} in {delay:?}…"
-                        ),
+                        format!("Re-connecting... {retries}/{max_retries}"),
                     )
                     .await;
 
@@ -2037,6 +2036,7 @@ async fn try_run_turn(
     turn_diff_tracker: SharedTurnDiffTracker,
     sub_id: &str,
     prompt: &Prompt,
+    task_kind: TaskKind,
 ) -> CodexResult<TurnRunResult> {
     // call_ids that are part of this response.
     let completed_call_ids = prompt
@@ -2102,7 +2102,11 @@ async fn try_run_turn(
         summary: turn_context.client.get_reasoning_summary(),
     });
     sess.persist_rollout_items(&[rollout_item]).await;
-    let mut stream = turn_context.client.clone().stream(&prompt).await?;
+    let mut stream = turn_context
+        .client
+        .clone()
+        .stream_with_task_kind(prompt.as_ref(), task_kind)
+        .await?;
 
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&router),
@@ -2741,12 +2745,7 @@ mod tests {
         );
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &config.model_family,
-            include_plan_tool: config.include_plan_tool,
-            include_apply_patch_tool: config.include_apply_patch_tool,
-            include_web_search_request: config.tools_web_search_request,
-            use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
-            include_view_image_tool: config.include_view_image_tool,
-            experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+            features: &config.features,
         });
         let turn_context = TurnContext {
             client,
@@ -2814,12 +2813,7 @@ mod tests {
         );
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &config.model_family,
-            include_plan_tool: config.include_plan_tool,
-            include_apply_patch_tool: config.include_apply_patch_tool,
-            include_web_search_request: config.tools_web_search_request,
-            use_streamable_shell_tool: config.use_experimental_streamable_shell_tool,
-            include_view_image_tool: config.include_view_image_tool,
-            experimental_unified_exec_tool: config.use_experimental_unified_exec_tool,
+            features: &config.features,
         });
         let turn_context = Arc::new(TurnContext {
             client,

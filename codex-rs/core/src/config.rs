@@ -17,6 +17,10 @@ use crate::config_types::ShellEnvironmentPolicy;
 use crate::config_types::ShellEnvironmentPolicyToml;
 use crate::config_types::Tui;
 use crate::config_types::UriBasedFileOpener;
+use crate::features::Feature;
+use crate::features::FeatureOverrides;
+use crate::features::Features;
+use crate::features::FeaturesToml;
 use crate::git_info::resolve_root_git_project_for_trust;
 use crate::model_family::ModelFamily;
 use crate::model_family::derive_default_model_family;
@@ -218,6 +222,9 @@ pub struct Config {
     /// Include the `view_image` tool that lets the agent attach a local image path to context.
     pub include_view_image_tool: bool,
 
+    /// Centralized feature flags; source of truth for feature gating.
+    pub features: Features,
+
     /// The active profile name used to derive this `Config` (if any).
     pub active_profile: Option<String>,
 
@@ -399,6 +406,10 @@ pub fn write_global_mcp_servers(
                         entry["bearer_token_env_var"] = toml_edit::value(env_var.clone());
                     }
                 }
+            }
+
+            if !config.enabled {
+                entry["enabled"] = toml_edit::value(false);
             }
 
             if let Some(timeout) = config.startup_timeout_sec {
@@ -790,18 +801,14 @@ pub struct ConfigToml {
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
 
-    /// Experimental path to a file whose contents replace the built-in BASE_INSTRUCTIONS.
-    pub experimental_instructions_file: Option<PathBuf>,
-
-    pub experimental_use_exec_command_tool: Option<bool>,
-    pub experimental_use_unified_exec_tool: Option<bool>,
-    pub experimental_use_rmcp_client: Option<bool>,
-    pub experimental_use_freeform_apply_patch: Option<bool>,
-
     pub projects: Option<HashMap<String, ProjectConfig>>,
 
     /// Nested tools section for feature toggles
     pub tools: Option<ToolsToml>,
+
+    /// Centralized feature flags (new). Prefer this over individual toggles.
+    #[serde(default)]
+    pub features: Option<FeaturesToml>,
 
     /// When true, disables burst-paste detection for typed input entirely.
     /// All characters are inserted as they are received, and no buffering
@@ -813,6 +820,13 @@ pub struct ConfigToml {
 
     /// Tracks whether the Windows onboarding screen has been acknowledged.
     pub windows_wsl_setup_acknowledged: Option<bool>,
+
+    /// Legacy, now use features
+    pub experimental_instructions_file: Option<PathBuf>,
+    pub experimental_use_exec_command_tool: Option<bool>,
+    pub experimental_use_unified_exec_tool: Option<bool>,
+    pub experimental_use_rmcp_client: Option<bool>,
+    pub experimental_use_freeform_apply_patch: Option<bool>,
 }
 
 impl From<ConfigToml> for UserSavedConfig {
@@ -976,9 +990,9 @@ impl Config {
             config_profile: config_profile_key,
             codex_linux_sandbox_exe,
             base_instructions,
-            include_plan_tool,
-            include_apply_patch_tool,
-            include_view_image_tool,
+            include_plan_tool: include_plan_tool_override,
+            include_apply_patch_tool: include_apply_patch_tool_override,
+            include_view_image_tool: include_view_image_tool_override,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
         } = overrides;
@@ -1000,6 +1014,15 @@ impl Config {
                 .clone(),
             None => ConfigProfile::default(),
         };
+
+        let feature_overrides = FeatureOverrides {
+            include_plan_tool: include_plan_tool_override,
+            include_apply_patch_tool: include_apply_patch_tool_override,
+            include_view_image_tool: include_view_image_tool_override,
+            web_search_request: override_tools_web_search_request,
+        };
+
+        let features = Features::from_config(&cfg, &config_profile, feature_overrides);
 
         let sandbox_policy = cfg.derive_sandbox_policy(sandbox_mode);
 
@@ -1046,13 +1069,13 @@ impl Config {
 
         let history = cfg.history.unwrap_or_default();
 
-        let tools_web_search_request = override_tools_web_search_request
-            .or(cfg.tools.as_ref().and_then(|t| t.web_search))
-            .unwrap_or(false);
-
-        let include_view_image_tool = include_view_image_tool
-            .or(cfg.tools.as_ref().and_then(|t| t.view_image))
-            .unwrap_or(true);
+        let include_plan_tool_flag = features.enabled(Feature::PlanTool);
+        let include_apply_patch_tool_flag = features.enabled(Feature::ApplyPatchFreeform);
+        let include_view_image_tool_flag = features.enabled(Feature::ViewImageTool);
+        let tools_web_search_request = features.enabled(Feature::WebSearchRequest);
+        let use_experimental_streamable_shell_tool = features.enabled(Feature::StreamableShell);
+        let use_experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
+        let use_experimental_use_rmcp_client = features.enabled(Feature::RmcpClient);
 
         let model = model
             .or(config_profile.model)
@@ -1160,19 +1183,14 @@ impl Config {
                 .chatgpt_base_url
                 .or(cfg.chatgpt_base_url)
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
-            include_plan_tool: include_plan_tool.unwrap_or(false),
-            include_apply_patch_tool: include_apply_patch_tool
-                .or(cfg.experimental_use_freeform_apply_patch)
-                .unwrap_or(false),
+            include_plan_tool: include_plan_tool_flag,
+            include_apply_patch_tool: include_apply_patch_tool_flag,
             tools_web_search_request,
-            use_experimental_streamable_shell_tool: cfg
-                .experimental_use_exec_command_tool
-                .unwrap_or(false),
-            use_experimental_unified_exec_tool: cfg
-                .experimental_use_unified_exec_tool
-                .unwrap_or(false),
-            use_experimental_use_rmcp_client: cfg.experimental_use_rmcp_client.unwrap_or(false),
-            include_view_image_tool,
+            use_experimental_streamable_shell_tool,
+            use_experimental_unified_exec_tool,
+            use_experimental_use_rmcp_client,
+            include_view_image_tool: include_view_image_tool_flag,
+            features,
             active_profile: active_profile_name,
             windows_wsl_setup_acknowledged: cfg.windows_wsl_setup_acknowledged.unwrap_or(false),
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
@@ -1305,6 +1323,7 @@ pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
 mod tests {
     use crate::config_types::HistoryPersistence;
     use crate::config_types::Notifications;
+    use crate::features::Feature;
 
     use super::*;
     use pretty_assertions::assert_eq;
@@ -1433,6 +1452,93 @@ exclude_slash_tmp = true
     }
 
     #[test]
+    fn profile_legacy_toggles_override_base() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                include_plan_tool: Some(true),
+                include_view_image_tool: Some(false),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            profiles,
+            profile: Some("work".to_string()),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert!(config.features.enabled(Feature::PlanTool));
+        assert!(!config.features.enabled(Feature::ViewImageTool));
+        assert!(config.include_plan_tool);
+        assert!(!config.include_view_image_tool);
+
+        Ok(())
+    }
+
+    #[test]
+    fn feature_table_overrides_legacy_flags() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut entries = BTreeMap::new();
+        entries.insert("plan_tool".to_string(), false);
+        entries.insert("apply_patch_freeform".to_string(), false);
+        let cfg = ConfigToml {
+            features: Some(crate::features::FeaturesToml { entries }),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert!(!config.features.enabled(Feature::PlanTool));
+        assert!(!config.features.enabled(Feature::ApplyPatchFreeform));
+        assert!(!config.include_plan_tool);
+        assert!(!config.include_apply_patch_tool);
+
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_toggles_map_to_features() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml {
+            experimental_use_exec_command_tool: Some(true),
+            experimental_use_unified_exec_tool: Some(true),
+            experimental_use_rmcp_client: Some(true),
+            experimental_use_freeform_apply_patch: Some(true),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert!(config.features.enabled(Feature::ApplyPatchFreeform));
+        assert!(config.features.enabled(Feature::StreamableShell));
+        assert!(config.features.enabled(Feature::UnifiedExec));
+        assert!(config.features.enabled(Feature::RmcpClient));
+
+        assert!(config.include_apply_patch_tool);
+        assert!(config.use_experimental_streamable_shell_tool);
+        assert!(config.use_experimental_unified_exec_tool);
+        assert!(config.use_experimental_use_rmcp_client);
+
+        Ok(())
+    }
+
+    #[test]
     fn config_honors_explicit_file_oauth_store_mode() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml {
@@ -1515,6 +1621,7 @@ exclude_slash_tmp = true
                     args: vec!["hello".to_string()],
                     env: None,
                 },
+                enabled: true,
                 startup_timeout_sec: Some(Duration::from_secs(3)),
                 tool_timeout_sec: Some(Duration::from_secs(5)),
             },
@@ -1535,6 +1642,7 @@ exclude_slash_tmp = true
         }
         assert_eq!(docs.startup_timeout_sec, Some(Duration::from_secs(3)));
         assert_eq!(docs.tool_timeout_sec, Some(Duration::from_secs(5)));
+        assert!(docs.enabled);
 
         let empty = BTreeMap::new();
         write_global_mcp_servers(codex_home.path(), &empty)?;
@@ -1639,6 +1747,7 @@ bearer_token = "secret"
                         ("ALPHA_VAR".to_string(), "1".to_string()),
                     ])),
                 },
+                enabled: true,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
             },
@@ -1689,6 +1798,7 @@ ZIG_VAR = "3"
                     url: "https://example.com/mcp".to_string(),
                     bearer_token_env_var: Some("MCP_TOKEN".to_string()),
                 },
+                enabled: true,
                 startup_timeout_sec: Some(Duration::from_secs(2)),
                 tool_timeout_sec: None,
             },
@@ -1728,6 +1838,7 @@ startup_timeout_sec = 2.0
                     url: "https://example.com/mcp".to_string(),
                     bearer_token_env_var: None,
                 },
+                enabled: true,
                 startup_timeout_sec: None,
                 tool_timeout_sec: None,
             },
@@ -1754,6 +1865,40 @@ url = "https://example.com/mcp"
             }
             other => panic!("unexpected transport {other:?}"),
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn write_global_mcp_servers_serializes_disabled_flag() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "docs-server".to_string(),
+                    args: Vec::new(),
+                    env: None,
+                },
+                enabled: false,
+                startup_timeout_sec: None,
+                tool_timeout_sec: None,
+            },
+        )]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert!(
+            serialized.contains("enabled = false"),
+            "serialized config missing disabled flag:\n{serialized}"
+        );
+
+        let loaded = load_global_mcp_servers(codex_home.path()).await?;
+        let docs = loaded.get("docs").expect("docs entry");
+        assert!(!docs.enabled);
 
         Ok(())
     }
@@ -2077,6 +2222,7 @@ model_verbosity = "high"
                 use_experimental_unified_exec_tool: false,
                 use_experimental_use_rmcp_client: false,
                 include_view_image_tool: true,
+                features: Features::with_defaults(),
                 active_profile: Some("o3".to_string()),
                 windows_wsl_setup_acknowledged: false,
                 disable_paste_burst: false,
@@ -2140,6 +2286,7 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
+            features: Features::with_defaults(),
             active_profile: Some("gpt3".to_string()),
             windows_wsl_setup_acknowledged: false,
             disable_paste_burst: false,
@@ -2218,6 +2365,7 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
+            features: Features::with_defaults(),
             active_profile: Some("zdr".to_string()),
             windows_wsl_setup_acknowledged: false,
             disable_paste_burst: false,
@@ -2282,6 +2430,7 @@ model_verbosity = "high"
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
+            features: Features::with_defaults(),
             active_profile: Some("gpt5".to_string()),
             windows_wsl_setup_acknowledged: false,
             disable_paste_burst: false,

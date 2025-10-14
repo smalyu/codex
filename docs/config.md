@@ -370,9 +370,8 @@ API_KEY = "value"
 experimental_use_rmcp_client = true
 [mcp_servers.figma]
 url = "https://mcp.linear.app/mcp"
-# Optional bearer token to be passed into an `Authorization: Bearer <token>` header
-# Use this with caution because the token is in plaintext and can be read by Codex itself.
-bearer_token = "<token>"
+# Optional environment variable containing a bearer token to use for auth
+bearer_token_env_var = "<token>"
 ```
 
 For oauth login, you must enable `experimental_use_rmcp_client = true` and then run `codex mcp login server_name`
@@ -384,6 +383,8 @@ For oauth login, you must enable `experimental_use_rmcp_client = true` and then 
 startup_timeout_sec = 20
 # Optional: override the default 60s per-tool timeout
 tool_timeout_sec = 30
+# Optional: disable a server without removing it
+enabled = false
 ```
 
 ### Experimental RMCP client
@@ -601,6 +602,7 @@ Specify a program that will be executed to get notified about events generated b
 ```json
 {
   "type": "agent-turn-complete",
+  "thread-id": "b5f6c1c2-1111-2222-3333-444455556666",
   "turn-id": "12345",
   "input-messages": ["Rename `foo` to `bar` and update the callsites."],
   "last-assistant-message": "Rename complete and verified `cargo build` succeeds."
@@ -608,6 +610,8 @@ Specify a program that will be executed to get notified about events generated b
 ```
 
 The `"type"` property will always be set. Currently, `"agent-turn-complete"` is the only notification type that is supported.
+
+`"thread-id"` contains a string that identifies the Codex session that produced the notification; you can use it to correlate multiple turns that belong to the same task.
 
 As an example, here is a Python script that parses the JSON and decides whether to show a desktop push notification using [terminal-notifier](https://github.com/julienXX/terminal-notifier) on macOS:
 
@@ -643,6 +647,8 @@ def main() -> int:
             print(f"not sending a push notification for: {notification_type}")
             return 0
 
+    thread_id = notification.get("thread-id", "")
+
     subprocess.check_output(
         [
             "terminal-notifier",
@@ -651,7 +657,7 @@ def main() -> int:
             "-message",
             message,
             "-group",
-            "codex",
+            "codex-" + thread_id,
             "-ignoreDnD",
             "-activate",
             "com.googlecode.iterm2",
@@ -787,9 +793,12 @@ notifications = [ "agent-turn-complete", "approval-requested" ]
 | `disable_response_storage`                       | boolean                                                           | Required for ZDR orgs.                                                                                                     |
 | `notify`                                         | array<string>                                                     | External program for notifications.                                                                                        |
 | `instructions`                                   | string                                                            | Currently ignored; use `experimental_instructions_file` or `AGENTS.md`.                                                    |
-| `mcp_servers.<id>.command`                       | string                                                            | MCP server launcher command.                                                                                               |
-| `mcp_servers.<id>.args`                          | array<string>                                                     | MCP server args.                                                                                                           |
-| `mcp_servers.<id>.env`                           | map<string,string>                                                | MCP server env vars.                                                                                                       |
+| `mcp_servers.<id>.command`                       | string                                                            | MCP server launcher command (stdio servers only).                                                                          |
+| `mcp_servers.<id>.args`                          | array<string>                                                     | MCP server args (stdio servers only).                                                                                      |
+| `mcp_servers.<id>.env`                           | map<string,string>                                                | MCP server env vars (stdio servers only).                                                                                  |
+| `mcp_servers.<id>.url`                           | string                                                            | MCP server url (streamable http servers only).                                                                             |
+| `mcp_servers.<id>.bearer_token_env_var`          | string                                                            | environment variable containing a bearer token to use for auth (streamable http servers only).                             |
+| `mcp_servers.<id>.enabled`                       | boolean                                                           | When false, Codex skips starting the server (default: true).                                                               |
 | `mcp_servers.<id>.startup_timeout_sec`           | number                                                            | Startup timeout in seconds (default: 10). Timeout is applied both for initializing MCP server and initially listing tools. |
 | `mcp_servers.<id>.tool_timeout_sec`              | number                                                            | Per-tool timeout in seconds (default: 60). Accepts fractional values; omit to use the default.                             |
 | `model_providers.<id>.name`                      | string                                                            | Display name.                                                                                                              |

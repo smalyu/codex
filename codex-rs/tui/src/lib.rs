@@ -77,6 +77,8 @@ mod version;
 pub enum UpdateAction {
     /// Update via `npm install -g @openai/codex@latest`.
     NpmGlobalLatest,
+    /// Update via `bun install -g @openai/codex@latest`.
+    BunGlobalLatest,
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
 }
@@ -337,30 +339,29 @@ async fn run_ratatui_app(
             Line::from(""),
         ];
 
-        match get_update_action() {
-            Some(UpdateAction::NpmGlobalLatest) => {
-                let npm_cmd = "npm install -g @openai/codex@latest";
-                content_lines.push(Line::from(vec![
-                    "Run ".into(),
-                    npm_cmd.cyan(),
-                    " to update.".into(),
-                ]));
-            }
-            Some(UpdateAction::BrewUpgrade) => {
-                let brew_cmd = "brew upgrade codex";
-                content_lines.push(Line::from(vec![
-                    "Run ".into(),
-                    brew_cmd.cyan(),
-                    " to update.".into(),
-                ]));
-            }
-            None => {
-                content_lines.push(Line::from(vec![
-                    "See ".into(),
-                    "https://github.com/openai/codex".cyan().underlined(),
-                    " for installation options.".into(),
-                ]));
-            }
+        if let Some(update_action) = get_update_action() {
+            let cmd = match update_action {
+                UpdateAction::NpmGlobalLatest => {
+                    "npm install -g @openai/codex@latest";
+                }
+                UpdateAction::BunGlobalLatest => {
+                    "bun install -g @openai/codex@latest";
+                }
+                UpdateAction::BrewUpgrade => {
+                    "brew upgrade codex";
+                }
+            };
+            content_lines.push(Line::from(vec![
+                "Run ".into(),
+                cmd.cyan(),
+                " to update.".into(),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                "See ".into(),
+                "https://github.com/openai/codex".cyan().underlined(),
+                " for installation options.".into(),
+            ]));
         }
 
         let viewport_width = tui.terminal.viewport_area.width as usize;
@@ -483,8 +484,11 @@ async fn run_ratatui_app(
 pub(crate) fn get_update_action() -> Option<UpdateAction> {
     let exe = std::env::current_exe().unwrap_or_default();
     let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
+    let managed_by_bun = std::env::var_os("CODEX_MANAGED_BY_BUN").is_some();
     if managed_by_npm {
         Some(UpdateAction::NpmGlobalLatest)
+    } else if managed_by_bun {
+        Some(UpdateAction::BunGlobalLatest)
     } else if cfg!(target_os = "macos")
         && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
     {
