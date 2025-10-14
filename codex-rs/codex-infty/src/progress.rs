@@ -11,6 +11,7 @@ pub trait ProgressReporter: Send + Sync {
     fn objective_posted(&self, _objective: &str) {}
     fn waiting_for_solver(&self) {}
     fn solver_event(&self, _event: &EventMsg) {}
+    fn role_event(&self, _role: &str, _event: &EventMsg) {}
     fn solver_agent_message(&self, _message: &AgentMessageEvent) {}
     fn direction_request(&self, _prompt: &str) {}
     fn director_response(&self, _directive: &DirectiveResponse) {}

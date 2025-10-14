@@ -61,10 +61,21 @@ impl ProgressReporter for TerminalProgressReporter {
     fn solver_event(&self, event: &EventMsg) {
         match serde_json::to_string_pretty(event) {
             Ok(json) => {
-                tracing::trace!("[solver:event]\n{json}");
+                tracing::debug!("[solver:event]\n{json}");
             }
             Err(err) => {
                 tracing::warn!("[solver:event] (failed to serialize: {err}) {event:?}");
+            }
+        }
+    }
+
+    fn role_event(&self, role: &str, event: &EventMsg) {
+        match serde_json::to_string_pretty(event) {
+            Ok(json) => {
+                tracing::debug!("[{role}:event]\n{json}");
+            }
+            Err(err) => {
+                tracing::warn!("[{role}:event] (failed to serialize: {err}) {event:?}");
             }
         }
     }
