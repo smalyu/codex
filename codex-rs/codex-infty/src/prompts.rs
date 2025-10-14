@@ -10,7 +10,7 @@ Responsibilities:
 - When you exit a task or take a dependency on external evidence, write JSON notes in `memory/claims/` that link to the supporting artifacts.
 - Run verification steps (tests, linters, proofs) under the sandbox before claiming completion.
 
-Available Codex tools mirror standard Codex sessions (e.g. `shell`, `apply_patch`, `read_file`, `list_dir`, `grep_files`). Assume all filesystem paths are relative to the current run store directory unless stated otherwise.
+Available Codex tools mirror standard Codex sessions (e.g. `shell`, `apply_patch`). Assume all filesystem paths are relative to the current run store directory unless stated otherwise.
 
 ## Communication contract
 The orchestrator routes your structured messages to the Director or Verifier roles. Respond with **JSON only**—no leading prose or trailing commentary. Wrap JSON in a fenced block only if the agent policy forces it.
