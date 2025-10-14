@@ -4,6 +4,7 @@ mod orchestrator;
 mod progress;
 mod prompts;
 mod run_store;
+mod session;
 mod signals;
 mod types;
 
