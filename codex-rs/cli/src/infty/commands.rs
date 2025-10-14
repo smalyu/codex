@@ -104,7 +104,7 @@ pub(crate) async fn run_create(
             if !objective_text.trim().is_empty() {
                 let objective_line = format!("  objective: {objective_text}");
                 if color_enabled {
-                    println!("{}", objective_line.cyan());
+                    println!("{}", objective_line.dimmed());
                 } else {
                     println!("{objective_line}");
                 }
