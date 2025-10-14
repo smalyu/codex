@@ -52,29 +52,6 @@ use tempfile::NamedTempFile;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
 
-struct EnvVarGuard {
-    key: &'static str,
-    original: Option<std::ffi::OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let original = std::env::var_os(key);
-        unsafe { std::env::set_var(key, value) };
-        Self { key, original }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(value) = self.original.take() {
-            unsafe { std::env::set_var(self.key, value) };
-        } else {
-            unsafe { std::env::remove_var(self.key) };
-        }
-    }
-}
-
 fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
     Config::load_from_base_config_with_overrides(
@@ -1630,11 +1607,11 @@ fn status_widget_active_snapshot() {
 }
 
 #[test]
+#[cfg(not(debug_assertions))]
 fn update_popup_snapshot() {
-    let _guard = EnvVarGuard::set("CODEX_MANAGED_BY_NPM", "1");
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
 
-    chat.open_update_popup();
+    chat.show_update_popup(crate::UpdateAction::NpmGlobalLatest);
 
     let height = chat.desired_height(80);
     let mut terminal =
@@ -1647,6 +1624,75 @@ fn update_popup_snapshot() {
     assert_snapshot!(
         "update_popup",
         terminal.backend().vt100().screen().contents()
+    );
+}
+
+#[test]
+#[cfg(not(debug_assertions))]
+fn update_popup_dismiss_option_closes_view() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.show_update_popup(crate::UpdateAction::NpmGlobalLatest);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let mut saw_run_update = false;
+    while let Ok(ev) = rx.try_recv() {
+        if matches!(ev, AppEvent::RunUpdateAndExit(_)) {
+            saw_run_update = true;
+        }
+    }
+    assert!(
+        !saw_run_update,
+        "dismiss option should not trigger an update event"
+    );
+    assert!(
+        chat.is_normal_backtrack_mode(),
+        "bottom pane should return to normal mode after dismissing the popup"
+    );
+}
+
+#[test]
+#[cfg(not(debug_assertions))]
+fn update_popup_confirm_triggers_update_event() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+
+    chat.show_update_popup(crate::UpdateAction::NpmGlobalLatest);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let mut run_update_action = None;
+    while let Ok(ev) = rx.try_recv() {
+        if let AppEvent::RunUpdateAndExit(action) = ev {
+            run_update_action = Some(action);
+            break;
+        }
+    }
+    assert_eq!(
+        run_update_action,
+        Some(crate::UpdateAction::NpmGlobalLatest),
+        "confirming the popup should request the expected update action"
+    );
+    assert!(
+        chat.is_normal_backtrack_mode(),
+        "popup should dismiss after confirming the update"
+    );
+}
+
+#[test]
+#[cfg(not(debug_assertions))]
+fn update_popup_skipped_without_update_action() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual();
+
+    assert!(
+        chat.is_normal_backtrack_mode(),
+        "chat should start in normal backtrack mode"
+    );
+
+    chat.handle_update_popup();
+
+    assert!(
+        chat.is_normal_backtrack_mode(),
+        "popup should not appear when no update action is available"
     );
 }
 

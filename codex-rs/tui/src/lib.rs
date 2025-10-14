@@ -318,8 +318,6 @@ async fn run_ratatui_app(
         use ratatui::text::Line;
 
         let current_version = env!("CARGO_PKG_VERSION");
-        let exe = std::env::current_exe()?;
-        let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
 
         let mut content_lines: Vec<Line<'static>> = vec![
             Line::from(vec![
@@ -339,28 +337,30 @@ async fn run_ratatui_app(
             Line::from(""),
         ];
 
-        if managed_by_npm {
-            let npm_cmd = "npm install -g @openai/codex@latest";
-            content_lines.push(Line::from(vec![
-                "Run ".into(),
-                npm_cmd.cyan(),
-                " to update.".into(),
-            ]));
-        } else if cfg!(target_os = "macos")
-            && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
-        {
-            let brew_cmd = "brew upgrade codex";
-            content_lines.push(Line::from(vec![
-                "Run ".into(),
-                brew_cmd.cyan(),
-                " to update.".into(),
-            ]));
-        } else {
-            content_lines.push(Line::from(vec![
-                "See ".into(),
-                "https://github.com/openai/codex".cyan().underlined(),
-                " for installation options.".into(),
-            ]));
+        match get_update_action() {
+            Some(UpdateAction::NpmGlobalLatest) => {
+                let npm_cmd = "npm install -g @openai/codex@latest";
+                content_lines.push(Line::from(vec![
+                    "Run ".into(),
+                    npm_cmd.cyan(),
+                    " to update.".into(),
+                ]));
+            }
+            Some(UpdateAction::BrewUpgrade) => {
+                let brew_cmd = "brew upgrade codex";
+                content_lines.push(Line::from(vec![
+                    "Run ".into(),
+                    brew_cmd.cyan(),
+                    " to update.".into(),
+                ]));
+            }
+            None => {
+                content_lines.push(Line::from(vec![
+                    "See ".into(),
+                    "https://github.com/openai/codex".cyan().underlined(),
+                    " for installation options.".into(),
+                ]));
+            }
         }
 
         let viewport_width = tui.terminal.viewport_area.width as usize;
@@ -478,6 +478,40 @@ async fn run_ratatui_app(
     session_log::log_session_end();
     // ignore error when collecting usage – report underlying error instead
     app_result
+}
+
+pub(crate) fn get_update_action() -> Option<UpdateAction> {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
+    if managed_by_npm {
+        Some(UpdateAction::NpmGlobalLatest)
+    } else if cfg!(target_os = "macos")
+        && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
+    {
+        Some(UpdateAction::BrewUpgrade)
+    } else {
+        None
+    }
+}
+
+#[test]
+fn test_get_update_action() {
+    let prev = std::env::var_os("CODEX_MANAGED_BY_NPM");
+
+    // First: no npm var -> expect None (we do not run from brew in CI)
+    unsafe { std::env::remove_var("CODEX_MANAGED_BY_NPM") };
+    assert_eq!(get_update_action(), None);
+
+    // Then: with npm var -> expect NpmGlobalLatest
+    unsafe { std::env::set_var("CODEX_MANAGED_BY_NPM", "1") };
+    assert_eq!(get_update_action(), Some(UpdateAction::NpmGlobalLatest));
+
+    // Restore prior value to avoid leaking state
+    if let Some(v) = prev {
+        unsafe { std::env::set_var("CODEX_MANAGED_BY_NPM", v) };
+    } else {
+        unsafe { std::env::remove_var("CODEX_MANAGED_BY_NPM") };
+    }
 }
 
 #[expect(

@@ -53,6 +53,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Stylize as _;
+use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
@@ -76,6 +78,7 @@ use crate::exec_cell::CommandOutput;
 use crate::exec_cell::ExecCell;
 use crate::exec_cell::new_active_exec_command;
 use crate::get_git_diff::get_git_diff;
+use crate::get_update_action;
 use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
@@ -97,7 +100,6 @@ use crate::streaming::controller::StreamController;
 use std::path::Path;
 
 use crate::UpdateAction;
-use crate::version::CODEX_CLI_VERSION;
 use chrono::Local;
 use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
@@ -1813,68 +1815,48 @@ impl ChatWidget {
         });
     }
 
-    /// Open a simple modal asking to update Codex when an update is available.
-    pub(crate) fn open_update_popup(&mut self) {
-        use ratatui::style::Stylize as _;
-        use ratatui::text::Line;
-
-        // Determine the recommended update method.
-        let exe = std::env::current_exe().unwrap_or_default();
-        let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
-        let update_action = if managed_by_npm {
-            Some(UpdateAction::NpmGlobalLatest)
-        } else if cfg!(target_os = "macos")
-            && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
-        {
-            Some(UpdateAction::BrewUpgrade)
-        } else {
-            None
-        };
-
-        // Don't show the update popup if no update action is available.
-        if update_action.is_none() {
-            return;
+    /// Open a simple modal asking to update Codex when an update action is available.
+    #[cfg(not(debug_assertions))]
+    pub(crate) fn handle_update_popup(&mut self) {
+        if let Some(update_action) = get_update_action() {
+            self.show_update_popup(update_action);
         }
+    }
 
-        // Build header lines with the prompt and version info.
-        let header_lines: Vec<Line<'static>> = vec![
-            Line::from(vec![
-                padded_emoji("✨").bold().cyan(),
-                "New version available! Would you like to update?".bold(),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                "Full release notes: ".dim(),
-                "https://github.com/openai/codex/releases/latest"
-                    .cyan()
-                    .underlined(),
-            ]),
-            Line::from(""),
-        ];
-
-        let mut items: Vec<SelectionItem> = Vec::new();
-        if let Some(action) = update_action {
-            let action_for_closure = action;
-            items.push(SelectionItem {
-                name: "Yes, update now".to_string(),
-                actions: vec![Box::new(move |tx: &AppEventSender| {
-                    tx.send(AppEvent::RunUpdateAndExit(action_for_closure));
-                })],
-                dismiss_on_select: true,
-                ..Default::default()
-            });
-        }
-        items.push(SelectionItem {
-            name: "No, not now".to_string(),
-            dismiss_on_select: true,
-            ..Default::default()
-        });
-
+    #[cfg(not(debug_assertions))]
+    pub(crate) fn show_update_popup(&mut self, update_action: UpdateAction) {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: None,
             footer_hint: Some(standard_popup_hint_line()),
-            items,
-            header: Box::new(ratatui::widgets::Paragraph::new(header_lines)),
+            items: vec![
+                SelectionItem {
+                    name: "Yes, update now".to_string(),
+                    actions: vec![Box::new(move |tx: &AppEventSender| {
+                        tx.send(AppEvent::RunUpdateAndExit(update_action));
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+                SelectionItem {
+                    name: "No, not now".to_string(),
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+            ],
+            header: Box::new(ratatui::widgets::Paragraph::new(vec![
+                Line::from(vec![
+                    padded_emoji("✨").bold().cyan(),
+                    "New version available! Would you like to update?".bold(),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    "Full release notes: ".dim(),
+                    "https://github.com/openai/codex/releases/latest"
+                        .cyan()
+                        .underlined(),
+                ]),
+                Line::from(""),
+            ])),
             ..Default::default()
         });
     }

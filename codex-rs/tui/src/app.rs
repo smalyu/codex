@@ -162,8 +162,8 @@ impl App {
 
         // Show an update approval popup at startup when an update is available.
         #[cfg(not(debug_assertions))]
-        if let Some(latest_version) = crate::updates::get_upgrade_version(&app.config) {
-            app.chat_widget.open_update_popup();
+        if crate::updates::get_upgrade_version(&app.config).is_some() {
+            app.chat_widget.handle_update_popup();
         }
 
         let tui_events = tui.event_stream();
