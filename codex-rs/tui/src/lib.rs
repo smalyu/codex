@@ -489,6 +489,8 @@ async fn run_ratatui_app(
     app_result
 }
 
+/// Get the update action from the environment.
+/// Returns `None` if not managed by npm, bun, or brew.
 #[cfg(not(debug_assertions))]
 pub(crate) fn get_update_action() -> Option<UpdateAction> {
     let exe = std::env::current_exe().unwrap_or_default();

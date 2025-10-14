@@ -234,6 +234,7 @@ fn format_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<Stri
     lines
 }
 
+/// Handle the app exit and print the results. Optionally run the update action.
 fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
     let update_action = exit_info.update_action;
     let color_enabled = supports_color::on(Stream::Stdout).is_some();
@@ -246,6 +247,7 @@ fn handle_app_exit(exit_info: AppExitInfo) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run the update action and print the result.
 fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
     println!();
     let (cmd, args) = action.command_args();
