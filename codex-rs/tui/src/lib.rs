@@ -82,6 +82,25 @@ pub enum UpdateAction {
     /// Update via `brew upgrade codex`.
     BrewUpgrade,
 }
+
+impl UpdateAction {
+    /// Returns the list of command-line arguments for invoking the update.
+    pub fn command_args(&self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            UpdateAction::NpmGlobalLatest => ("npm", &["install", "-g", "@openai/codex@latest"]),
+            UpdateAction::BunGlobalLatest => ("bun", &["install", "-g", "@openai/codex@latest"]),
+            UpdateAction::BrewUpgrade => ("brew", &["upgrade", "codex"]),
+        }
+    }
+
+    /// Returns string representation of the command-line arguments for invoking the update.
+    pub fn command_str(&self) -> String {
+        let (command, args) = self.command_args();
+        let args_str = args.join(" ");
+        format!("{command} {args_str}")
+    }
+}
+
 mod wrapping;
 
 #[cfg(test)]
@@ -340,20 +359,9 @@ async fn run_ratatui_app(
         ];
 
         if let Some(update_action) = get_update_action() {
-            let cmd = match update_action {
-                UpdateAction::NpmGlobalLatest => {
-                    "npm install -g @openai/codex@latest";
-                }
-                UpdateAction::BunGlobalLatest => {
-                    "bun install -g @openai/codex@latest";
-                }
-                UpdateAction::BrewUpgrade => {
-                    "brew upgrade codex";
-                }
-            };
             content_lines.push(Line::from(vec![
                 "Run ".into(),
-                cmd.cyan(),
+                update_action.command_str().cyan(),
                 " to update.".into(),
             ]));
         } else {
@@ -481,6 +489,7 @@ async fn run_ratatui_app(
     app_result
 }
 
+#[cfg(not(debug_assertions))]
 pub(crate) fn get_update_action() -> Option<UpdateAction> {
     let exe = std::env::current_exe().unwrap_or_default();
     let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
@@ -499,6 +508,7 @@ pub(crate) fn get_update_action() -> Option<UpdateAction> {
 }
 
 #[test]
+#[cfg(not(debug_assertions))]
 fn test_get_update_action() {
     let prev = std::env::var_os("CODEX_MANAGED_BY_NPM");
 
