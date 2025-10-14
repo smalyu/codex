@@ -416,19 +416,35 @@ impl InftyOrchestrator {
                                             sessions.store.path(),
                                             &deliverable_path,
                                         )?;
-                                        let outcome = RunOutcome {
-                                            run_id: sessions.run_id.clone(),
-                                            deliverable_path: resolved,
-                                            summary: summary.filter(|s| !s.trim().is_empty()),
-                                            raw_message: agent_msg.message.clone(),
-                                        };
+                                        let summary_clean = summary.and_then(|s| {
+                                            let trimmed = s.trim();
+                                            if trimmed.is_empty() {
+                                                None
+                                            } else {
+                                                Some(trimmed.to_string())
+                                            }
+                                        });
+                                        let summary_ref = summary_clean.as_deref();
                                         if let Some(progress) = self.progress.as_ref() {
-                                            progress.final_delivery(
-                                                &outcome.deliverable_path,
-                                                outcome.summary.as_deref(),
-                                            );
+                                            progress.final_delivery(&resolved, summary_ref);
                                         }
-                                        return Ok(outcome);
+                                        let verified = self
+                                            .run_final_verification(
+                                                sessions,
+                                                &resolved,
+                                                summary_ref,
+                                                options,
+                                            )
+                                            .await?;
+                                        sessions.store.touch()?;
+                                        if verified {
+                                            return Ok(RunOutcome {
+                                                run_id: sessions.run_id.clone(),
+                                                deliverable_path: resolved,
+                                                summary: summary_clean,
+                                                raw_message: agent_msg.message.clone(),
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -509,21 +525,65 @@ impl InftyOrchestrator {
         notes: Option<&str>,
         options: &RunExecutionOptions,
     ) -> Result<bool> {
-        if sessions.verifiers.is_empty() {
-            let summary = aggregate_verdicts(Vec::new());
-            if let Some(progress) = self.progress.as_ref() {
-                progress.verification_summary(&summary);
-            }
-            let summary_text = serde_json::to_string_pretty(&summary)?;
-            let _ = self
-                .post_to_role(
-                    &sessions.run_id,
-                    &sessions.solver.role,
-                    summary_text,
-                    Some(solver_signal_schema()),
-                )
+        let summary = self
+            .collect_verification_summary(sessions, claim_path, notes, options)
+            .await?;
+        self.emit_verification_summary(&summary);
+        self.post_verification_summary_to_solver(sessions, &summary)
+            .await?;
+        Ok(summary.overall.is_pass())
+    }
+
+    async fn run_final_verification(
+        &self,
+        sessions: &RunSessions,
+        deliverable_path: &Path,
+        summary: Option<&str>,
+        options: &RunExecutionOptions,
+    ) -> Result<bool> {
+        let relative = deliverable_path
+            .strip_prefix(sessions.store.path())
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()));
+        let claim_path = relative.unwrap_or_else(|| deliverable_path.display().to_string());
+
+        let summary_result = self
+            .collect_verification_summary(sessions, claim_path.as_str(), summary, options)
+            .await?;
+        self.emit_verification_summary(&summary_result);
+        if summary_result.overall.is_pass() {
+            Ok(true)
+        } else {
+            self.post_verification_summary_to_solver(sessions, &summary_result)
                 .await?;
-            return Ok(true);
+            Ok(false)
+        }
+    }
+
+    async fn request_solver_signal(&self, run_id: &str, solver_role: &str) -> Result<()> {
+        let handle = self
+            .post_to_role(
+                run_id,
+                solver_role,
+                FINALIZATION_PROMPT,
+                Some(final_delivery_schema()),
+            )
+            .await?;
+        let _ = self
+            .await_first_assistant(&handle, Duration::from_secs(5))
+            .await?;
+        Ok(())
+    }
+
+    async fn collect_verification_summary(
+        &self,
+        sessions: &RunSessions,
+        claim_path: &str,
+        notes: Option<&str>,
+        options: &RunExecutionOptions,
+    ) -> Result<AggregatedVerifierVerdict> {
+        if sessions.verifiers.is_empty() {
+            return Ok(aggregate_verdicts(Vec::new()));
         }
 
         let request = VerificationRequestPayload {
@@ -555,11 +615,21 @@ impl InftyOrchestrator {
             collected.push((verifier.role.clone(), verdict));
         }
 
-        let summary = aggregate_verdicts(collected);
+        Ok(aggregate_verdicts(collected))
+    }
+
+    fn emit_verification_summary(&self, summary: &AggregatedVerifierVerdict) {
         if let Some(progress) = self.progress.as_ref() {
-            progress.verification_summary(&summary);
+            progress.verification_summary(summary);
         }
-        let summary_text = serde_json::to_string_pretty(&summary)?;
+    }
+
+    async fn post_verification_summary_to_solver(
+        &self,
+        sessions: &RunSessions,
+        summary: &AggregatedVerifierVerdict,
+    ) -> Result<()> {
+        let summary_text = serde_json::to_string_pretty(summary)?;
         let _ = self
             .post_to_role(
                 &sessions.run_id,
@@ -567,21 +637,6 @@ impl InftyOrchestrator {
                 summary_text,
                 Some(solver_signal_schema()),
             )
-            .await?;
-        Ok(summary.overall.is_pass())
-    }
-
-    async fn request_solver_signal(&self, run_id: &str, solver_role: &str) -> Result<()> {
-        let handle = self
-            .post_to_role(
-                run_id,
-                solver_role,
-                FINALIZATION_PROMPT,
-                Some(final_delivery_schema()),
-            )
-            .await?;
-        let _ = self
-            .await_first_assistant(&handle, Duration::from_secs(5))
             .await?;
         Ok(())
     }
