@@ -76,6 +76,8 @@ struct DirectionRequestPayload<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     prompt: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    objective: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -481,6 +483,7 @@ impl InftyOrchestrator {
         let request = DirectionRequestPayload {
             kind: "direction_request",
             prompt,
+            objective: options.objective.as_deref(),
         };
         let request_text = serde_json::to_string_pretty(&request)?;
         let handle = self
@@ -488,7 +491,7 @@ impl InftyOrchestrator {
                 &sessions.run_id,
                 &sessions.director.role,
                 request_text,
-                None,
+                Some(directive_response_schema()),
             )
             .await?;
         let directive = self
@@ -608,7 +611,7 @@ impl InftyOrchestrator {
                     &sessions.run_id,
                     &verifier.role,
                     request_text.as_str(),
-                    None,
+                    Some(verifier_verdict_schema()),
                 )
                 .await?;
             let response = self
@@ -750,10 +753,13 @@ impl InftyOrchestrator {
                     };
                     // Reset idle timer only for events emitted for our submission id.
                     if ev.event.id == sub_id {
-                        if let Some(progress) = self.progress.as_ref()
-                            && let Some(role) = role_label
-                        {
+                        if let Some(progress) = self.progress.as_ref() && let Some(role) = role_label {
                             progress.role_event(role, &ev.event.msg);
+                        }
+                        // If the session emits an error for this submission, surface it immediately
+                        // rather than waiting for the idle timeout.
+                        if let EventMsg::Error(err) = &ev.event.msg {
+                            bail!(anyhow!(err.message.clone()));
                         }
                         idle.as_mut().reset(Instant::now() + idle_timeout);
                     }
@@ -1045,11 +1051,36 @@ fn solver_signal_schema() -> Value {
 fn final_delivery_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["type", "deliverable_path"],
+        "required": ["type", "deliverable_path", "summary"],
         "properties": {
             "type": { "const": "final_delivery" },
             "deliverable_path": { "type": "string" },
             "summary": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn directive_response_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["directive", "rationale"],
+        "properties": {
+            "directive": { "type": "string" },
+            "rationale": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn verifier_verdict_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["verdict", "reasons", "suggestions"],
+        "properties": {
+            "verdict": { "type": "string", "enum": ["pass", "fail"] },
+            "reasons": { "type": "array", "items": { "type": "string" } },
+            "suggestions": { "type": "array", "items": { "type": "string" } }
         },
         "additionalProperties": false
     })
