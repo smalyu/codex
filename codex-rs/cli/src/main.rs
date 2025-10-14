@@ -480,6 +480,7 @@ fn print_completion(cmd: CompletionCommand) {
 }
 
 fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
+    println!();
     match action {
         UpdateAction::NpmGlobalLatest => {
             println!("Updating Codex via npm (global latest)…");
@@ -500,7 +501,8 @@ fn run_update_action(action: UpdateAction) -> anyhow::Result<()> {
             }
         }
     }
-    println!("Update complete.");
+    println!();
+    println!("🎉 Update ran successfully! Please restart Codex.");
     Ok(())
 }
 

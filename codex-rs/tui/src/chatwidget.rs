@@ -80,6 +80,7 @@ use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
+use crate::history_cell::padded_emoji;
 use crate::markdown::append_markdown;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
@@ -1813,23 +1814,9 @@ impl ChatWidget {
     }
 
     /// Open a simple modal asking to update Codex when an update is available.
-    pub(crate) fn open_update_popup(&mut self, latest_version: String) {
+    pub(crate) fn open_update_popup(&mut self) {
         use ratatui::style::Stylize as _;
         use ratatui::text::Line;
-
-        let current_version = CODEX_CLI_VERSION;
-        let title = "Update Approval".to_string();
-
-        // Build header lines with the prompt and version info.
-        let mut header_lines: Vec<Line<'static>> = vec![
-            Line::from("Should I update Codex?".bold()),
-            Line::from(""),
-            Line::from(vec![
-                "Update available!".bold().cyan(),
-                " ".into(),
-                format!("{current_version} -> {latest_version}.").bold(),
-            ]),
-        ];
 
         // Determine the recommended update method.
         let exe = std::env::current_exe().unwrap_or_default();
@@ -1844,16 +1831,26 @@ impl ChatWidget {
             None
         };
 
+        // Don't show the update popup if no update action is available.
         if update_action.is_none() {
-            header_lines.push(Line::from(""));
-            header_lines.push(Line::from(vec![
-                "See ".into(),
+            return;
+        }
+
+        // Build header lines with the prompt and version info.
+        let header_lines: Vec<Line<'static>> = vec![
+            Line::from(vec![
+                padded_emoji("✨").bold().cyan(),
+                "New version available! Would you like to update?".bold(),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                "Full release notes: ".dim(),
                 "https://github.com/openai/codex/releases/latest"
                     .cyan()
                     .underlined(),
-                " for installation options.".into(),
-            ]));
-        }
+            ]),
+            Line::from(""),
+        ];
 
         let mut items: Vec<SelectionItem> = Vec::new();
         if let Some(action) = update_action {
@@ -1874,7 +1871,7 @@ impl ChatWidget {
         });
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            title: Some(title),
+            title: None,
             footer_hint: Some(standard_popup_hint_line()),
             items,
             header: Box::new(ratatui::widgets::Paragraph::new(header_lines)),
