@@ -311,6 +311,7 @@ async fn test_send_user_turn_changes_approval_policy_behavior() {
             ],
             cwd: working_directory.clone(),
             reason: None,
+            parsed_cmd: vec![],
         },
         params
     );
