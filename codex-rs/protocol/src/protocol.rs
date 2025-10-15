@@ -96,7 +96,10 @@ impl DisabledTool {
     }
 
     pub fn matches_tool_name(&self, tool_name: &str) -> bool {
-        self.raw_name() == tool_name
+        match self {
+            DisabledTool::Known(kind) => kind.raw_name() == tool_name,
+            DisabledTool::Other(name) => name == tool_name,
+        }
     }
 }
 
