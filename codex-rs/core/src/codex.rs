@@ -1239,7 +1239,7 @@ async fn submission_loop(
                     cwd: new_cwd.clone(),
                     is_review_mode: false,
                     final_output_json_schema: None,
-                    disabled_tools: disabled_tools.unwrap_or_else(DisabledTool::defaults),
+                    disabled_tools: disabled_tools.unwrap_or_else(|| prev.disabled_tools.clone()),
                 };
 
                 // Install the new persistent context for subsequent tasks/turns.
@@ -1981,14 +1981,14 @@ async fn run_turn(
         .get_model_family()
         .supports_parallel_tool_calls;
     let parallel_tool_calls = model_supports_parallel;
-    let allowed_tools = router.allowed_tools(turn_context.disabled_tools.clone());
+    let allowed_tools = router.allowed_tools(Some(&turn_context.disabled_tools));
     let prompt = Prompt {
         input,
         tools: router.specs(),
         parallel_tool_calls,
         base_instructions_override: turn_context.base_instructions.clone(),
         output_schema: turn_context.final_output_json_schema.clone(),
-        allowed_tools: Some(allowed_tools),
+        allowed_tools,
     };
 
     let mut retries = 0;

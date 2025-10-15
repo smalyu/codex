@@ -21,6 +21,7 @@ use core_test_support::load_default_config_for_test;
 use core_test_support::load_sse_fixture_with_id;
 use core_test_support::skip_if_no_network;
 use core_test_support::wait_for_event;
+use serde_json::Value;
 use std::collections::HashMap;
 use tempfile::TempDir;
 use wiremock::Mock;
@@ -59,12 +60,19 @@ fn sse_completed(id: &str) -> String {
 }
 
 fn assert_tool_names(body: &serde_json::Value, expected_names: &[&str]) {
+    let tools = body["tools"].as_array().unwrap_or_else(|| {
+        panic!("tools field missing or not an array: {body:?}");
+    });
     assert_eq!(
-        body["tools"]
-            .as_array()
-            .unwrap()
+        tools
             .iter()
-            .map(|t| t["name"].as_str().unwrap().to_string())
+            .map(|tool| {
+                tool.get("name")
+                    .or_else(|| tool.get("type"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("tool missing name/type: {tool:?}"))
+                    .to_string()
+            })
             .collect::<Vec<_>>(),
         expected_names
     );
@@ -144,11 +152,25 @@ async fn codex_mini_latest_tools() {
     .join("\n");
 
     let body0 = requests[0].body_json::<serde_json::Value>().unwrap();
+    assert!(
+        body0
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some(),
+        "first request missing tools field: {body0:?}"
+    );
     assert_eq!(
         body0["instructions"],
         serde_json::json!(expected_instructions),
     );
     let body1 = requests[1].body_json::<serde_json::Value>().unwrap();
+    assert!(
+        body1
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some(),
+        "second request missing tools field: {body1:?}"
+    );
     assert_eq!(
         body1["instructions"],
         serde_json::json!(expected_instructions),
@@ -224,10 +246,13 @@ async fn prompt_tools_are_consistent_across_requests() {
     // our internal implementation is responsible for keeping tools in sync
     // with the OpenAI schema, so we just verify the tool presence here
     let tools_by_model: HashMap<&'static str, Vec<&'static str>> = HashMap::from([
-        ("gpt-5", vec!["shell", "update_plan", "view_image"]),
+        (
+            "gpt-5",
+            vec!["shell", "update_plan", "web_search", "view_image"],
+        ),
         (
             "gpt-5-codex",
-            vec!["shell", "update_plan", "apply_patch", "view_image"],
+            vec!["shell", "update_plan", "apply_patch", "web_search", "view_image"],
         ),
     ]);
     let expected_tools_names = tools_by_model

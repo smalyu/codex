@@ -49,20 +49,29 @@ impl ToolRouter {
             .collect()
     }
 
-    pub fn allowed_tools(&self, disabled_tools: Vec<DisabledTool>) -> Vec<serde_json::Value> {
-        self.specs
-            .iter()
-            .filter_map(|config| {
-                let name = config.spec.name();
-                if disabled_tools
-                    .iter()
-                    .any(|disabled| disabled.matches_tool_name(name))
-                {
-                    return None;
-                }
-                Some(json!({"type": "function", "name": name}))
-            })
-            .collect()
+    pub fn allowed_tools(
+        &self,
+        disabled_tools: Option<&[DisabledTool]>,
+    ) -> Option<Vec<serde_json::Value>> {
+        let disabled = disabled_tools.unwrap_or(&[]);
+        if disabled.is_empty() {
+            return None;
+        }
+
+        let mut allowed = Vec::new();
+        for config in &self.specs {
+            let name = config.spec.name();
+            if disabled.iter().any(|tool| tool.matches_tool_name(name)) {
+                continue;
+            }
+            allowed.push(json!({"type": "function", "name": name}));
+        }
+
+        if allowed.len() == self.specs.len() {
+            None
+        } else {
+            Some(allowed)
+        }
     }
 
     pub fn tool_supports_parallel(&self, tool_name: &str) -> bool {
