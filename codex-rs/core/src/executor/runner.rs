@@ -16,7 +16,6 @@ use crate::exec::SandboxType;
 use crate::exec::StdoutStream;
 use crate::exec::StreamOutput;
 use crate::exec::execute_sandbox_launch;
-use crate::exec::sandbox_launch_error_to_codex;
 use crate::executor::errors::ExecError;
 use crate::executor::sandbox::RetrySandboxContext;
 use crate::executor::sandbox::SandboxDecision;
@@ -229,7 +228,7 @@ impl Executor {
         let sandbox_policy = plan.config().sandbox_policy.clone();
         let initial_launch = plan
             .initial_launch()
-            .map_err(|err| ExecError::Codex(sandbox_launch_error_to_codex(err)))?;
+            .map_err(|err| ExecError::Codex(err.into()))?;
         let first_attempt = execute_sandbox_launch(
             plan.request().params.clone(),
             initial_launch,
@@ -252,7 +251,7 @@ impl Executor {
                     {
                         let retry_launch = plan
                             .retry_launch()
-                            .map_err(|err| ExecError::Codex(sandbox_launch_error_to_codex(err)))?;
+                            .map_err(|err| ExecError::Codex(err.into()))?;
                         execute_sandbox_launch(
                             plan.request().params.clone(),
                             retry_launch,

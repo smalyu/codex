@@ -95,7 +95,7 @@ pub async fn process_exec_tool_call(
         sandbox_cwd,
         codex_linux_sandbox_exe.as_ref(),
     )
-    .map_err(sandbox_launch_error_to_codex)?;
+    .map_err(CodexErr::from)?;
     execute_sandbox_launch(params, launch, sandbox_type, sandbox_policy, stdout_stream).await
 }
 
@@ -171,18 +171,6 @@ fn finalize_exec_result(
     }
 }
 
-pub(crate) fn sandbox_launch_error_to_codex(err: SandboxLaunchError) -> CodexErr {
-    match err {
-        SandboxLaunchError::MissingCommandLine => CodexErr::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "command args are empty",
-        )),
-        SandboxLaunchError::MissingLinuxSandboxExecutable => {
-            CodexErr::LandlockSandboxExecutableNotProvided
-        }
-    }
-}
-
 async fn spawn_with_launch(
     params: ExecParams,
     launch: SandboxLaunch,
@@ -219,6 +207,25 @@ async fn spawn_with_launch(
     };
 
     exec(updated_params, sandbox_policy, stdout_stream).await
+}
+
+pub(crate) mod errors {
+    use super::CodexErr;
+    use super::SandboxLaunchError;
+
+    impl From<SandboxLaunchError> for CodexErr {
+        fn from(err: SandboxLaunchError) -> Self {
+            match err {
+                SandboxLaunchError::MissingCommandLine => CodexErr::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "command args are empty",
+                )),
+                SandboxLaunchError::MissingLinuxSandboxExecutable => {
+                    CodexErr::LandlockSandboxExecutableNotProvided
+                }
+            }
+        }
+    }
 }
 
 /// We don't have a fully deterministic way to tell if our command failed
