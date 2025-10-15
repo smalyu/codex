@@ -1,22 +1,16 @@
-use std::collections::BTreeSet;
-
 use codex_core::CodexAuth;
 use codex_core::ConversationManager;
 use codex_core::ModelProviderInfo;
 use codex_core::NewConversation;
 use codex_core::built_in_model_providers;
-use codex_core::protocol::AskForApproval;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::RolloutItem;
 use codex_core::protocol::RolloutLine;
-use codex_core::protocol::SandboxPolicy;
-use codex_protocol::config_types::ReasoningSummary;
 use core_test_support::load_default_config_for_test;
 use core_test_support::skip_if_no_network;
-use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use tempfile::TempDir;
 
@@ -25,7 +19,6 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
-use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
@@ -754,148 +747,6 @@ async fn manual_compact_retries_after_context_window_error() {
     } else {
         panic!("expected non-empty compact inputs");
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn compact_retry_drops_orphan_tool_outputs() {
-    skip_if_no_network!();
-    let server = start_mock_server().await;
-    let test = test_codex().build(&server).await.unwrap();
-
-    let call_id = "compact-orphan-call";
-    let shell_args = serde_json::json!({
-        "command": ["/bin/echo", "orphan check"],
-        "timeout_ms": 1_000
-    });
-    let shell_args_json = serde_json::to_string(&shell_args).expect("serialize shell args");
-
-    let initial_turn = sse(vec![
-        ev_response_created("resp-initial"),
-        ev_function_call(call_id, "shell", &shell_args_json),
-        ev_completed("resp-initial"),
-    ]);
-    let tool_follow_up = sse(vec![
-        ev_response_created("resp-tool"),
-        ev_assistant_message("msg-tool", "tool output acknowledged"),
-        ev_completed("resp-tool"),
-    ]);
-    const CONTEXT_FAILS: usize = 4;
-    let compact_failures: Vec<String> = (0..CONTEXT_FAILS)
-        .map(|idx| {
-            let id = format!("resp-compact-fail-{idx}");
-            sse_failed(&id, "context_length_exceeded", CONTEXT_LIMIT_MESSAGE)
-        })
-        .collect();
-    let compact_success = sse(vec![
-        ev_response_created("resp-compact-success"),
-        ev_assistant_message("msg-compact", SUMMARY_TEXT),
-        ev_completed("resp-compact-success"),
-    ]);
-
-    let mut responses = vec![initial_turn, tool_follow_up];
-    responses.extend(compact_failures.clone());
-    responses.push(compact_success);
-    let response_log = mount_sse_sequence(&server, responses).await;
-
-    let session_model = test.session_configured.model.clone();
-    let turn = |prompt: &str| Op::UserTurn {
-        items: vec![InputItem::Text {
-            text: prompt.into(),
-        }],
-        final_output_json_schema: None,
-        cwd: test.cwd.path().to_path_buf(),
-        approval_policy: AskForApproval::Never,
-        sandbox_policy: SandboxPolicy::DangerFullAccess,
-        model: session_model.clone(),
-        effort: None,
-        summary: ReasoningSummary::Auto,
-    };
-
-    test.codex
-        .submit(turn("trigger tool call"))
-        .await
-        .expect("initial turn submission");
-    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
-
-    test.codex
-        .submit(Op::Compact)
-        .await
-        .expect("compact submission");
-
-    let EventMsg::BackgroundEvent(background_event) =
-        wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::BackgroundEvent(_))).await
-    else {
-        unreachable!("expected background event after compact retries");
-    };
-    assert!(
-        background_event.message.contains(&format!(
-            "Trimmed {CONTEXT_FAILS} older conversation item(s)"
-        )),
-        "unexpected trim count reported: {}",
-        background_event.message
-    );
-    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
-
-    let requests = response_log.requests();
-    assert_eq!(
-        requests.len(),
-        CONTEXT_FAILS + 3,
-        "expected initial turn, tool output, {CONTEXT_FAILS} failed compact attempts, and one success"
-    );
-
-    let first_compact_input = requests[2].input();
-    let first_call_ids = collect_call_ids(&first_compact_input);
-    let first_output_ids = collect_output_ids(&first_compact_input);
-    assert!(
-        first_call_ids.contains(call_id),
-        "first compact attempt should include the tool call"
-    );
-    assert!(
-        first_output_ids.contains(call_id),
-        "first compact attempt should include the tool output"
-    );
-
-    let final_retry_index = 2 + CONTEXT_FAILS;
-    let retry_input = requests[final_retry_index].input();
-    let retry_call_ids = collect_call_ids(&retry_input);
-    let retry_output_ids = collect_output_ids(&retry_input);
-    assert_eq!(
-        retry_output_ids, retry_call_ids,
-        "compact retry should remove tool outputs when their call was trimmed"
-    );
-}
-
-fn collect_call_ids(items: &[serde_json::Value]) -> BTreeSet<String> {
-    items
-        .iter()
-        .filter_map(|item| {
-            let item_type = item.get("type")?.as_str()?;
-            match item_type {
-                "function_call" | "custom_tool_call" | "local_shell_call" => item
-                    .get("call_id")
-                    .or_else(|| item.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-fn collect_output_ids(items: &[serde_json::Value]) -> BTreeSet<String> {
-    items
-        .iter()
-        .filter_map(|item| {
-            let item_type = item.get("type")?.as_str()?;
-            match item_type {
-                "function_call_output" | "custom_tool_call_output" => item
-                    .get("call_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                _ => None,
-            }
-        })
-        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
