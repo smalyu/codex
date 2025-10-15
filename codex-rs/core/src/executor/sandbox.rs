@@ -415,9 +415,8 @@ mod tests {
         )
         .await
         .expect("ok");
-        // On platforms with a sandbox, DangerFullAccess still prefers it
-        let expected = crate::safety::get_platform_sandbox().unwrap_or(SandboxType::None);
-        assert_eq!(decision.initial_sandbox, expected);
+        // DangerFullAccess bypasses sandboxing entirely.
+        assert_eq!(decision.initial_sandbox, SandboxType::None);
         assert_eq!(decision.escalate_on_failure, false);
     }
 
