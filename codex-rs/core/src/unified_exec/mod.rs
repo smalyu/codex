@@ -215,6 +215,12 @@ impl UnifiedExecSessionManager {
             use_shell_profile: false,
         };
 
+        // Ensure the executor's environment reflects this turn before planning
+        executor.update_environment(
+            context.turn.sandbox_policy.clone(),
+            context.turn.cwd.clone(),
+        );
+
         let plan: ExecutionPlan = executor
             .prepare_execution_plan(
                 execution_request,
