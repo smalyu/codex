@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use anyhow::Result;
+use codex_core::error::CodexErr;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::EventMsg;
@@ -18,14 +19,17 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_failed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
+use std::time::Duration;
 
 async fn submit_turn(
     test: &TestCodex,
@@ -50,9 +54,11 @@ async fn submit_turn(
         })
         .await?;
 
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TaskComplete(_))
-    })
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TaskComplete(_) | EventMsg::TurnAborted(_)),
+        Duration::from_secs(5),
+    )
     .await;
 
     Ok(())
@@ -80,8 +86,7 @@ async fn custom_tool_unknown_returns_custom_output_error() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex();
-    let test = builder.build(&server).await?;
+    let test = test_codex().build(&server).await?;
 
     let call_id = "custom-unsupported";
     let tool_name = "unsupported_tool";
@@ -231,8 +236,7 @@ async fn local_shell_missing_ids_maps_to_function_output_error() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex();
-    let test = builder.build(&server).await?;
+    let test = test_codex().build(&server).await?;
 
     let local_shell_event = json!({
         "type": "response.output_item.done",
@@ -399,6 +403,242 @@ async fn shell_timeout_includes_timeout_prefix_and_metadata() -> Result<()> {
         let signal_pattern = r"(?is)^execution error:.*signal.*$";
         assert_regex_match(signal_pattern, output_str);
     }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_error_keeps_tool_output_in_history() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = test_codex().build(&server).await?;
+
+    let call_id = "context-shell";
+    let shell_args = json!({
+        "command": ["/bin/echo", "context tool output"],
+        "timeout_ms": 1_000
+    });
+
+    let sequence = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    call_id,
+                    "shell",
+                    &serde_json::to_string(&shell_args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse_failed(
+                "resp-context-error",
+                "context_length_exceeded",
+                "Your input exceeds the context window of this model. Please adjust your input and try again.",
+            ),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-1", "handled"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    let turn = |prompt: &str| Op::UserTurn {
+        items: vec![InputItem::Text {
+            text: prompt.into(),
+        }],
+        final_output_json_schema: None,
+        cwd: test.cwd.path().to_path_buf(),
+        approval_policy: AskForApproval::Never,
+        sandbox_policy: SandboxPolicy::DangerFullAccess,
+        model: test.session_configured.model.clone(),
+        effort: None,
+        summary: ReasoningSummary::Auto,
+    };
+
+    test.codex.submit(turn("trigger tool call")).await?;
+
+    let error_event =
+        wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+    let EventMsg::Error(error_payload) = error_event else {
+        unreachable!("wait_for_event returned unexpected event");
+    };
+    assert_eq!(
+        error_payload.message,
+        CodexErr::ContextWindowExceeded.to_string(),
+        "expected context window error after second SSE"
+    );
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TaskComplete(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let failure_request = sequence
+        .requests()
+        .get(1)
+        .expect("failed request missing")
+        .clone();
+    let tool_output_item = failure_request.function_call_output(call_id);
+    let tool_output_str = tool_output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        !tool_output_str.is_empty(),
+        "tool call output missing from follow-up request"
+    );
+    assert!(
+        tool_output_str.contains("Exit code: 0"),
+        "expected shell tool output to include exit code: {tool_output_str}"
+    );
+    let tool_stdout = tool_output_str;
+    assert!(
+        tool_stdout.contains("context tool output"),
+        "unexpected shell stdout: {tool_stdout}"
+    );
+
+    test.codex.submit(turn("send another message")).await?;
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TaskComplete(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let follow_up_request = sequence
+        .requests()
+        .last()
+        .expect("follow-up request missing")
+        .clone();
+    let follow_up_output = follow_up_request.function_call_output(call_id);
+    let follow_up_output_str = follow_up_output
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert_eq!(
+        follow_up_output_str, tool_output_str,
+        "conversation history should retain tool output after context error"
+    );
+
+    let inputs = follow_up_request.input();
+    let user_message = inputs
+        .iter()
+        .rev()
+        .find(|value| value.get("role").is_some_and(|role| role == "user"))
+        .expect("follow-up user message missing from request");
+    let user_text = user_message["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(
+        user_text, "send another message",
+        "unexpected follow-up user prompt"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_error_replays_tool_output_on_follow_up() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = test_codex().build(&server).await?;
+
+    let call_id = "context-shell-aborted";
+    let shell_args = json!({
+        "command": ["/bin/echo", "context tool output"],
+        "timeout_ms": 1_000
+    });
+
+    let sequence = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    call_id,
+                    "shell",
+                    &serde_json::to_string(&shell_args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse_failed(
+                "resp-context-error",
+                "context_length_exceeded",
+                "Your input exceeds the context window of this model. Please adjust your input and try again.",
+            ),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-2", "follow-up handled"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let turn = |prompt: &str| Op::UserTurn {
+        items: vec![InputItem::Text {
+            text: prompt.into(),
+        }],
+        final_output_json_schema: None,
+        cwd: test.cwd.path().to_path_buf(),
+        approval_policy: AskForApproval::Never,
+        sandbox_policy: SandboxPolicy::DangerFullAccess,
+        model: test.session_configured.model.clone(),
+        effort: None,
+        summary: ReasoningSummary::Auto,
+    };
+
+    test.codex
+        .submit(turn("trigger context window failure"))
+        .await?;
+
+    let error_event =
+        wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+    let EventMsg::Error(error_payload) = error_event else {
+        unreachable!("wait_for_event returned unexpected event");
+    };
+    assert_eq!(
+        error_payload.message,
+        CodexErr::ContextWindowExceeded.to_string(),
+        "expected context window error after failed SSE"
+    );
+
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TaskComplete(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    test.codex.submit(turn("resume after failure")).await?;
+
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TaskComplete(_)),
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let follow_up_request = sequence
+        .requests()
+        .last()
+        .expect("follow-up request missing")
+        .clone();
+    let output_item = follow_up_request.function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        output.contains("context tool output"),
+        "failed tool call should still record a response"
+    );
 
     Ok(())
 }
