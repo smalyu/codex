@@ -49,10 +49,6 @@ impl ToolRouter {
     }
 
     pub fn allowed_tools(&self) -> Vec<serde_json::Value> {
-        // return vector of "tools": [
-        // { "type": "function", "name": "get_weather" },
-        //{ "type": "function", "name": "search_docs" }
-        //]
         self.specs
             .iter()
             .map(|config| {
