@@ -231,26 +231,10 @@ impl UnifiedExecSessionManager {
             .await
             .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
 
-        let launch = plan.initial_launch()?;
-
-        match create_unified_exec_session(&launch).await {
-            Ok(result) => Ok(result),
-            Err(err) if plan.should_retry_without_sandbox() => {
-                if plan
-                    .prompt_retry_without_sandbox(
-                        context.session,
-                        format!("Execution failed: {err}"),
-                    )
-                    .await
-                {
-                    let retry_launch = plan.retry_launch()?;
-                    create_unified_exec_session(&retry_launch).await
-                } else {
-                    Err(UnifiedExecError::UserRejected)
-                }
-            }
-            Err(err) => Err(err),
-        }
+        plan.attempt_with_retry(context.session, |launch| async move {
+            create_unified_exec_session(&launch).await
+        })
+        .await
     }
 
     pub async fn handle_request(

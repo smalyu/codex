@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -128,6 +129,50 @@ impl ExecutionPlan {
 
         approval.is_some()
     }
+
+    /// Runs the provided attempt with the initially selected sandbox.
+    /// If it fails and policy allows, prompt to retry without sandbox and run again.
+    pub(crate) async fn attempt_with_retry<R, E, Fut, Attempt>(
+        &self,
+        session: &Session,
+        attempt: Attempt,
+    ) -> Result<R, E>
+    where
+        Attempt: Fn(SandboxLaunch) -> Fut,
+        Fut: Future<Output = Result<R, E>>,
+        E: From<SandboxLaunchError> + std::fmt::Display,
+    {
+        self.attempt_with_retry_if(session, attempt, |_| true).await
+    }
+
+    /// Like `attempt_with_retry`, but only retries if `should_retry(err)` returns true.
+    pub(crate) async fn attempt_with_retry_if<R, E, Fut, Attempt, Should>(
+        &self,
+        session: &Session,
+        attempt: Attempt,
+        should_retry: Should,
+    ) -> Result<R, E>
+    where
+        Attempt: Fn(SandboxLaunch) -> Fut,
+        Fut: Future<Output = Result<R, E>>,
+        Should: Fn(&E) -> bool,
+        E: From<SandboxLaunchError> + std::fmt::Display,
+    {
+        let initial_launch = self.initial_launch().map_err(E::from)?;
+        match attempt(initial_launch).await {
+            Ok(result) => Ok(result),
+            Err(err) if self.should_retry_without_sandbox() && should_retry(&err) => {
+                let failure = format!("Execution failed: {err}");
+                if self.prompt_retry_without_sandbox(session, failure).await {
+                    let retry_launch = self.retry_launch().map_err(E::from)?;
+                    attempt(retry_launch).await
+                } else {
+                    Err(err)
+                }
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 /// Coordinates sandbox selection, backend-specific preparation, and command
@@ -226,48 +271,33 @@ impl Executor {
 
         let stdout_stream = plan.stdout_stream();
         let sandbox_policy = plan.config().sandbox_policy.clone();
-        let initial_launch = plan
-            .initial_launch()
-            .map_err(|err| ExecError::Codex(err.into()))?;
-        let first_attempt = execute_sandbox_launch(
-            plan.request().params.clone(),
-            initial_launch,
-            plan.initial_sandbox(),
-            &sandbox_policy,
-            stdout_stream.clone(),
-        )
-        .await;
 
-        match first_attempt {
+        // Drive attempts via the shared helper, but do not retry on timeouts.
+        let result: Result<ExecToolCallOutput, CodexErr> = plan
+            .attempt_with_retry_if(
+                session,
+                |launch| {
+                    let params = plan.request().params.clone();
+                    let sandbox = plan.initial_sandbox();
+                    let policy = sandbox_policy.clone();
+                    let stream = stdout_stream.clone();
+                    async move { execute_sandbox_launch(params, launch, sandbox, &policy, stream).await }
+                },
+                |err: &CodexErr| { !matches!(err, CodexErr::Sandbox(SandboxErr::Timeout { .. })) },
+            )
+            .await;
+
+        match result {
             Ok(output) => Ok(output),
             Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => {
-                Err(CodexErr::Sandbox(SandboxErr::Timeout { output }).into())
+                Err(ExecError::Codex(CodexErr::Sandbox(SandboxErr::Timeout {
+                    output,
+                })))
             }
             Err(CodexErr::Sandbox(error)) => {
-                if plan.should_retry_without_sandbox() {
-                    if plan
-                        .prompt_retry_without_sandbox(session, format!("Execution failed: {error}"))
-                        .await
-                    {
-                        let retry_launch = plan
-                            .retry_launch()
-                            .map_err(|err| ExecError::Codex(err.into()))?;
-                        execute_sandbox_launch(
-                            plan.request().params.clone(),
-                            retry_launch,
-                            SandboxType::None,
-                            &sandbox_policy,
-                            stdout_stream,
-                        )
-                        .await
-                        .map_err(ExecError::from)
-                    } else {
-                        Err(ExecError::rejection("exec command rejected by user"))
-                    }
-                } else {
-                    let message = sandbox_failure_message(error);
-                    Err(ExecError::rejection(message))
-                }
+                // Convert non-timeout sandbox errors into user-facing rejection messages.
+                let message = sandbox_failure_message(error);
+                Err(ExecError::rejection(message))
             }
             Err(err) => Err(err.into()),
         }
