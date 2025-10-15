@@ -527,10 +527,6 @@ mod tests {
         let (session, mut turn) = make_session_and_context();
         turn.approval_policy = AskForApproval::Never;
         turn.sandbox_policy = SandboxPolicy::DangerFullAccess;
-        session
-            .services
-            .executor
-            .update_environment(turn.sandbox_policy.clone(), turn.cwd.clone());
         (Arc::new(session), Arc::new(turn))
     }
 
@@ -544,7 +540,6 @@ mod tests {
     ) -> Result<UnifiedExecResult, UnifiedExecError> {
         let request_input = input;
         let request = UnifiedExecRequest {
-            session_id,
             input_chunks: &request_input,
             timeout_ms,
         };
@@ -560,6 +555,7 @@ mod tests {
                     sub_id: "sub",
                     call_id: "call",
                     tool_name: "unified_exec",
+                    session_id,
                 },
             )
             .await

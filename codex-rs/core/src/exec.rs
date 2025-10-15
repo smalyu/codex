@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::error::SandboxErr;
 use crate::executor::SandboxLaunch;
 use crate::executor::SandboxLaunchError;
-use crate::executor::sandbox::build_launch_for_sandbox;
+use crate::executor::build_launch_for_sandbox;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::ExecCommandOutputDeltaEvent;
