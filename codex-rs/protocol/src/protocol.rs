@@ -90,6 +90,9 @@ pub enum Op {
         summary: ReasoningSummaryConfig,
         // The JSON schema to use for the final assistant message
         final_output_json_schema: Option<Value>,
+        /// Optional list of tool names to disable for this turn.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disabled_tools: Option<Vec<String>>,
     },
 
     /// Override parts of the persistent turn context for subsequent turns.
@@ -125,6 +128,9 @@ pub enum Op {
         /// Updated reasoning summary preference (honored only for reasoning-capable models).
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<ReasoningSummaryConfig>,
+        /// Updated default disabled tool list for subsequent turns.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disabled_tools: Option<Vec<String>>,
     },
 
     /// Approve a command execution

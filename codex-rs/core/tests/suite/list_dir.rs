@@ -76,6 +76,7 @@ async fn list_dir_tool_returns_entries() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 
@@ -181,6 +182,7 @@ async fn list_dir_tool_depth_one_omits_children() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 
@@ -293,6 +295,7 @@ async fn list_dir_tool_depth_two_includes_children_only() -> anyhow::Result<()> 
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 
@@ -408,6 +411,7 @@ async fn list_dir_tool_depth_three_includes_grandchildren() -> anyhow::Result<()
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 

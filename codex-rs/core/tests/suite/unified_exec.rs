@@ -128,6 +128,7 @@ async fn unified_exec_reuses_session_via_stdin() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 
@@ -264,6 +265,7 @@ PY
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 
@@ -370,6 +372,7 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 

@@ -43,6 +43,7 @@ use crate::model_family::ModelFamily;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::WireApi;
 use crate::openai_model_info::get_model_info;
+use crate::openai_tools::create_allowed_tools_json_for_responses_api;
 use crate::openai_tools::create_tools_json_for_responses_api;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::RateLimitWindow;
@@ -54,6 +55,7 @@ use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::config_types::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::models::ResponseItem;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -233,13 +235,39 @@ impl ModelClient {
         //
         // For Azure, we send `store: true` and preserve reasoning item IDs.
         let azure_workaround = self.provider.is_azure_responses_endpoint();
+        let tool_choice = if let Some(disabled) = &prompt.disabled_tools {
+            if disabled.is_empty() {
+                serde_json::json!("auto")
+            } else {
+                let allowed = create_allowed_tools_json_for_responses_api(&prompt.tools, disabled);
+                let total_unique = prompt
+                    .tools
+                    .iter()
+                    .map(super::client_common::tools::ToolSpec::name)
+                    .collect::<HashSet<_>>()
+                    .len();
+                if allowed.is_empty() {
+                    serde_json::json!("none")
+                } else if allowed.len() == total_unique {
+                    serde_json::json!("auto")
+                } else {
+                    serde_json::json!({
+                        "type": "allowed_tools",
+                        "mode": "auto",
+                        "tools": allowed,
+                    })
+                }
+            }
+        } else {
+            serde_json::json!("auto")
+        };
 
         let payload = ResponsesApiRequest {
             model: &self.config.model,
             instructions: &full_instructions,
             input: &input_with_instructions,
             tools: &tools_json,
-            tool_choice: "auto",
+            tool_choice,
             parallel_tool_calls: prompt.parallel_tool_calls,
             reasoning,
             store: azure_workaround,

@@ -124,6 +124,7 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         .unwrap_or_default()
         .to_string();
     let tool_calls = json!(requests[0]["tools"].as_array());
+    let tool_choice_request_1 = requests[0]["tool_choice"].clone();
     let prompt_cache_key = requests[0]["prompt_cache_key"]
         .as_str()
         .unwrap_or_default()
@@ -132,6 +133,10 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         .as_str()
         .unwrap_or_default()
         .to_string();
+    let tool_choice_compact_1 = requests[1]["tool_choice"].clone();
+    let tool_choice_after_compact = requests[2]["tool_choice"].clone();
+    let tool_choice_after_resume = requests[3]["tool_choice"].clone();
+    let tool_choice_after_fork = requests[4]["tool_choice"].clone();
     let expected_model = OPENAI_DEFAULT_MODEL;
     let user_turn_1 = json!(
     {
@@ -170,7 +175,7 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         }
       ],
       "tools": tool_calls,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice_request_1,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"
@@ -239,7 +244,7 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         }
       ],
       "tools": [],
-      "tool_choice": "auto",
+      "tool_choice": tool_choice_compact_1,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"
@@ -304,7 +309,7 @@ SUMMARY_ONLY_CONTEXT"
         }
       ],
       "tools": tool_calls,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice_after_compact,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"
@@ -389,7 +394,7 @@ SUMMARY_ONLY_CONTEXT"
         }
       ],
       "tools": tool_calls,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice_after_resume,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"
@@ -474,7 +479,7 @@ SUMMARY_ONLY_CONTEXT"
         }
       ],
       "tools": tool_calls,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice_after_fork,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"

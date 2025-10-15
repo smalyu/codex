@@ -265,6 +265,7 @@ pub(crate) struct TurnContext {
     pub(crate) tools_config: ToolsConfig,
     pub(crate) is_review_mode: bool,
     pub(crate) final_output_json_schema: Option<Value>,
+    pub(crate) disabled_tools: Option<Vec<String>>,
 }
 
 impl TurnContext {
@@ -488,6 +489,7 @@ impl Session {
             cwd,
             is_review_mode: false,
             final_output_json_schema: None,
+            disabled_tools: None,
         };
         let services = SessionServices {
             mcp_connection_manager,
@@ -1171,6 +1173,7 @@ async fn submission_loop(
                 model,
                 effort,
                 summary,
+                disabled_tools,
             } => {
                 // Recalculate the persistent turn context with provided overrides.
                 let prev = Arc::clone(&turn_context);
@@ -1219,6 +1222,9 @@ async fn submission_loop(
                     .clone()
                     .unwrap_or(prev.sandbox_policy.clone());
                 let new_cwd = cwd.clone().unwrap_or_else(|| prev.cwd.clone());
+                let new_disabled_tools = disabled_tools
+                    .clone()
+                    .or_else(|| prev.disabled_tools.clone());
 
                 let tools_config = ToolsConfig::new(&ToolsConfigParams {
                     model_family: &effective_family,
@@ -1236,6 +1242,7 @@ async fn submission_loop(
                     cwd: new_cwd.clone(),
                     is_review_mode: false,
                     final_output_json_schema: None,
+                    disabled_tools: new_disabled_tools,
                 };
 
                 // Install the new persistent context for subsequent tasks/turns.
@@ -1274,6 +1281,7 @@ async fn submission_loop(
                 effort,
                 summary,
                 final_output_json_schema,
+                disabled_tools,
             } => {
                 turn_context
                     .client
@@ -1314,6 +1322,9 @@ async fn submission_loop(
                         summary,
                         sess.conversation_id,
                     );
+                    let effective_disabled_tools = disabled_tools
+                        .clone()
+                        .or_else(|| turn_context.disabled_tools.clone());
 
                     let fresh_turn_context = TurnContext {
                         client,
@@ -1329,6 +1340,7 @@ async fn submission_loop(
                         cwd,
                         is_review_mode: false,
                         final_output_json_schema,
+                        disabled_tools: effective_disabled_tools.clone(),
                     };
 
                     // if the environment context has changed, record it in the conversation history
@@ -1608,6 +1620,7 @@ async fn spawn_review_thread(
         cwd: parent_turn_context.cwd.clone(),
         is_review_mode: true,
         final_output_json_schema: None,
+        disabled_tools: parent_turn_context.disabled_tools.clone(),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -1980,6 +1993,7 @@ async fn run_turn(
         parallel_tool_calls,
         base_instructions_override: turn_context.base_instructions.clone(),
         output_schema: turn_context.final_output_json_schema.clone(),
+        disabled_tools: turn_context.disabled_tools.clone(),
     };
 
     let mut retries = 0;
@@ -2787,6 +2801,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
+            disabled_tools: None,
         };
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),
@@ -2855,6 +2870,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
+            disabled_tools: None,
         });
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),

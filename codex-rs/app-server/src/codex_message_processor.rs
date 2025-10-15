@@ -1050,6 +1050,7 @@ impl CodexMessageProcessor {
                 effort,
                 summary,
                 final_output_json_schema: None,
+                disabled_tools: None,
             })
             .await;
 

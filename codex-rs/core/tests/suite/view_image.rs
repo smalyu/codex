@@ -100,6 +100,7 @@ async fn view_image_tool_attaches_local_image() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 
@@ -199,6 +200,7 @@ async fn view_image_tool_errors_when_path_is_directory() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 
@@ -264,6 +266,7 @@ async fn view_image_tool_errors_when_file_missing() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 

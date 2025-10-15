@@ -159,6 +159,7 @@ async fn submit_turn(test: &TestCodex, prompt: &str) -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 

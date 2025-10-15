@@ -74,6 +74,7 @@ async fn read_file_tool_returns_requested_lines() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: None,
         })
         .await?;
 

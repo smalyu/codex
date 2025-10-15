@@ -41,6 +41,9 @@ pub struct Prompt {
 
     /// Optional the output schema for the model's response.
     pub output_schema: Option<Value>,
+
+    /// Optional list of tool names to disable for this prompt.
+    pub disabled_tools: Option<Vec<String>>,
 }
 
 impl Prompt {
@@ -268,7 +271,7 @@ pub(crate) struct ResponsesApiRequest<'a> {
     // separate enum for serialization.
     pub(crate) input: &'a Vec<ResponseItem>,
     pub(crate) tools: &'a [serde_json::Value],
-    pub(crate) tool_choice: &'static str,
+    pub(crate) tool_choice: Value,
     pub(crate) parallel_tool_calls: bool,
     pub(crate) reasoning: Option<Reasoning>,
     pub(crate) store: bool,
@@ -457,7 +460,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
-            tool_choice: "auto",
+            tool_choice: serde_json::json!("auto"),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
@@ -498,7 +501,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
-            tool_choice: "auto",
+            tool_choice: serde_json::json!("auto"),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
@@ -534,7 +537,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
-            tool_choice: "auto",
+            tool_choice: serde_json::json!("auto"),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,

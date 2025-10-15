@@ -14,6 +14,7 @@ use serde_json::Value as JsonValue;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub enum ConfigShellToolType {
@@ -531,6 +532,40 @@ pub fn create_tools_json_for_responses_api(
     }
 
     Ok(tools_json)
+}
+
+pub fn create_allowed_tools_json_for_responses_api(
+    tools: &[ToolSpec],
+    disabled_names: &[String],
+) -> Vec<serde_json::Value> {
+    let disabled_set: HashSet<&str> = disabled_names
+        .iter()
+        .map(std::string::String::as_str)
+        .collect();
+    let mut seen = HashSet::new();
+    let mut allowed = Vec::new();
+
+    for spec in tools {
+        let name = spec.name();
+        if disabled_set.contains(name) || !seen.insert(name) {
+            continue;
+        }
+        let value = match spec {
+            ToolSpec::Function(tool) => json!({
+                "type": "function",
+                "name": tool.name,
+            }),
+            ToolSpec::Freeform(tool) => json!({
+                "type": "custom",
+                "name": tool.name,
+            }),
+            ToolSpec::LocalShell {} => json!({ "type": "local_shell" }),
+            ToolSpec::WebSearch {} => json!({ "type": "web_search" }),
+        };
+        allowed.push(value);
+    }
+
+    allowed
 }
 /// Returns JSON values that are compatible with Function Calling in the
 /// Chat Completions API:
@@ -1091,6 +1126,33 @@ mod tests {
                 strict: false,
             })
         );
+    }
+
+    #[test]
+    fn create_allowed_tools_excludes_disabled_entries() {
+        let shell = super::create_shell_tool();
+        let web_search = ToolSpec::WebSearch {};
+        let view_image = super::create_view_image_tool();
+
+        let specs = vec![shell, web_search, view_image];
+
+        let allowed = super::create_allowed_tools_json_for_responses_api(
+            &specs,
+            &[String::from("web_search")],
+        );
+
+        assert_eq!(allowed.len(), 2);
+        assert!(allowed.iter().any(|tool| {
+            tool.get("type") == Some(&serde_json::Value::String("function".into()))
+                && tool.get("name") == Some(&serde_json::Value::String("shell".into()))
+        }));
+        assert!(allowed.iter().any(|tool| {
+            tool.get("type") == Some(&serde_json::Value::String("function".into()))
+                && tool.get("name") == Some(&serde_json::Value::String("view_image".into()))
+        }));
+        assert!(allowed.iter().all(|tool| {
+            tool.get("name") != Some(&serde_json::Value::String("web_search".into()))
+        }));
     }
 
     #[test]

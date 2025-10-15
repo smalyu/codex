@@ -145,6 +145,22 @@ impl ToolRouter {
         let payload_outputs_custom = matches!(payload, ToolPayload::Custom { .. });
         let failure_call_id = call_id.clone();
 
+        if turn
+            .disabled_tools
+            .as_ref()
+            .map(|tools| tools.iter().any(|name| name == &tool_name))
+            .unwrap_or(false)
+        {
+            let err = FunctionCallError::RespondToModel(format!(
+                "tool {tool_name} is disabled for this turn"
+            ));
+            return Ok(Self::failure_response(
+                failure_call_id,
+                payload_outputs_custom,
+                err,
+            ));
+        }
+
         let invocation = ToolInvocation {
             session,
             turn,

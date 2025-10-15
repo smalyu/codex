@@ -92,6 +92,7 @@ async fn run_compact_task_inner(
     loop {
         let prompt = Prompt {
             input: turn_input.clone(),
+            disabled_tools: turn_context.disabled_tools.clone(),
             ..Default::default()
         };
         let attempt_result =
