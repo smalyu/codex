@@ -66,17 +66,27 @@ function stubProps(): any {
     loading: false,
     submitInput: vi.fn(),
     confirmationPrompt: null,
+    explanation: undefined,
     submitConfirmation: vi.fn(),
     setLastResponseId: vi.fn(),
-    // Cast to any to satisfy the generic React.Dispatch signature without
-    // pulling the ResponseItem type into the test bundle.
-    setItems: (() => {}) as any,
+    setItems: vi.fn(),
     contextLeftPercent: 100,
     openOverlay: vi.fn(),
     openModelOverlay: vi.fn(),
     openHelpOverlay: vi.fn(),
+    openApprovalOverlay: vi.fn(),
+    openSessionsOverlay: vi.fn(),
+    openDiffOverlay: vi.fn(),
+    onCompact: vi.fn(),
     interruptAgent: vi.fn(),
     active: true,
+    thinkingSeconds: 0,
+    items: [],
+    config: {
+      model: "codex-mini-latest",
+      instructions: "",
+      provider: "openai",
+    },
   };
 }
 

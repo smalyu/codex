@@ -47,6 +47,11 @@ describe("TerminalChatInput multiline functionality", () => {
       interruptAgent: () => {},
       active: true,
       thinkingSeconds: 0,
+      config: {
+        model: "codex-mini-latest",
+        instructions: "",
+        provider: "openai",
+      },
     };
 
     const { stdin, lastFrameStripped, flush, cleanup } = renderTui(
@@ -99,6 +104,11 @@ describe("TerminalChatInput multiline functionality", () => {
       interruptAgent: () => {},
       active: true,
       thinkingSeconds: 0,
+      config: {
+        model: "codex-mini-latest",
+        instructions: "",
+        provider: "openai",
+      },
     };
 
     const { stdin, lastFrameStripped, flush, cleanup } = renderTui(

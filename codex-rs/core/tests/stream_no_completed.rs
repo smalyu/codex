@@ -96,6 +96,7 @@ async fn retries_on_early_close() {
         query_params: None,
         http_headers: None,
         env_http_headers: None,
+        supports_temperature: true,
     };
 
     let ctrl_c = std::sync::Arc::new(tokio::sync::Notify::new());

@@ -81,6 +81,11 @@ describe("TerminalChatInput file tag suggestions", () => {
     interruptAgent: vi.fn(),
     active: true,
     thinkingSeconds: 0,
+    config: {
+      model: "codex-mini-latest",
+      instructions: "",
+      provider: "openai",
+    },
   };
 
   beforeEach(() => {

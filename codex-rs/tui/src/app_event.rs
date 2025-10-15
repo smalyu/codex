@@ -2,6 +2,7 @@ use codex_core::protocol::Event;
 use codex_file_search::FileMatch;
 use crossterm::event::KeyEvent;
 
+use crate::security_review::{SecurityReviewFailure, SecurityReviewMode, SecurityReviewResult};
 use crate::slash_command::SlashCommand;
 
 #[allow(clippy::large_enum_variant)]
@@ -44,5 +45,11 @@ pub(crate) enum AppEvent {
     FileSearchResult {
         query: String,
         matches: Vec<FileMatch>,
+    },
+
+    /// Completion event for a `/secreview` invocation.
+    SecurityReviewFinished {
+        mode: SecurityReviewMode,
+        outcome: Result<SecurityReviewResult, SecurityReviewFailure>,
     },
 }

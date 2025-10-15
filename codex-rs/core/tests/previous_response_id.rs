@@ -107,6 +107,7 @@ async fn keeps_previous_response_id_between_tasks() {
         query_params: None,
         http_headers: None,
         env_http_headers: None,
+        supports_temperature: true,
     };
 
     // Init session

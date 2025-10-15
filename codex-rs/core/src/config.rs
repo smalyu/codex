@@ -722,6 +722,7 @@ disable_response_storage = true
             query_params: None,
             http_headers: None,
             env_http_headers: None,
+            supports_temperature: true,
         };
         let model_provider_map = {
             let mut model_provider_map = built_in_model_providers();

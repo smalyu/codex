@@ -61,6 +61,11 @@ describe("/clear command", () => {
       active: true,
       thinkingSeconds: 0,
       items: existingItems,
+      config: {
+        model: "codex-mini-latest",
+        instructions: "",
+        provider: "openai",
+      },
     };
 
     const { stdin, flush, cleanup } = renderTui(

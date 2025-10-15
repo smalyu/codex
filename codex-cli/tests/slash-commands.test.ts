@@ -10,6 +10,7 @@ test("SLASH_COMMANDS includes expected commands", () => {
   expect(commands).toContain("/help");
   expect(commands).toContain("/model");
   expect(commands).toContain("/approval");
+  expect(commands).toContain("/secreview");
   expect(commands).toContain("/clearhistory");
   expect(commands).toContain("/diff");
 });

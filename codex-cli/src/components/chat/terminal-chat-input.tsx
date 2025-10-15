@@ -10,7 +10,7 @@ import type {
 import MultilineTextEditor from "./multiline-editor";
 import { TerminalChatCommandReview } from "./terminal-chat-command-review.js";
 import TextCompletions from "./terminal-chat-completions.js";
-import { loadConfig } from "../../utils/config.js";
+import { loadConfig, type AppConfig } from "../../utils/config.js";
 import { getFileSystemSuggestions } from "../../utils/file-system-suggestions.js";
 import { expandFileTags } from "../../utils/file-tag-utils";
 import { createInputItem } from "../../utils/input-utils.js";
@@ -18,11 +18,17 @@ import { log } from "../../utils/logger/log.js";
 import { setSessionId } from "../../utils/session.js";
 import { SLASH_COMMANDS, type SlashCommand } from "../../utils/slash-commands";
 import {
+  runSecurityReview,
+  SecurityReviewError,
+} from "../../utils/security-review.js";
+import type { SecurityReviewMode } from "../../utils/security-review.js";
+import {
   loadCommandHistory,
   addToHistory,
 } from "../../utils/storage/command-history.js";
 import { clearTerminal, onExit } from "../../utils/terminal.js";
 import { Box, Text, useApp, useInput, useStdin } from "ink";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import React, {
   useCallback,
@@ -38,6 +44,130 @@ const suggestions = [
   "fix any build errors",
   "are there any bugs in my code?",
 ];
+
+const SEC_REVIEW_COMMAND = "/secreview";
+
+type SecReviewCommandOptions = {
+  mode: SecurityReviewMode;
+  includePaths: Array<string>;
+  outputPath?: string;
+  repoPath?: string;
+  modelName?: string;
+};
+
+function tokenizeCommand(input: string): Array<string> {
+  const tokens: Array<string> = [];
+  const regex = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(input)) !== null) {
+    if (match[1] != null) {
+      tokens.push(match[1]);
+    } else if (match[2] != null) {
+      tokens.push(match[2]);
+    } else if (match[3] != null) {
+      tokens.push(match[3]);
+    }
+  }
+  return tokens;
+}
+
+function parseSecReviewCommand(input: string): SecReviewCommandOptions {
+  const tokens = tokenizeCommand(input).slice(1); // drop the command itself
+  let mode: SecurityReviewMode = "full";
+  const includePaths: Array<string> = [];
+  let outputPath: string | undefined;
+  let repoPath: string | undefined;
+  let modelName: string | undefined;
+
+  const parseMode = (value: string, option: string) => {
+    if (value === "bugs") {
+      mode = "bugs";
+    } else if (value === "full") {
+      mode = "full";
+    } else {
+      throw new Error(`Unknown ${option} value "${value}". Use "full" or "bugs".`);
+    }
+  };
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+
+    const expectValue = (label: string): string => {
+      if (i + 1 >= tokens.length) {
+        throw new Error(`Expected value after ${label}`);
+      }
+      i += 1;
+      return tokens[i];
+    };
+
+    if (token === "--") {
+      break;
+    } else if (token === "bugs" || token === "--bugs" || token === "--mode=bugs") {
+      mode = "bugs";
+    } else if (token === "full" || token === "--full" || token === "--mode=full") {
+      mode = "full";
+    } else if (token === "--mode") {
+      parseMode(expectValue("--mode"), "--mode");
+    } else if (token.startsWith("--mode=")) {
+      parseMode(token.slice("--mode=".length), "--mode");
+    } else if (token === "--path" || token === "-p") {
+      includePaths.push(expectValue(token));
+    } else if (token.startsWith("--path=")) {
+      includePaths.push(token.slice("--path=".length));
+    } else if (token.startsWith("-p=")) {
+      includePaths.push(token.slice("-p=".length));
+    } else if (
+      token === "--output" ||
+      token === "-o" ||
+      token === "--output-location"
+    ) {
+      outputPath = expectValue(token);
+    } else if (token.startsWith("--output=")) {
+      outputPath = token.slice("--output=".length);
+    } else if (token.startsWith("-o=")) {
+      outputPath = token.slice("-o=".length);
+    } else if (
+      token === "--repo" ||
+      token === "--repo-location" ||
+      token === "--repository"
+    ) {
+      repoPath = expectValue(token);
+    } else if (token.startsWith("--repo=")) {
+      repoPath = token.slice("--repo=".length);
+    } else if (token.startsWith("--repo-location=")) {
+      repoPath = token.slice("--repo-location=".length);
+    } else if (token === "--model" || token === "--model-name") {
+      modelName = expectValue(token);
+    } else if (token.startsWith("--model=")) {
+      modelName = token.slice("--model=".length);
+    } else if (token.startsWith("--model-name=")) {
+      modelName = token.slice("--model-name=".length);
+    } else if (token.length > 0) {
+      includePaths.push(token);
+    }
+  }
+
+  return {
+    mode,
+    includePaths: includePaths.filter((p) => p.length > 0),
+    outputPath,
+    repoPath,
+    modelName,
+  };
+}
+
+function trimLogOutput(logText: string, maxLines: number = 40): string {
+  const normalised = logText.replace(/\r\n/g, "\n").trimEnd();
+  if (normalised === "") {
+    return "(empty)";
+  }
+  const lines = normalised.split("\n");
+  if (lines.length <= maxLines) {
+    return normalised;
+  }
+  const tail = lines.slice(-maxLines);
+  return ["… (showing last " + maxLines + " lines)", ...tail].join("\n");
+}
 
 export default function TerminalChatInput({
   isNew,
@@ -60,6 +190,7 @@ export default function TerminalChatInput({
   active,
   thinkingSeconds,
   items = [],
+  config,
 }: {
   isNew: boolean;
   loading: boolean;
@@ -85,6 +216,7 @@ export default function TerminalChatInput({
   thinkingSeconds: number;
   // New: current conversation items so we can include them in bug reports
   items?: Array<ResponseItem>;
+  config: AppConfig;
 }): React.ReactElement {
   // Slash command suggestion index
   const [selectedSlashSuggestion, setSelectedSlashSuggestion] =
@@ -513,6 +645,230 @@ export default function TerminalChatInput({
         setInput("");
         openApprovalOverlay();
         return;
+      } else if (inputValue.startsWith(SEC_REVIEW_COMMAND)) {
+        setInput("");
+        const commandId = `secreview-${Date.now()}`;
+
+        let parsed: SecReviewCommandOptions;
+        try {
+          parsed = parseSecReviewCommand(inputValue);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          setItems((prev) => [
+            ...prev,
+            {
+              id: `${commandId}-parse-error`,
+              type: "message",
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text: `⚠️ Unable to parse ${SEC_REVIEW_COMMAND} arguments: ${message}`,
+                },
+              ],
+            },
+          ]);
+          return;
+        }
+
+        const repoPath = parsed.repoPath
+          ? path.isAbsolute(parsed.repoPath)
+            ? parsed.repoPath
+            : path.resolve(process.cwd(), parsed.repoPath)
+          : process.cwd();
+
+        const resolvedOutputPath =
+          parsed.outputPath != null
+            ? path.isAbsolute(parsed.outputPath)
+              ? parsed.outputPath
+              : path.resolve(repoPath, parsed.outputPath)
+            : undefined;
+
+        const scopeDescription =
+          parsed.includePaths.length > 0
+            ? parsed.includePaths.join(", ")
+            : "entire repository";
+
+        const introLines = [
+          `🔐 Running AppSec security review (mode: ${parsed.mode}).`,
+          `Repository: ${repoPath}`,
+          `Scope: ${scopeDescription}`,
+        ];
+
+        if (resolvedOutputPath) {
+          introLines.push(`Output: ${resolvedOutputPath}`);
+        }
+
+        if (parsed.modelName) {
+          introLines.push(`Model override: ${parsed.modelName}`);
+        }
+
+        setItems((prev) => [
+          ...prev,
+          {
+            id: `${commandId}-start`,
+            type: "message",
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text: introLines.join("\n"),
+              },
+            ],
+          },
+        ]);
+
+        try {
+          const result = await runSecurityReview({
+            repoPath,
+            includePaths: parsed.includePaths,
+            outputPath: resolvedOutputPath,
+            modelName: parsed.modelName,
+            mode: parsed.mode,
+            config,
+          });
+
+          const summaryLines = [
+            "✅ AppSec review complete.",
+            `Artifacts: ${result.outputRoot}`,
+          ];
+          if (!result.reportContent) {
+            summaryLines.push("ℹ️ report.md not found in output.");
+          }
+          if (!result.bugsContent) {
+            summaryLines.push("ℹ️ context/bugs.md not found in output.");
+          }
+
+          setItems((prev) => [
+            ...prev,
+            {
+              id: `${commandId}-complete`,
+              type: "message",
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text: summaryLines.join("\n"),
+                },
+              ],
+            },
+          ]);
+
+          if (parsed.mode === "full" && result.reportContent) {
+            setItems((prev) => [
+              ...prev,
+              {
+                id: `${commandId}-report`,
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: `# AppSec Security Review Report\n\n${result.reportContent}`,
+                  },
+                ],
+              },
+            ]);
+          }
+
+          if (result.bugsContent) {
+            const heading =
+              parsed.mode === "full"
+                ? "## Bugs Summary"
+                : "# AppSec Bugs Summary";
+            setItems((prev) => [
+              ...prev,
+              {
+                id: `${commandId}-bugs`,
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "output_text",
+                    text: `${heading}\n\n${result.bugsContent}`,
+                  },
+                ],
+              },
+            ]);
+          } else {
+            setItems((prev) => [
+              ...prev,
+              {
+                id: `${commandId}-no-bugs`,
+                type: "message",
+                role: "system",
+                content: [
+                  {
+                    type: "input_text",
+                    text:
+                      "No bug summary produced. Check the output directory for details.",
+                  },
+                ],
+              },
+            ]);
+          }
+
+          if (parsed.mode === "bugs" && result.reportContent) {
+            setItems((prev) => [
+              ...prev,
+              {
+                id: `${commandId}-report-location`,
+                type: "message",
+                role: "system",
+                content: [
+                  {
+                    type: "input_text",
+                    text: `Full report available at ${result.reportPath}`,
+                  },
+                ],
+              },
+            ]);
+          }
+          if (result.stdout.trim()) {
+            setItems((prev) => [
+              ...prev,
+              {
+                id: `${commandId}-logs`,
+                type: "message",
+                role: "system",
+                content: [
+                  {
+                    type: "input_text",
+                    text: `Logs:\n${trimLogOutput(result.stdout)}`,
+                  },
+                ],
+              },
+            ]);
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          const stderr =
+            error instanceof SecurityReviewError && error.stderr
+              ? `\n\nstderr last lines:\n${trimLogOutput(error.stderr)}`
+              : "";
+          const stdout =
+            error instanceof SecurityReviewError && error.stdout
+              ? `\n\nstdout last lines:\n${trimLogOutput(error.stdout)}`
+              : "";
+          setItems((prev) => [
+            ...prev,
+            {
+              id: `${commandId}-error`,
+              type: "message",
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text: `❌ AppSec review failed: ${message}${stderr}${stdout}`,
+                },
+              ],
+            },
+          ]);
+        }
+
+        return;
       } else if (["exit", "q", ":q"].includes(inputValue)) {
         setInput("");
         setTimeout(() => {
@@ -707,13 +1063,13 @@ export default function TerminalChatInput({
       submitInput([inputItem]);
 
       // Get config for history persistence.
-      const config = loadConfig();
+      const historyConfig = loadConfig();
 
       // Add to history and update state.
       const updatedHistory = await addToHistory(value, history, {
-        maxSize: config.history?.maxSize ?? 1000,
-        saveHistory: config.history?.saveHistory ?? true,
-        sensitivePatterns: config.history?.sensitivePatterns ?? [],
+        maxSize: historyConfig.history?.maxSize ?? 1000,
+        saveHistory: historyConfig.history?.saveHistory ?? true,
+        sensitivePatterns: historyConfig.history?.sensitivePatterns ?? [],
       });
 
       setHistory(updatedHistory);
@@ -742,6 +1098,7 @@ export default function TerminalChatInput({
       onCompact,
       skipNextSubmit,
       items,
+      config,
     ],
   );
 

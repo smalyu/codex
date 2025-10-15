@@ -266,6 +266,11 @@ impl<'a> App<'a> {
                             widget.add_diff_output(text);
                         }
                     }
+                    SlashCommand::SecurityReview => {
+                        if let AppState::Chat { widget } = &mut self.app_state {
+                            widget.start_security_review_with_defaults();
+                        }
+                    }
                 },
                 AppEvent::StartFileSearch(query) => {
                     self.file_search.on_user_query(query);
@@ -273,6 +278,11 @@ impl<'a> App<'a> {
                 AppEvent::FileSearchResult { query, matches } => {
                     if let AppState::Chat { widget } = &mut self.app_state {
                         widget.apply_file_search_result(query, matches);
+                    }
+                }
+                AppEvent::SecurityReviewFinished { mode, outcome } => {
+                    if let AppState::Chat { widget } = &mut self.app_state {
+                        widget.handle_security_review_finished(mode, outcome);
                     }
                 }
             }

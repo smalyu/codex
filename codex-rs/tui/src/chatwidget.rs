@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use codex_core::codex_wrapper::init_codex;
@@ -29,6 +29,7 @@ use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio::task::JoinHandle;
 
 use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
@@ -38,7 +39,10 @@ use crate::bottom_pane::InputResult;
 use crate::conversation_history_widget::ConversationHistoryWidget;
 use crate::history_cell::PatchEventType;
 use crate::user_approval_widget::ApprovalRequest;
+use crate::security_review::{run_security_review, SecurityReviewFailure, SecurityReviewMode, SecurityReviewRequest, SecurityReviewResult};
 use codex_file_search::FileMatch;
+use path_clean::PathClean;
+use shlex;
 
 pub(crate) struct ChatWidget<'a> {
     app_event_tx: AppEventSender,
@@ -49,6 +53,8 @@ pub(crate) struct ChatWidget<'a> {
     config: Config,
     initial_user_message: Option<UserMessage>,
     token_usage: TokenUsage,
+    security_review_handle: Option<JoinHandle<()>>,
+    active_security_review_mode: Option<SecurityReviewMode>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -77,6 +83,15 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
     } else {
         Some(UserMessage { text, image_paths })
     }
+}
+
+#[derive(Debug, Default)]
+struct ParsedSecReviewCommand {
+    mode: SecurityReviewMode,
+    include_paths: Vec<String>,
+    output_path: Option<String>,
+    repo_path: Option<String>,
+    model_name: Option<String>,
 }
 
 impl ChatWidget<'_> {
@@ -135,6 +150,8 @@ impl ChatWidget<'_> {
                 initial_images,
             ),
             token_usage: TokenUsage::default(),
+            security_review_handle: None,
+            active_security_review_mode: None,
         }
     }
 
@@ -182,6 +199,11 @@ impl ChatWidget<'_> {
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
         let UserMessage { text, image_paths } = user_message;
+
+        if self.try_handle_slash_command(&text) {
+            return;
+        }
+
         let mut items: Vec<InputItem> = Vec::new();
 
         if !text.is_empty() {
@@ -216,6 +238,240 @@ impl ChatWidget<'_> {
             self.conversation_history.add_user_message(text);
         }
         self.conversation_history.scroll_to_bottom();
+    }
+
+    fn try_handle_slash_command(&mut self, text: &str) -> bool {
+        let trimmed = text.trim();
+        if trimmed.starts_with("/secreview") {
+            match parse_security_review_command(trimmed) {
+                Ok(command) => {
+                    if let Err(err) = self.launch_security_review(command) {
+                        self.report_security_review_error(err);
+                    }
+                }
+                Err(err) => self.report_security_review_error(err),
+            }
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn start_security_review_with_defaults(&mut self) {
+        let command = ParsedSecReviewCommand::default();
+        if let Err(err) = self.launch_security_review(command) {
+            self.report_security_review_error(err);
+        }
+    }
+
+    fn launch_security_review(&mut self, command: ParsedSecReviewCommand) -> Result<(), String> {
+        let repo_candidate = if let Some(repo_override) = command.repo_path.as_ref() {
+            let candidate = Path::new(repo_override);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                self.config.cwd.join(candidate)
+            }
+        } else {
+            self.config.cwd.clone()
+        }
+        .clean();
+
+        let repo_path = match repo_candidate.canonicalize() {
+            Ok(path) => path,
+            Err(_) => repo_candidate.clone(),
+        };
+
+        if !repo_path.exists() {
+            return Err(format!(
+                "Repository path '{}' does not exist.",
+                repo_path.display()
+            ));
+        }
+        if !repo_path.is_dir() {
+            return Err(format!(
+                "Repository path '{}' is not a directory.",
+                repo_path.display()
+            ));
+        }
+
+        let mut resolved_paths: Vec<PathBuf> = Vec::new();
+        let mut display_paths: Vec<String> = Vec::new();
+
+        for include in &command.include_paths {
+            let candidate = resolve_path(&repo_path, include);
+            let canonical = match candidate.canonicalize() {
+                Ok(path) => path,
+                Err(_) => candidate.clone(),
+            };
+
+            if !canonical.exists() {
+                return Err(format!("Path '{}' does not exist.", canonical.display()));
+            }
+            if !canonical.starts_with(&repo_path) {
+                return Err(format!(
+                    "Path '{}' is outside the repository root '{}'.",
+                    canonical.display(),
+                    repo_path.display()
+                ));
+            }
+
+            let relative = canonical
+                .strip_prefix(&repo_path)
+                .unwrap_or(&canonical)
+                .display()
+                .to_string();
+            display_paths.push(relative);
+            resolved_paths.push(canonical);
+        }
+
+        let output_root = if let Some(output_override) = command.output_path.as_ref() {
+            let candidate = Path::new(output_override);
+            if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else {
+                repo_path.join(candidate)
+            }
+        } else {
+            repo_path.join("appsec_review")
+        }
+        .clean();
+
+        let model_name = command
+            .model_name
+            .clone()
+            .unwrap_or_else(|| self.config.model.clone());
+
+        if self.security_review_handle.is_some() {
+            return Err("A security review is already running. Please wait for it to finish or abort it before starting another.".to_string());
+        }
+
+        let scope_description = if resolved_paths.is_empty() {
+            "entire repository".to_string()
+        } else {
+            display_paths.join(", ")
+        };
+
+        let summary = format!(
+            "🔐 Running AppSec security review (mode: {}).\nRepository: {}\nScope: {}\nOutput: {}\nModel: {}",
+            command.mode.as_str(),
+            repo_path.display(),
+            scope_description,
+            output_root.display(),
+            model_name
+        );
+        self.conversation_history.add_background_event(summary);
+        self.conversation_history.scroll_to_bottom();
+        self.bottom_pane.set_task_running(true);
+        self.request_redraw();
+
+        let provider = self.config.model_provider.clone();
+        let request = SecurityReviewRequest {
+            repo_path: repo_path.clone(),
+            include_paths: resolved_paths,
+            output_root: output_root.clone(),
+            mode: command.mode,
+            model: model_name,
+            provider,
+            progress_sender: Some(self.app_event_tx.clone()),
+        };
+
+        let app_event_tx = self.app_event_tx.clone();
+        let mode = command.mode;
+        let handle = tokio::spawn(async move {
+            let outcome = run_security_review(request).await;
+            app_event_tx.send(AppEvent::SecurityReviewFinished { mode, outcome });
+        });
+        self.security_review_handle = Some(handle);
+        self.active_security_review_mode = Some(mode);
+
+        Ok(())
+    }
+
+    fn report_security_review_error(&mut self, message: String) {
+        self.security_review_handle = None;
+        self.active_security_review_mode = None;
+        self.bottom_pane.set_task_running(false);
+        self.conversation_history
+            .add_background_event(format!("❌ {message}"));
+        self.conversation_history.scroll_to_bottom();
+        self.request_redraw();
+    }
+
+    pub(crate) fn handle_security_review_finished(
+        &mut self,
+        mode: SecurityReviewMode,
+        outcome: Result<SecurityReviewResult, SecurityReviewFailure>,
+    ) {
+        self.security_review_handle = None;
+        self.active_security_review_mode = None;
+        self.bottom_pane.set_task_running(false);
+        match outcome {
+            Ok(result) => {
+                let SecurityReviewResult {
+                    bugs_markdown,
+                    report_markdown,
+                    bugs_path,
+                    report_path,
+                    logs,
+                } = result;
+
+                let mut summary = format!(
+                    "✅ AppSec security review complete (mode: {}).\nBugs saved to {}.",
+                    mode.as_str(),
+                    bugs_path.display()
+                );
+                if let Some(report_path) = report_path.as_ref() {
+                    summary.push_str(&format!(
+                        "\nReport saved to {}.",
+                        report_path.display()
+                    ));
+                }
+                self.conversation_history.add_background_event(summary);
+
+                if matches!(mode, SecurityReviewMode::Full) {
+                    if let Some(markdown) = report_markdown.and_then(|m| {
+                        if m.trim().is_empty() {
+                            None
+                        } else {
+                            Some(m)
+                        }
+                    }) {
+                        self.conversation_history.add_agent_message(
+                            &self.config,
+                            format!("# AppSec Security Review Report\n\n{markdown}"),
+                        );
+                    }
+                }
+
+                if !bugs_markdown.trim().is_empty() {
+                    let heading = if matches!(mode, SecurityReviewMode::Full) {
+                        "## Bugs Summary"
+                    } else {
+                        "# AppSec Bugs Summary"
+                    };
+                    self.conversation_history.add_agent_message(
+                        &self.config,
+                        format!("{heading}\n\n{bugs_markdown}"),
+                    );
+                }
+
+                if let Some(log_text) = format_security_review_logs(&logs) {
+                    self.conversation_history
+                        .add_background_event(format!("Logs:\n{log_text}"));
+                }
+            }
+            Err(error) => {
+                let SecurityReviewFailure { message, logs } = error;
+                let mut summary = format!("❌ AppSec security review failed: {message}");
+                if let Some(log_text) = format_security_review_logs(&logs) {
+                    summary.push_str(&format!("\n\nLogs:\n{log_text}"));
+                }
+                self.conversation_history.add_background_event(summary);
+            }
+        }
+
+        self.conversation_history.scroll_to_bottom();
+        self.request_redraw();
     }
 
     pub(crate) fn handle_codex_event(&mut self, event: Event) {
@@ -420,6 +676,20 @@ impl ChatWidget<'_> {
     /// Returns true if the key press was handled, false if it was not.
     /// If the key press was not handled, the caller should handle it (likely by exiting the process).
     pub(crate) fn on_ctrl_c(&mut self) -> bool {
+        if let Some(handle) = self.security_review_handle.take() {
+            handle.abort();
+            let mode = self
+                .active_security_review_mode
+                .take()
+                .unwrap_or_else(SecurityReviewMode::default);
+            let failure = SecurityReviewFailure {
+                message: "AppSec security review aborted by user.".to_string(),
+                logs: vec!["AppSec security review aborted by user.".to_string()],
+            };
+            self.handle_security_review_finished(mode, Err(failure));
+            return true;
+        }
+
         if self.bottom_pane.is_task_running() {
             self.bottom_pane.clear_ctrl_c_quit_hint();
             self.submit_op(Op::Interrupt);
@@ -479,5 +749,139 @@ fn add_token_usage(current_usage: &TokenUsage, new_usage: &TokenUsage) -> TokenU
         output_tokens: current_usage.output_tokens + new_usage.output_tokens,
         reasoning_output_tokens,
         total_tokens: current_usage.total_tokens + new_usage.total_tokens,
+    }
+}
+
+fn parse_security_review_command(input: &str) -> Result<ParsedSecReviewCommand, String> {
+    let tokens = shlex::split(input).ok_or_else(|| "Unable to parse command arguments.".to_string())?;
+    if tokens.is_empty() {
+        return Err("Empty command.".to_string());
+    }
+
+    if tokens[0] != "/secreview" {
+        return Err("Unrecognized command.".to_string());
+    }
+
+    let mut command = ParsedSecReviewCommand::default();
+    let mut idx = 1;
+    while idx < tokens.len() {
+        let token = &tokens[idx];
+
+        if token == "--" {
+            for extra in tokens.iter().skip(idx + 1) {
+                if !extra.is_empty() {
+                    command.include_paths.push(extra.to_string());
+                }
+            }
+            break;
+        } else if matches!(
+            token.as_str(),
+            "bugs" | "--bugs" | "--mode=bugs"
+        ) {
+            command.mode = SecurityReviewMode::Bugs;
+        } else if matches!(
+            token.as_str(),
+            "full" | "--full" | "--mode=full"
+        ) {
+            command.mode = SecurityReviewMode::Full;
+        } else if token == "--mode" {
+            idx += 1;
+            if idx >= tokens.len() {
+                return Err("Expected value after --mode.".to_string());
+            }
+            command.mode = parse_mode(&tokens[idx])?;
+        } else if let Some(value) = token.strip_prefix("--mode=") {
+            command.mode = parse_mode(value)?;
+        } else if token == "--path" || token == "-p" {
+            idx += 1;
+            if idx >= tokens.len() {
+                return Err(format!("Expected value after {token}."));
+            }
+            command.include_paths.push(tokens[idx].clone());
+        } else if let Some(value) = token.strip_prefix("--path=") {
+            command.include_paths.push(value.to_string());
+        } else if let Some(value) = token.strip_prefix("-p=") {
+            command.include_paths.push(value.to_string());
+        } else if matches!(
+            token.as_str(),
+            "--output" | "-o" | "--output-location"
+        ) {
+            idx += 1;
+            if idx >= tokens.len() {
+                return Err(format!("Expected value after {token}."));
+            }
+            command.output_path = Some(tokens[idx].clone());
+        } else if let Some(value) = token.strip_prefix("--output=") {
+            command.output_path = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("-o=") {
+            command.output_path = Some(value.to_string());
+        } else if matches!(
+            token.as_str(),
+            "--repo" | "--repo-location" | "--repository"
+        ) {
+            idx += 1;
+            if idx >= tokens.len() {
+                return Err(format!("Expected value after {token}."));
+            }
+            command.repo_path = Some(tokens[idx].clone());
+        } else if let Some(value) = token.strip_prefix("--repo=") {
+            command.repo_path = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("--repo-location=") {
+            command.repo_path = Some(value.to_string());
+        } else if token == "--model" || token == "--model-name" {
+            idx += 1;
+            if idx >= tokens.len() {
+                return Err(format!("Expected value after {token}."));
+            }
+            command.model_name = Some(tokens[idx].clone());
+        } else if let Some(value) = token.strip_prefix("--model=") {
+            command.model_name = Some(value.to_string());
+        } else if let Some(value) = token.strip_prefix("--model-name=") {
+            command.model_name = Some(value.to_string());
+        } else if !token.is_empty() {
+            command.include_paths.push(token.clone());
+        }
+
+        idx += 1;
+    }
+
+    Ok(command)
+}
+
+fn parse_mode(value: &str) -> Result<SecurityReviewMode, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "full" => Ok(SecurityReviewMode::Full),
+        "bugs" | "bugs-only" | "bugsonly" => Ok(SecurityReviewMode::Bugs),
+        other => Err(format!("Unknown mode '{other}'. Use 'full' or 'bugs'.")),
+    }
+}
+
+fn resolve_path(base: &Path, candidate: &str) -> PathBuf {
+    let path = Path::new(candidate);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+    .clean()
+}
+
+fn format_security_review_logs(logs: &[String]) -> Option<String> {
+    if logs.is_empty() {
+        return None;
+    }
+
+    let joined = logs.join("\n");
+    if joined.trim().is_empty() {
+        return None;
+    }
+
+    let lines: Vec<&str> = joined.lines().collect();
+    const MAX_LINES: usize = 40;
+    if lines.len() <= MAX_LINES {
+        Some(joined)
+    } else {
+        let tail = lines[lines.len().saturating_sub(MAX_LINES)..].join("\n");
+        Some(format!("… (showing last {MAX_LINES} lines)\n{tail}"))
     }
 }

@@ -57,6 +57,10 @@ export default function HelpOverlay({
           with session log
         </Text>
         <Text>
+          <Text color="cyan">/secreview</Text> – run AppSec security review and
+          show the results
+        </Text>
+        <Text>
           <Text color="cyan">/diff</Text> – view working tree git diff
         </Text>
         <Text>

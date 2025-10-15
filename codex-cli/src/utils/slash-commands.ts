@@ -25,6 +25,10 @@ export const SLASH_COMMANDS: Array<SlashCommand> = [
   { command: "/model", description: "Open model selection panel" },
   { command: "/approval", description: "Open approval mode selection panel" },
   {
+    command: "/secreview",
+    description: "Run AppSec security review and display the generated reports",
+  },
+  {
     command: "/bug",
     description: "Generate a prefilled GitHub issue URL with session log",
   },

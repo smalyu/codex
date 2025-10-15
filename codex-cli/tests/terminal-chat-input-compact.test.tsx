@@ -26,6 +26,11 @@ describe("TerminalChatInput compact command", () => {
       interruptAgent: () => {},
       active: true,
       thinkingSeconds: 0,
+      config: {
+        model: "codex-mini-latest",
+        instructions: "",
+        provider: "openai",
+      },
     };
     const { lastFrameStripped } = renderTui(<TerminalChatInput {...props} />);
     const frame = lastFrameStripped();

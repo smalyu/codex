@@ -64,6 +64,14 @@ pub struct ModelProviderInfo {
     /// value should be used. If the environment variable is not set, or the
     /// value is empty, the header will not be included in the request.
     pub env_http_headers: Option<HashMap<String, String>>,
+
+    /// Whether the provider accepts an explicit `temperature` parameter.
+    #[serde(default = "default_supports_temperature")]
+    pub supports_temperature: bool,
+}
+
+const fn default_supports_temperature() -> bool {
+    true
 }
 
 impl ModelProviderInfo {
@@ -205,6 +213,7 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
                         .into_iter()
                         .collect(),
                 ),
+                supports_temperature: false,
             },
         ),
     ]
@@ -234,6 +243,7 @@ base_url = "http://localhost:11434/v1"
             query_params: None,
             http_headers: None,
             env_http_headers: None,
+            supports_temperature: true,
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -259,6 +269,7 @@ query_params = { api-version = "2025-04-01-preview" }
             }),
             http_headers: None,
             env_http_headers: None,
+            supports_temperature: true,
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -287,6 +298,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             env_http_headers: Some(maplit::hashmap! {
                 "X-Example-Env-Header".to_string() => "EXAMPLE_ENV_VAR".to_string(),
             }),
+            supports_temperature: true,
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();

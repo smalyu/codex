@@ -14,6 +14,8 @@ pub enum SlashCommand {
     // more frequently used commands should be listed first.
     New,
     Diff,
+    #[strum(serialize = "secreview")]
+    SecurityReview,
     Quit,
     ToggleMouseMode,
 }
@@ -29,6 +31,9 @@ impl SlashCommand {
             SlashCommand::Quit => "Exit the application.",
             SlashCommand::Diff => {
                 "Show git diff of the working directory (including untracked files)"
+            }
+            SlashCommand::SecurityReview => {
+                "Run AppSec security review and display the generated reports"
             }
         }
     }
