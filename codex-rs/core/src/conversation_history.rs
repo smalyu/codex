@@ -1,5 +1,10 @@
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use tracing::warn;
+
+static SYNTHETIC_TOOL_OUTPUTS: AtomicU64 = AtomicU64::new(0);
 
 use crate::state::TaskKind;
 
@@ -126,6 +131,21 @@ impl ConversationHistory {
                 ResponseItem::CustomToolCall { call_id: id, .. } => id == &call_id,
                 _ => false,
             }) {
+                // Optionally fail fast in CI/dev to surface original issues.
+                if std::env::var("CODEX_FAIL_ON_SYNTHETIC_TOOL_OUTPUT")
+                    .map_or(false, |v| v == "1" || v.eq_ignore_ascii_case("true"))
+                {
+                    panic!("Synthetic tool output inserted for unresolved call_id={call_id}");
+                }
+
+                // Log a warning to help developers discover where/when this happens.
+                warn!(
+                    %call_id,
+                    thread = ?task_kind,
+                    "Inserting synthetic tool output for unresolved tool call"
+                );
+
+                SYNTHETIC_TOOL_OUTPUTS.fetch_add(1, Ordering::Relaxed);
                 thread_vec.insert(
                     idx + 1,
                     ResponseItem::CustomToolCallOutput {
@@ -269,4 +289,8 @@ mod tests {
             _ => panic!("unexpected item ordering: {items:?}"),
         }
     }
+
+    // Intentionally not testing the env-based panic path here: mutating
+    // environment variables is unsafe in this edition and risks test
+    // interference. The behavior is exercised indirectly by integration tests.
 }
