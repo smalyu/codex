@@ -16,6 +16,7 @@ use async_channel::Sender;
 use codex_apply_patch::ApplyPatchAction;
 use codex_protocol::ConversationId;
 use codex_protocol::protocol::ConversationPathResponseEvent;
+use codex_protocol::protocol::DisabledTool;
 use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
@@ -23,7 +24,6 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TaskStartedEvent;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
-use codex_protocol::protocol::default_disabled_tools;
 use futures::future::BoxFuture;
 use futures::prelude::*;
 use futures::stream::FuturesOrdered;
@@ -265,7 +265,7 @@ pub(crate) struct TurnContext {
     pub(crate) tools_config: ToolsConfig,
     pub(crate) is_review_mode: bool,
     pub(crate) final_output_json_schema: Option<Value>,
-    pub(crate) disabled_tools: Vec<String>,
+    pub(crate) disabled_tools: Vec<DisabledTool>,
 }
 
 impl TurnContext {
@@ -461,7 +461,7 @@ impl Session {
             cwd,
             is_review_mode: false,
             final_output_json_schema: None,
-            disabled_tools: default_disabled_tools(),
+            disabled_tools: DisabledTool::defaults(),
         };
         let services = SessionServices {
             mcp_connection_manager,
@@ -1211,7 +1211,7 @@ async fn submission_loop(
                     cwd: new_cwd.clone(),
                     is_review_mode: false,
                     final_output_json_schema: None,
-                    disabled_tools: disabled_tools.unwrap_or_else(default_disabled_tools),
+                    disabled_tools: disabled_tools.unwrap_or_else(DisabledTool::defaults),
                 };
 
                 // Install the new persistent context for subsequent tasks/turns.
@@ -1586,7 +1586,7 @@ async fn spawn_review_thread(
         cwd: parent_turn_context.cwd.clone(),
         is_review_mode: true,
         final_output_json_schema: None,
-        disabled_tools: default_disabled_tools(),
+        disabled_tools: DisabledTool::defaults(),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -1953,20 +1953,29 @@ async fn run_turn(
         .get_model_family()
         .supports_parallel_tool_calls;
     let parallel_tool_calls = model_supports_parallel;
-    let allowed_tools = router
-        .allowed_tools()
-        .into_iter()
-        .filter(|tool| {
-            tool.get("name")
-                .and_then(|val| val.as_str())
-                .is_none_or(|name| {
-                    !turn_context
-                        .disabled_tools
-                        .iter()
-                        .any(|disabled| disabled == name)
-                })
-        })
-        .collect::<Vec<_>>();
+    let mut allowed_tools = Vec::new();
+    let mut restricted_tool_choice = false;
+    for tool in router.allowed_tools() {
+        let is_disabled = tool
+            .get("name")
+            .and_then(|val| val.as_str())
+            .is_some_and(|name| {
+                turn_context
+                    .disabled_tools
+                    .iter()
+                    .any(|disabled| disabled.matches_tool_name(name))
+            });
+        if is_disabled {
+            restricted_tool_choice = true;
+            continue;
+        }
+        allowed_tools.push(tool);
+    }
+    let allowed_tools = if restricted_tool_choice {
+        Some(allowed_tools)
+    } else {
+        None
+    };
     let prompt = Prompt {
         input,
         tools: router.specs(),
@@ -2781,7 +2790,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
-            disabled_tools: default_disabled_tools(),
+            disabled_tools: DisabledTool::defaults(),
         };
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),
@@ -2850,7 +2859,7 @@ mod tests {
             tools_config,
             is_review_mode: false,
             final_output_json_schema: None,
-            disabled_tools: default_disabled_tools(),
+            disabled_tools: DisabledTool::defaults(),
         });
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),

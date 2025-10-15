@@ -43,7 +43,7 @@ pub struct Prompt {
     pub output_schema: Option<Value>,
 
     /// The set of tools that are allowed to be used by the model.
-    pub(crate) allowed_tools: Vec<Value>,
+    pub(crate) allowed_tools: Option<Vec<Value>>,
 }
 
 impl Prompt {
@@ -88,10 +88,17 @@ impl Prompt {
 
         input
     }
-}
 
-fn json_slice_is_empty(values: &[Value]) -> bool {
-    values.is_empty()
+    pub(crate) fn tool_choice(&self) -> ToolChoice<'_> {
+        match &self.allowed_tools {
+            Some(tools) => ToolChoice::AllowedTools(AllowedToolsChoice {
+                choice_type: "allowed_tools",
+                mode: "auto",
+                tools,
+            }),
+            None => ToolChoice::Auto("auto"),
+        }
+    }
 }
 
 fn reserialize_shell_outputs(items: &mut [ResponseItem]) {
@@ -275,9 +282,7 @@ pub(crate) struct ResponsesApiRequest<'a> {
     // separate enum for serialization.
     pub(crate) input: &'a Vec<ResponseItem>,
     pub(crate) tools: &'a [serde_json::Value],
-    #[serde(skip_serializing_if = "json_slice_is_empty")]
-    pub(crate) allowed_tools: &'a [serde_json::Value],
-    pub(crate) tool_choice: &'static str,
+    pub(crate) tool_choice: ToolChoice<'a>,
     pub(crate) parallel_tool_calls: bool,
     pub(crate) reasoning: Option<Reasoning>,
     pub(crate) store: bool,
@@ -287,6 +292,21 @@ pub(crate) struct ResponsesApiRequest<'a> {
     pub(crate) prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) text: Option<TextControls>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ToolChoice<'a> {
+    Auto(&'static str),
+    AllowedTools(AllowedToolsChoice<'a>),
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct AllowedToolsChoice<'a> {
+    #[serde(rename = "type")]
+    pub(crate) choice_type: &'static str,
+    pub(crate) mode: &'static str,
+    pub(crate) tools: &'a [Value],
 }
 
 pub(crate) mod tools {
@@ -466,8 +486,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
-            allowed_tools: &[],
-            tool_choice: "auto",
+            tool_choice: ToolChoice::Auto("auto"),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
@@ -508,8 +527,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
-            allowed_tools: &[],
-            tool_choice: "auto",
+            tool_choice: ToolChoice::Auto("auto"),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
@@ -545,8 +563,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
-            allowed_tools: &[],
-            tool_choice: "auto",
+            tool_choice: ToolChoice::Auto("auto"),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
@@ -573,8 +590,11 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
-            allowed_tools: allowed.as_slice(),
-            tool_choice: "auto",
+            tool_choice: ToolChoice::AllowedTools(AllowedToolsChoice {
+                choice_type: "allowed_tools",
+                mode: "auto",
+                tools: allowed.as_slice(),
+            }),
             parallel_tool_calls: true,
             reasoning: None,
             store: false,
@@ -585,17 +605,21 @@ mod tests {
         };
 
         let v = serde_json::to_value(&req).expect("json");
+        let choice = v.get("tool_choice").expect("tool_choice field");
         assert_eq!(
-            v.get("allowed_tools")
-                .and_then(|val| val.as_array())
-                .map(std::vec::Vec::len),
-            Some(1)
+            choice.get("type"),
+            Some(&serde_json::Value::String("allowed_tools".into()))
         );
-        let first = v
-            .get("allowed_tools")
+        assert_eq!(
+            choice.get("mode"),
+            Some(&serde_json::Value::String("auto".into()))
+        );
+        let tools_array = choice
+            .get("tools")
             .and_then(|val| val.as_array())
-            .and_then(|arr| arr.first())
-            .expect("allowed tool entry");
+            .expect("tools array");
+        assert_eq!(tools_array.len(), 1);
+        let first = &tools_array[0];
         assert_eq!(
             first.get("type"),
             Some(&serde_json::Value::String("function".into()))

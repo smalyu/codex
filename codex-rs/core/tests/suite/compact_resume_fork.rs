@@ -124,7 +124,7 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         .unwrap_or_default()
         .to_string();
     let tool_calls = requests[0]["tools"].clone();
-    let allowed_tools = requests[0]["allowed_tools"].clone();
+    let tool_choice = requests[0]["tool_choice"].clone();
     let prompt_cache_key = requests[0]["prompt_cache_key"]
         .as_str()
         .unwrap_or_default()
@@ -171,8 +171,7 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         }
       ],
       "tools": tool_calls,
-      "allowed_tools": allowed_tools,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"
@@ -241,8 +240,7 @@ async fn compact_resume_and_fork_preserve_model_history_view() {
         }
       ],
       "tools": [],
-      "allowed_tools": allowed_tools,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"
@@ -307,8 +305,7 @@ SUMMARY_ONLY_CONTEXT"
         }
       ],
       "tools": tool_calls,
-      "allowed_tools": allowed_tools,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"
@@ -393,8 +390,7 @@ SUMMARY_ONLY_CONTEXT"
         }
       ],
       "tools": tool_calls,
-      "allowed_tools": allowed_tools,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"
@@ -479,8 +475,7 @@ SUMMARY_ONLY_CONTEXT"
         }
       ],
       "tools": tool_calls,
-      "allowed_tools": allowed_tools,
-      "tool_choice": "auto",
+      "tool_choice": tool_choice,
       "parallel_tool_calls": false,
       "reasoning": {
         "summary": "auto"

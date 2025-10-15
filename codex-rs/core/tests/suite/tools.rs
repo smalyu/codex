@@ -5,11 +5,12 @@ use anyhow::Result;
 use codex_core::features::Feature;
 use codex_core::model_family::find_family_for_model;
 use codex_core::protocol::AskForApproval;
+use codex_core::protocol::DisabledTool;
+use codex_core::protocol::DisabledToolKind;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
-use codex_core::protocol::default_disabled_tools;
 use codex_protocol::config_types::ReasoningSummary;
 use core_test_support::assert_regex_match;
 use core_test_support::responses::ev_assistant_message;
@@ -49,7 +50,7 @@ async fn submit_turn(
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
-            disabled_tools: default_disabled_tools(),
+            disabled_tools: DisabledTool::defaults(),
         })
         .await?;
 
@@ -406,6 +407,163 @@ async fn shell_timeout_includes_timeout_prefix_and_metadata() -> Result<()> {
         let signal_pattern = r"(?is)^execution error:.*signal.*$";
         assert_regex_match(signal_pattern, output_str);
     }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn web_search_allowed_when_other_tool_disabled() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.model = "gpt-5".to_string();
+        config.model_family = find_family_for_model("gpt-5").expect("gpt-5 family");
+        config.features.enable(Feature::WebSearchRequest);
+    });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![InputItem::Text {
+                text: "hello codex".into(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: test.session_configured.model.clone(),
+            effort: None,
+            summary: ReasoningSummary::Auto,
+            disabled_tools: vec![DisabledToolKind::ViewImage.into()],
+        })
+        .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TaskComplete(_))
+    })
+    .await;
+
+    let body = mock.single_request().body_json();
+    let choice = body
+        .get("tool_choice")
+        .expect("tool_choice field should be present");
+    assert!(
+        choice.is_object(),
+        "expected tool_choice to be an object when tools are restricted: {choice:?}"
+    );
+    assert_eq!(
+        choice.get("type").and_then(Value::as_str),
+        Some("allowed_tools")
+    );
+    assert_eq!(choice.get("mode").and_then(Value::as_str), Some("auto"));
+
+    let allowed = choice
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .expect("allowed tools array");
+    assert!(
+        allowed
+            .iter()
+            .any(|tool| tool.get("name").and_then(Value::as_str) == Some("web_search")),
+        "expected web_search to remain allowed: {allowed:?}"
+    );
+    assert!(
+        !allowed
+            .iter()
+            .any(|tool| tool.get("name").and_then(Value::as_str) == Some("view_image")),
+        "expected view_image to be excluded: {allowed:?}"
+    );
+    let tools = tool_names(&body);
+    assert!(
+        tools.iter().any(|name| name == "web_search"),
+        "expected tools list to include web_search: {tools:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn override_enables_web_search() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex().with_config(|config| {
+        config.model = "gpt-5".to_string();
+        config.model_family = find_family_for_model("gpt-5").expect("gpt-5 family");
+        config.features.enable(Feature::WebSearchRequest);
+    });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(Op::OverrideTurnContext {
+            cwd: None,
+            approval_policy: None,
+            sandbox_policy: None,
+            model: None,
+            effort: None,
+            summary: None,
+            disabled_tools: Some(vec![]),
+        })
+        .await?;
+
+    test.codex
+        .submit(Op::UserTurn {
+            items: vec![InputItem::Text {
+                text: "hello after override".into(),
+            }],
+            final_output_json_schema: None,
+            cwd: test.cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: test.session_configured.model.clone(),
+            effort: None,
+            summary: ReasoningSummary::Auto,
+            disabled_tools: vec![],
+        })
+        .await?;
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TaskComplete(_))
+    })
+    .await;
+
+    let body = mock.single_request().body_json();
+    let choice = body
+        .get("tool_choice")
+        .expect("tool_choice field should be present");
+    assert_eq!(
+        choice.as_str(),
+        Some("auto"),
+        "expected unrestricted tool choice to be auto: {choice:?}"
+    );
+
+    let tools = tool_names(&body);
+    assert!(
+        tools.iter().any(|name| name == "web_search"),
+        "expected tools list to include web_search: {tools:?}"
+    );
 
     Ok(())
 }

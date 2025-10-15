@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use anyhow::Result;
 use codex_core::features::Feature;
 use codex_core::protocol::AskForApproval;
+use codex_core::protocol::DisabledTool;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
-use codex_core::protocol::default_disabled_tools;
 use codex_protocol::config_types::ReasoningSummary;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -129,7 +129,7 @@ async fn unified_exec_reuses_session_via_stdin() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
-            disabled_tools: default_disabled_tools(),
+            disabled_tools: DisabledTool::defaults(),
         })
         .await?;
 
@@ -266,7 +266,7 @@ PY
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
-            disabled_tools: default_disabled_tools(),
+            disabled_tools: DisabledTool::defaults(),
         })
         .await?;
 
@@ -373,7 +373,7 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
-            disabled_tools: default_disabled_tools(),
+            disabled_tools: DisabledTool::defaults(),
         })
         .await?;
 
