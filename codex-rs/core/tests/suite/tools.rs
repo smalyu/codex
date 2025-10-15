@@ -54,11 +54,9 @@ async fn submit_turn(
         })
         .await?;
 
-    wait_for_event_with_timeout(
-        &test.codex,
-        |event| matches!(event, EventMsg::TaskComplete(_) | EventMsg::TurnAborted(_)),
-        Duration::from_secs(5),
-    )
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TaskComplete(_))
+    })
     .await;
 
     Ok(())
@@ -86,7 +84,8 @@ async fn custom_tool_unknown_returns_custom_output_error() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let test = test_codex().build(&server).await?;
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
 
     let call_id = "custom-unsupported";
     let tool_name = "unsupported_tool";
@@ -236,7 +235,8 @@ async fn local_shell_missing_ids_maps_to_function_output_error() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let test = test_codex().build(&server).await?;
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
 
     let local_shell_event = json!({
         "type": "response.output_item.done",
