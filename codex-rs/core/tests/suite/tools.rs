@@ -26,7 +26,6 @@ use core_test_support::wait_for_event;
 use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
-use std::time::Duration;
 
 async fn submit_turn(
     test: &TestCodex,
