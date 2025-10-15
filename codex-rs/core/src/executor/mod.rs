@@ -4,16 +4,13 @@ mod runner;
 mod sandbox;
 
 pub(crate) use backends::ExecutionMode;
+pub(crate) use runner::ExecutionPlan;
 pub(crate) use runner::ExecutionRequest;
 pub(crate) use runner::Executor;
 pub(crate) use runner::ExecutorConfig;
 pub(crate) use runner::normalize_exec_result;
-pub(crate) use sandbox::RetrySandboxContext;
 pub(crate) use sandbox::SandboxLaunch;
 pub(crate) use sandbox::SandboxLaunchError;
-pub(crate) use sandbox::build_launch_for_sandbox;
-pub(crate) use sandbox::request_retry_without_sandbox;
-pub(crate) use sandbox::select_sandbox;
 
 pub(crate) mod linkers {
     use crate::exec::ExecParams;

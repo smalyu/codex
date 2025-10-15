@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -19,7 +18,10 @@ use crate::exec::StreamOutput;
 use crate::exec::process_exec_tool_call;
 use crate::executor::errors::ExecError;
 use crate::executor::sandbox::RetrySandboxContext;
-use crate::executor::sandbox::request_retry_without_sandbox;
+use crate::executor::sandbox::SandboxDecision;
+use crate::executor::sandbox::SandboxLaunch;
+use crate::executor::sandbox::SandboxLaunchError;
+use crate::executor::sandbox::build_launch_for_sandbox;
 use crate::executor::sandbox::select_sandbox;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::AskForApproval;
@@ -46,9 +48,85 @@ impl ExecutorConfig {
             codex_linux_sandbox_exe,
         }
     }
+}
 
-    pub(crate) fn codex_linux_sandbox_exe(&self) -> Option<PathBuf> {
-        self.codex_linux_sandbox_exe.clone()
+pub(crate) struct ExecutionPlan {
+    request: ExecutionRequest,
+    config: ExecutorConfig,
+    sandbox_decision: SandboxDecision,
+    stdout_stream: Option<StdoutStream>,
+    context: ExecCommandContext,
+}
+
+impl ExecutionPlan {
+    pub(crate) fn request(&self) -> &ExecutionRequest {
+        &self.request
+    }
+
+    pub(crate) fn config(&self) -> &ExecutorConfig {
+        &self.config
+    }
+
+    pub(crate) fn stdout_stream(&self) -> Option<StdoutStream> {
+        self.stdout_stream.clone()
+    }
+
+    pub(crate) fn initial_sandbox(&self) -> SandboxType {
+        self.sandbox_decision.initial_sandbox
+    }
+
+    pub(crate) fn should_retry_without_sandbox(&self) -> bool {
+        self.sandbox_decision.escalate_on_failure
+    }
+
+    pub(crate) fn initial_launch(&self) -> Result<SandboxLaunch, SandboxLaunchError> {
+        build_launch_for_sandbox(
+            self.sandbox_decision.initial_sandbox,
+            &self.request.params.command,
+            &self.config.sandbox_policy,
+            &self.config.sandbox_cwd,
+            self.config.codex_linux_sandbox_exe.as_ref(),
+        )
+    }
+
+    pub(crate) fn retry_launch(&self) -> Result<SandboxLaunch, SandboxLaunchError> {
+        build_launch_for_sandbox(
+            SandboxType::None,
+            &self.request.params.command,
+            &self.config.sandbox_policy,
+            &self.config.sandbox_cwd,
+            None,
+        )
+    }
+
+    pub(crate) fn approval_command(&self) -> &[String] {
+        &self.request.approval_command
+    }
+
+    pub(crate) async fn prompt_retry_without_sandbox(
+        &self,
+        session: &Session,
+        failure_message: impl Into<String>,
+    ) -> bool {
+        if !self.should_retry_without_sandbox() {
+            return false;
+        }
+
+        let approval = crate::executor::sandbox::request_retry_without_sandbox(
+            session,
+            failure_message.into(),
+            self.approval_command(),
+            self.request.params.cwd.clone(),
+            RetrySandboxContext {
+                sub_id: &self.context.sub_id,
+                call_id: &self.context.call_id,
+                tool_name: &self.context.tool_name,
+                otel_event_manager: &self.context.otel_event_manager,
+            },
+        )
+        .await;
+
+        approval.is_some()
     }
 }
 
@@ -67,16 +145,60 @@ impl Executor {
         }
     }
 
-    pub(crate) fn approval_cache_snapshot(&self) -> HashSet<Vec<String>> {
-        self.approval_cache.snapshot()
-    }
-
     pub(crate) fn record_session_approval(&self, command: Vec<String>) {
         self.approval_cache.insert(command);
     }
 
-    pub(crate) fn config_snapshot(&self) -> Option<ExecutorConfig> {
-        self.config.read().ok().map(|cfg| cfg.clone())
+    pub(crate) async fn prepare_execution_plan(
+        &self,
+        mut request: ExecutionRequest,
+        session: &Session,
+        approval_policy: AskForApproval,
+        context: &ExecCommandContext,
+    ) -> Result<ExecutionPlan, ExecError> {
+        if matches!(request.mode, ExecutionMode::Shell) {
+            request.params =
+                maybe_translate_shell_command(request.params, session, request.use_shell_profile);
+        }
+
+        let backend = backend_for_mode(&request.mode);
+        let stdout_stream = if backend.stream_stdout(&request.mode) {
+            request.stdout_stream.clone()
+        } else {
+            None
+        };
+        request.params = backend
+            .prepare(request.params, &request.mode)
+            .map_err(ExecError::from)?;
+
+        let config = self
+            .config
+            .read()
+            .map_err(|_| ExecError::rejection("executor config poisoned"))?
+            .clone();
+
+        let sandbox_decision = select_sandbox(
+            &request,
+            approval_policy,
+            self.approval_cache.snapshot(),
+            &config,
+            session,
+            &context.sub_id,
+            &context.call_id,
+            &context.otel_event_manager,
+        )
+        .await?;
+        if sandbox_decision.record_session_approval {
+            self.approval_cache.insert(request.approval_command.clone());
+        }
+
+        Ok(ExecutionPlan {
+            request,
+            config,
+            sandbox_decision,
+            stdout_stream,
+            context: context.clone(),
+        })
     }
 
     /// Updates the sandbox policy and working directory used for future
@@ -93,123 +215,53 @@ impl Executor {
     /// and lets the backend post-process the final output.
     pub(crate) async fn run(
         &self,
-        mut request: ExecutionRequest,
+        request: ExecutionRequest,
         session: &Session,
         approval_policy: AskForApproval,
         context: &ExecCommandContext,
     ) -> Result<ExecToolCallOutput, ExecError> {
-        if matches!(request.mode, ExecutionMode::Shell) {
-            request.params =
-                maybe_translate_shell_command(request.params, session, request.use_shell_profile);
-        }
+        let plan = self
+            .prepare_execution_plan(request, session, approval_policy, context)
+            .await?;
 
-        // Step 1: Normalise parameters via the selected backend.
-        let backend = backend_for_mode(&request.mode);
-        let stdout_stream = if backend.stream_stdout(&request.mode) {
-            request.stdout_stream.clone()
-        } else {
-            None
-        };
-        request.params = backend
-            .prepare(request.params, &request.mode)
-            .map_err(ExecError::from)?;
-
-        // Step 2: Snapshot sandbox configuration so it stays stable for this run.
-        let config = self
-            .config
-            .read()
-            .map_err(|_| ExecError::rejection("executor config poisoned"))?
-            .clone();
-
-        // Step 3: Decide sandbox placement, prompting for approval when needed.
-        let sandbox_decision = select_sandbox(
-            &request,
-            approval_policy,
-            self.approval_cache.snapshot(),
-            &config,
-            session,
-            &context.sub_id,
-            &context.call_id,
-            &context.otel_event_manager,
-        )
-        .await?;
-        if sandbox_decision.record_session_approval {
-            self.approval_cache.insert(request.approval_command.clone());
-        }
-
-        // Step 4: Launch the command within the chosen sandbox.
+        let stdout_stream = plan.stdout_stream();
         let first_attempt = self
             .spawn(
-                request.params.clone(),
-                sandbox_decision.initial_sandbox,
-                &config,
+                plan.request().params.clone(),
+                plan.initial_sandbox(),
+                plan.config(),
                 stdout_stream.clone(),
             )
             .await;
 
-        // Step 5: Handle sandbox outcomes, optionally escalating to an unsandboxed retry.
         match first_attempt {
             Ok(output) => Ok(output),
             Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => {
                 Err(CodexErr::Sandbox(SandboxErr::Timeout { output }).into())
             }
             Err(CodexErr::Sandbox(error)) => {
-                if sandbox_decision.escalate_on_failure {
-                    self.retry_without_sandbox(
-                        &request,
-                        &config,
-                        session,
-                        context,
-                        stdout_stream,
-                        error,
-                    )
-                    .await
+                if plan.should_retry_without_sandbox() {
+                    if plan
+                        .prompt_retry_without_sandbox(session, format!("Execution failed: {error}"))
+                        .await
+                    {
+                        self.spawn(
+                            plan.request().params.clone(),
+                            SandboxType::None,
+                            plan.config(),
+                            stdout_stream,
+                        )
+                        .await
+                        .map_err(ExecError::from)
+                    } else {
+                        Err(ExecError::rejection("exec command rejected by user"))
+                    }
                 } else {
                     let message = sandbox_failure_message(error);
                     Err(ExecError::rejection(message))
                 }
             }
             Err(err) => Err(err.into()),
-        }
-    }
-
-    /// Fallback path invoked when a sandboxed run is denied so the user can
-    /// approve rerunning without isolation.
-    async fn retry_without_sandbox(
-        &self,
-        request: &ExecutionRequest,
-        config: &ExecutorConfig,
-        session: &Session,
-        context: &ExecCommandContext,
-        stdout_stream: Option<StdoutStream>,
-        sandbox_error: SandboxErr,
-    ) -> Result<ExecToolCallOutput, ExecError> {
-        let approval = request_retry_without_sandbox(
-            session,
-            format!("Execution failed: {sandbox_error}"),
-            &request.approval_command,
-            request.params.cwd.clone(),
-            RetrySandboxContext {
-                sub_id: &context.sub_id,
-                call_id: &context.call_id,
-                tool_name: &context.tool_name,
-                otel_event_manager: &context.otel_event_manager,
-            },
-        )
-        .await;
-        if approval.is_some() {
-            let retry_output = self
-                .spawn(
-                    request.params.clone(),
-                    SandboxType::None,
-                    config,
-                    stdout_stream,
-                )
-                .await?;
-
-            Ok(retry_output)
-        } else {
-            Err(ExecError::rejection("exec command rejected by user"))
         }
     }
 

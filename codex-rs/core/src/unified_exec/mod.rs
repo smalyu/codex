@@ -23,12 +23,10 @@ use crate::codex::TurnContext;
 use crate::exec::ExecParams;
 use crate::exec_command::ExecCommandSession;
 use crate::executor::ExecutionMode;
+use crate::executor::ExecutionPlan;
 use crate::executor::ExecutionRequest;
-use crate::executor::RetrySandboxContext;
 use crate::executor::SandboxLaunch;
-use crate::executor::build_launch_for_sandbox;
-use crate::executor::request_retry_without_sandbox;
-use crate::executor::select_sandbox;
+use crate::tools::context::ExecCommandContext;
 use crate::truncate::truncate_middle;
 
 mod errors;
@@ -190,10 +188,22 @@ impl UnifiedExecSessionManager {
         ),
         UnifiedExecError,
     > {
-        let approval_command = command;
+        let executor = &context.session.services.executor;
+        let otel_event_manager = context.turn.client.get_otel_event_manager();
+        let approval_command = command.clone();
+        let exec_context = ExecCommandContext {
+            sub_id: context.sub_id.to_string(),
+            call_id: context.call_id.to_string(),
+            command_for_display: approval_command.clone(),
+            cwd: context.turn.cwd.clone(),
+            apply_patch: None,
+            tool_name: context.tool_name.to_string(),
+            otel_event_manager,
+        };
+
         let execution_request = ExecutionRequest {
             params: ExecParams {
-                command: approval_command.clone(),
+                command,
                 cwd: context.turn.cwd.clone(),
                 timeout_ms: None,
                 env: HashMap::new(),
@@ -206,67 +216,29 @@ impl UnifiedExecSessionManager {
             use_shell_profile: false,
         };
 
-        let executor = &context.session.services.executor;
-        let approval_cache = executor.approval_cache_snapshot();
-        let config = executor
-            .config_snapshot()
-            .ok_or_else(|| UnifiedExecError::create_session(anyhow!("executor config poisoned")))?;
-        let codex_linux_sandbox_exe = config.codex_linux_sandbox_exe();
-        let otel_event_manager = context.turn.client.get_otel_event_manager();
-        let sandbox_decision = select_sandbox(
-            &execution_request,
-            context.turn.approval_policy,
-            approval_cache,
-            &config,
-            context.session,
-            context.sub_id,
-            context.call_id,
-            &otel_event_manager,
-        )
-        .await
-        .map_err(|err| UnifiedExecError::create_session(anyhow!(err.to_string())))?;
+        let plan: ExecutionPlan = executor
+            .prepare_execution_plan(
+                execution_request,
+                context.session,
+                context.turn.approval_policy,
+                &exec_context,
+            )
+            .await
+            .map_err(|err| UnifiedExecError::create_session(anyhow!(err.to_string())))?;
 
-        if sandbox_decision.record_session_approval {
-            context
-                .session
-                .services
-                .executor
-                .record_session_approval(execution_request.approval_command.clone());
-        }
-
-        let launch = build_launch_for_sandbox(
-            sandbox_decision.initial_sandbox,
-            &execution_request.approval_command,
-            &context.turn.sandbox_policy,
-            &context.turn.cwd,
-            codex_linux_sandbox_exe.as_ref(),
-        )?;
+        let launch = plan.initial_launch()?;
 
         match create_unified_exec_session(&launch).await {
             Ok(result) => Ok(result),
-            Err(err) if sandbox_decision.escalate_on_failure => {
-                let approval = request_retry_without_sandbox(
-                    context.session,
-                    format!("Execution failed: {err}"),
-                    &execution_request.approval_command,
-                    context.turn.cwd.clone(),
-                    RetrySandboxContext {
-                        sub_id: context.sub_id,
-                        call_id: context.call_id,
-                        tool_name: context.tool_name,
-                        otel_event_manager: &otel_event_manager,
-                    },
-                )
-                .await;
-
-                if approval.is_some() {
-                    let retry_launch = build_launch_for_sandbox(
-                        crate::exec::SandboxType::None,
-                        &execution_request.approval_command,
-                        &context.turn.sandbox_policy,
-                        &context.turn.cwd,
-                        None,
-                    )?;
+            Err(err) if plan.should_retry_without_sandbox() => {
+                if plan
+                    .prompt_retry_without_sandbox(
+                        context.session,
+                        format!("Execution failed: {err}"),
+                    )
+                    .await
+                {
+                    let retry_launch = plan.retry_launch()?;
                     create_unified_exec_session(&retry_launch).await
                 } else {
                     Err(UnifiedExecError::UserRejected)
