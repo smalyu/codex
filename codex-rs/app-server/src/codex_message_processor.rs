@@ -1286,6 +1286,7 @@ async fn apply_bespoke_event_handling(
             command,
             cwd,
             reason,
+            parsed_cmd,
         }) => {
             let params = ExecCommandApprovalParams {
                 conversation_id,
@@ -1293,6 +1294,7 @@ async fn apply_bespoke_event_handling(
                 command,
                 cwd,
                 reason,
+                parsed_cmd,
             };
             let rx = outgoing
                 .send_request(ServerRequestPayload::ExecCommandApproval(params))
