@@ -16,6 +16,7 @@ use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ShellToolCallParams;
+use codex_protocol::protocol::DisabledTool;
 use serde_json::json;
 
 #[derive(Clone)]
@@ -48,12 +49,18 @@ impl ToolRouter {
             .collect()
     }
 
-    pub fn allowed_tools(&self) -> Vec<serde_json::Value> {
+    pub fn allowed_tools(&self, disabled_tools: Vec<DisabledTool>) -> Vec<serde_json::Value> {
         self.specs
             .iter()
-            .map(|config| {
+            .filter_map(|config| {
                 let name = config.spec.name();
-                json!({"type": "function", "name": name})
+                if disabled_tools
+                    .iter()
+                    .any(|disabled| disabled.matches_tool_name(name))
+                {
+                    return None;
+                }
+                Some(json!({"type": "function", "name": name}))
             })
             .collect()
     }

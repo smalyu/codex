@@ -1981,36 +1981,14 @@ async fn run_turn(
         .get_model_family()
         .supports_parallel_tool_calls;
     let parallel_tool_calls = model_supports_parallel;
-    let mut allowed_tools = Vec::new();
-    let mut restricted_tool_choice = false;
-    for tool in router.allowed_tools() {
-        let is_disabled = tool
-            .get("name")
-            .and_then(|val| val.as_str())
-            .is_some_and(|name| {
-                turn_context
-                    .disabled_tools
-                    .iter()
-                    .any(|disabled| disabled.matches_tool_name(name))
-            });
-        if is_disabled {
-            restricted_tool_choice = true;
-            continue;
-        }
-        allowed_tools.push(tool);
-    }
-    let allowed_tools = if restricted_tool_choice {
-        Some(allowed_tools)
-    } else {
-        None
-    };
+    let allowed_tools = router.allowed_tools(turn_context.disabled_tools.clone());
     let prompt = Prompt {
         input,
         tools: router.specs(),
         parallel_tool_calls,
         base_instructions_override: turn_context.base_instructions.clone(),
         output_schema: turn_context.final_output_json_schema.clone(),
-        allowed_tools,
+        allowed_tools: Some(allowed_tools),
     };
 
     let mut retries = 0;
