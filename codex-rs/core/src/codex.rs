@@ -472,6 +472,7 @@ impl Session {
                 turn_context.sandbox_policy.clone(),
                 turn_context.cwd.clone(),
                 config.codex_linux_sandbox_exe.clone(),
+                None,
             )),
         };
 
@@ -2761,6 +2762,7 @@ mod tests {
                 turn_context.sandbox_policy.clone(),
                 turn_context.cwd.clone(),
                 None,
+                None,
             )),
         };
         let session = Session {
@@ -2828,6 +2830,7 @@ mod tests {
             executor: Executor::new(ExecutorConfig::new(
                 config.sandbox_policy.clone(),
                 config.cwd.clone(),
+                None,
                 None,
             )),
         };

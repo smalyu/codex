@@ -34,6 +34,9 @@ use crate::tools::context::ExecCommandContext;
 pub(crate) struct ExecutorConfig {
     pub(crate) sandbox_policy: SandboxPolicy,
     pub(crate) sandbox_cwd: PathBuf,
+    // Path to codex-linux-sandbox executable (Linux-only). Used by initial_launch when selecting Linux sandbox.
+    pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
+    // Path to the codex binary itself (used by apply_patch backend to self-invoke when needed).
     pub(crate) codex_exe: Option<PathBuf>,
 }
 
@@ -41,14 +44,31 @@ impl ExecutorConfig {
     pub(crate) fn new(
         sandbox_policy: SandboxPolicy,
         sandbox_cwd: PathBuf,
+        codex_linux_sandbox_exe: Option<PathBuf>,
         codex_exe: Option<PathBuf>,
     ) -> Self {
+        let codex_exe = codex_exe.or_else(|| derive_codex_exe(&codex_linux_sandbox_exe));
         Self {
             sandbox_policy,
             sandbox_cwd,
+            codex_linux_sandbox_exe,
             codex_exe,
         }
     }
+}
+
+fn derive_codex_exe(sandbox_exe: &Option<PathBuf>) -> Option<PathBuf> {
+    sandbox_exe.as_ref().and_then(|path| {
+        let stem_matches_sandbox = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == "codex-linux-sandbox");
+        if stem_matches_sandbox {
+            None
+        } else {
+            Some(path.clone())
+        }
+    })
 }
 
 pub(crate) struct ExecutionPlan {
@@ -86,7 +106,7 @@ impl ExecutionPlan {
             &self.request.params.command,
             &self.config.sandbox_policy,
             &self.config.sandbox_cwd,
-            self.config.codex_exe.as_ref(),
+            self.config.codex_linux_sandbox_exe.as_ref(),
         )
     }
 

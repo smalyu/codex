@@ -495,24 +495,18 @@ async fn create_unified_exec_session(
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
-    #[cfg(unix)]
+
     use crate::codex::Session;
-    #[cfg(unix)]
     use crate::codex::TurnContext;
-    #[cfg(unix)]
     use crate::codex::make_session_and_context;
-    #[cfg(unix)]
     use crate::protocol::AskForApproval;
-    #[cfg(unix)]
     use crate::protocol::SandboxPolicy;
-    #[cfg(unix)]
     use core_test_support::skip_if_sandbox;
-    #[cfg(unix)]
     use std::sync::Arc;
 
-    #[cfg(unix)]
     fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
         let (session, mut turn) = make_session_and_context();
         turn.approval_policy = AskForApproval::Never;
@@ -520,7 +514,6 @@ mod tests {
         (Arc::new(session), Arc::new(turn))
     }
 
-    #[cfg(unix)]
     async fn run_unified_exec_request(
         session: &Arc<Session>,
         turn: &Arc<TurnContext>,
@@ -568,7 +561,6 @@ mod tests {
         assert_eq!(buffer.chunks.pop_back().unwrap(), vec![b'b']);
     }
 
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unified_exec_persists_across_requests_jif() -> Result<(), UnifiedExecError> {
         skip_if_sandbox!(Ok(()));
@@ -610,7 +602,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn multi_unified_exec_sessions() -> Result<(), UnifiedExecError> {
         skip_if_sandbox!(Ok(()));
@@ -662,7 +653,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn unified_exec_timeouts() -> Result<(), UnifiedExecError> {
         skip_if_sandbox!(Ok(()));
@@ -712,7 +702,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     #[ignore] // Ignored while we have a better way to test this.
     async fn requests_with_large_timeout_are_capped() -> Result<(), UnifiedExecError> {
@@ -735,7 +724,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     #[ignore] // Ignored while we have a better way to test this.
     async fn completed_commands_do_not_persist_sessions() -> Result<(), UnifiedExecError> {
@@ -765,7 +753,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reusing_completed_session_returns_unknown_session() -> Result<(), UnifiedExecError> {
         skip_if_sandbox!(Ok(()));
