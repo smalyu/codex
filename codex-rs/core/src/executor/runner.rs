@@ -86,7 +86,7 @@ impl ExecutionPlan {
             &self.request.params.command,
             &self.config.sandbox_policy,
             &self.config.sandbox_cwd,
-            self.config.codex_linux_sandbox_exe.as_ref(),
+            self.config.codex_exe.as_ref(),
         )
     }
 

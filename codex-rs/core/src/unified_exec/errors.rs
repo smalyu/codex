@@ -13,8 +13,6 @@ pub(crate) enum UnifiedExecError {
     MissingCommandLine,
     #[error("missing codex-linux-sandbox executable path")]
     MissingLinuxSandboxExecutable,
-    #[error("unified exec command rejected by user")]
-    UserRejected,
 }
 
 impl UnifiedExecError {
