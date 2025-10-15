@@ -57,6 +57,7 @@ use crate::exec_command::WriteStdinParams;
 use crate::executor::Executor;
 use crate::executor::ExecutorConfig;
 use crate::executor::normalize_exec_result;
+use crate::file_change_notifier::FileChangeWatcher;
 use crate::mcp::auth::compute_auth_statuses;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::model_family::find_family_for_model;
@@ -462,6 +463,14 @@ impl Session {
             is_review_mode: false,
             final_output_json_schema: None,
         };
+        let (file_change_watcher, file_change_collector) =
+            match FileChangeWatcher::start(turn_context.cwd.clone()) {
+                Ok((watcher, collector)) => (Some(watcher), Some(collector)),
+                Err(err) => {
+                    warn!("file change notifications disabled: {err:#}");
+                    (None, None)
+                }
+            };
         let services = SessionServices {
             mcp_connection_manager,
             session_manager: ExecSessionManager::default(),
@@ -475,6 +484,8 @@ impl Session {
                 turn_context.cwd.clone(),
                 config.codex_linux_sandbox_exe.clone(),
             )),
+            file_change_collector,
+            _file_change_watcher: file_change_watcher,
         };
 
         let sess = Arc::new(Session {
@@ -729,6 +740,7 @@ impl Session {
             Some(turn_context.approval_policy),
             Some(turn_context.sandbox_policy.clone()),
             Some(self.user_shell().clone()),
+            None,
         )));
         items
     }
@@ -986,6 +998,13 @@ impl Session {
         self.send_event(event).await;
     }
 
+    pub(crate) async fn take_changed_files(&self) -> Vec<PathBuf> {
+        match &self.services.file_change_collector {
+            Some(collector) => collector.drain().await,
+            None => Vec::new(),
+        }
+    }
+
     async fn notify_stream_error(&self, sub_id: &str, message: impl Into<String>) {
         let event = Event {
             id: sub_id.to_string(),
@@ -1226,6 +1245,7 @@ async fn submission_loop(
                         approval_policy,
                         sandbox_policy,
                         // Shell is not configurable from turn to turn
+                        None,
                         None,
                     ))])
                     .await;
@@ -1659,6 +1679,22 @@ pub(crate) async fn run_task(
     } else {
         sess.record_input_and_rollout_usermsg(&initial_input_for_turn)
             .await;
+        let changed_files = sess.take_changed_files().await;
+        if !changed_files.is_empty() {
+            let response_item: ResponseItem =
+                EnvironmentContext::new(None, None, None, None, Some(changed_files)).into();
+            sess.record_conversation_items(std::slice::from_ref(&response_item))
+                .await;
+            for msg in
+                map_response_item_to_event_messages(&response_item, sess.show_raw_agent_reasoning())
+            {
+                let event = Event {
+                    id: sub_id.clone(),
+                    msg,
+                };
+                sess.send_event(event).await;
+            }
+        }
     }
 
     let mut last_agent_message: Option<String> = None;
@@ -2450,6 +2486,7 @@ mod tests {
     use super::*;
     use crate::config::ConfigOverrides;
     use crate::config::ConfigToml;
+    use crate::file_change_notifier::collector_for_tests;
 
     use crate::protocol::CompactedItem;
     use crate::protocol::InitialHistory;
@@ -2780,6 +2817,8 @@ mod tests {
                 turn_context.cwd.clone(),
                 None,
             )),
+            file_change_collector: None,
+            _file_change_watcher: None,
         };
         let session = Session {
             conversation_id,
@@ -2853,6 +2892,8 @@ mod tests {
                 config.cwd.clone(),
                 None,
             )),
+            file_change_collector: None,
+            _file_change_watcher: None,
         };
         let session = Arc::new(Session {
             conversation_id,
@@ -3002,6 +3043,46 @@ mod tests {
             }
             other => panic!("expected FunctionCallError::Fatal, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn run_task_emits_environment_context_with_changed_files() {
+        let (mut session, turn_context) = make_session_and_context();
+        let collector = collector_for_tests(turn_context.cwd.clone());
+        collector
+            .record_for_tests(PathBuf::from("tracked.rs"))
+            .await;
+        session.services.file_change_collector = Some(collector);
+        session.services._file_change_watcher = None;
+
+        let session = Arc::new(session);
+        let turn_context = Arc::new(turn_context);
+        let input = vec![InputItem::Text {
+            text: "hello".to_string(),
+        }];
+        let _ = run_task(
+            Arc::clone(&session),
+            Arc::clone(&turn_context),
+            "sub".to_string(),
+            input,
+        )
+        .await;
+
+        let history = session.history_snapshot().await;
+        let mut found = false;
+        for item in history {
+            if let ResponseItem::Message { content, .. } = item {
+                for part in content {
+                    if let ContentItem::InputText { text } = part
+                        && text.contains("<changed_files>")
+                        && text.contains("tracked.rs")
+                    {
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(found, "missing changed_files environment context");
     }
 
     fn sample_rollout(

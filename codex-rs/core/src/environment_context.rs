@@ -29,6 +29,7 @@ pub(crate) struct EnvironmentContext {
     pub network_access: Option<NetworkAccess>,
     pub writable_roots: Option<Vec<PathBuf>>,
     pub shell: Option<Shell>,
+    pub changed_files: Option<Vec<PathBuf>>,
 }
 
 impl EnvironmentContext {
@@ -37,6 +38,7 @@ impl EnvironmentContext {
         approval_policy: Option<AskForApproval>,
         sandbox_policy: Option<SandboxPolicy>,
         shell: Option<Shell>,
+        changed_files: Option<Vec<PathBuf>>,
     ) -> Self {
         Self {
             cwd,
@@ -70,6 +72,8 @@ impl EnvironmentContext {
                 _ => None,
             },
             shell,
+            changed_files: changed_files
+                .and_then(|paths| if paths.is_empty() { None } else { Some(paths) }),
         }
     }
 
@@ -85,6 +89,7 @@ impl EnvironmentContext {
             writable_roots,
             // should compare all fields except shell
             shell: _,
+            changed_files,
         } = other;
 
         self.cwd == *cwd
@@ -92,6 +97,7 @@ impl EnvironmentContext {
             && self.sandbox_mode == *sandbox_mode
             && self.network_access == *network_access
             && self.writable_roots == *writable_roots
+            && self.changed_files == *changed_files
     }
 }
 
@@ -102,6 +108,7 @@ impl From<&TurnContext> for EnvironmentContext {
             Some(turn_context.approval_policy),
             Some(turn_context.sandbox_policy.clone()),
             // Shell is not configurable from turn to turn
+            None,
             None,
         )
     }
@@ -155,6 +162,14 @@ impl EnvironmentContext {
         {
             lines.push(format!("  <shell>{shell_name}</shell>"));
         }
+        if let Some(changed_files) = &self.changed_files
+            && !changed_files.is_empty() {
+                lines.push("  <changed_files>".to_string());
+                for path in changed_files {
+                    lines.push(format!("    <path>{}</path>", path.to_string_lossy()));
+                }
+                lines.push("  </changed_files>".to_string());
+            }
         lines.push(ENVIRONMENT_CONTEXT_CLOSE_TAG.to_string());
         lines.join("\n")
     }
@@ -196,6 +211,7 @@ mod tests {
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp"], false)),
             None,
+            None,
         );
 
         let expected = r#"<environment_context>
@@ -219,6 +235,7 @@ mod tests {
             Some(AskForApproval::Never),
             Some(SandboxPolicy::ReadOnly),
             None,
+            None,
         );
 
         let expected = r#"<environment_context>
@@ -236,6 +253,7 @@ mod tests {
             None,
             Some(AskForApproval::OnFailure),
             Some(SandboxPolicy::DangerFullAccess),
+            None,
             None,
         );
 
@@ -256,11 +274,13 @@ mod tests {
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo"], false)),
             None,
+            None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
             Some(AskForApproval::Never),
             Some(workspace_write_policy(vec!["/repo"], true)),
+            None,
             None,
         );
         assert!(!context1.equals_except_shell(&context2));
@@ -273,11 +293,13 @@ mod tests {
             Some(AskForApproval::OnRequest),
             Some(SandboxPolicy::new_read_only_policy()),
             None,
+            None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
             Some(AskForApproval::OnRequest),
             Some(SandboxPolicy::new_workspace_write_policy()),
+            None,
             None,
         );
 
@@ -291,11 +313,13 @@ mod tests {
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp", "/var"], false)),
             None,
+            None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp"], true)),
+            None,
             None,
         );
 
@@ -312,6 +336,7 @@ mod tests {
                 shell_path: "/bin/bash".into(),
                 bashrc_path: "/home/user/.bashrc".into(),
             })),
+            None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
@@ -321,6 +346,7 @@ mod tests {
                 shell_path: "/bin/zsh".into(),
                 zshrc_path: "/home/user/.zshrc".into(),
             })),
+            None,
         );
 
         assert!(context1.equals_except_shell(&context2));

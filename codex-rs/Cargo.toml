@@ -76,6 +76,7 @@ codex-utils-string = { path = "utils/string" }
 core_test_support = { path = "core/tests/common" }
 mcp-types = { path = "mcp-types" }
 mcp_test_support = { path = "mcp-server/tests/common" }
+notify = "6"
 
 # External
 allocative = "0.3.3"
