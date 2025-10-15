@@ -15,7 +15,8 @@ use crate::exec::ExecToolCallOutput;
 use crate::exec::SandboxType;
 use crate::exec::StdoutStream;
 use crate::exec::StreamOutput;
-use crate::exec::process_exec_tool_call;
+use crate::exec::execute_sandbox_launch;
+use crate::exec::sandbox_launch_error_to_codex;
 use crate::executor::errors::ExecError;
 use crate::executor::sandbox::RetrySandboxContext;
 use crate::executor::sandbox::SandboxDecision;
@@ -225,14 +226,18 @@ impl Executor {
             .await?;
 
         let stdout_stream = plan.stdout_stream();
-        let first_attempt = self
-            .spawn(
-                plan.request().params.clone(),
-                plan.initial_sandbox(),
-                plan.config(),
-                stdout_stream.clone(),
-            )
-            .await;
+        let sandbox_policy = plan.config().sandbox_policy.clone();
+        let initial_launch = plan
+            .initial_launch()
+            .map_err(|err| ExecError::Codex(sandbox_launch_error_to_codex(err)))?;
+        let first_attempt = execute_sandbox_launch(
+            plan.request().params.clone(),
+            initial_launch,
+            plan.initial_sandbox(),
+            &sandbox_policy,
+            stdout_stream.clone(),
+        )
+        .await;
 
         match first_attempt {
             Ok(output) => Ok(output),
@@ -245,10 +250,14 @@ impl Executor {
                         .prompt_retry_without_sandbox(session, format!("Execution failed: {error}"))
                         .await
                     {
-                        self.spawn(
+                        let retry_launch = plan
+                            .retry_launch()
+                            .map_err(|err| ExecError::Codex(sandbox_launch_error_to_codex(err)))?;
+                        execute_sandbox_launch(
                             plan.request().params.clone(),
+                            retry_launch,
                             SandboxType::None,
-                            plan.config(),
+                            &sandbox_policy,
                             stdout_stream,
                         )
                         .await
@@ -263,24 +272,6 @@ impl Executor {
             }
             Err(err) => Err(err.into()),
         }
-    }
-
-    async fn spawn(
-        &self,
-        params: ExecParams,
-        sandbox: SandboxType,
-        config: &ExecutorConfig,
-        stdout_stream: Option<StdoutStream>,
-    ) -> Result<ExecToolCallOutput, CodexErr> {
-        process_exec_tool_call(
-            params,
-            sandbox,
-            &config.sandbox_policy,
-            &config.sandbox_cwd,
-            &config.codex_linux_sandbox_exe,
-            stdout_stream,
-        )
-        .await
     }
 }
 

@@ -79,15 +79,9 @@ impl ToolHandler for UnifiedExecHandler {
         };
 
         let request = UnifiedExecRequest {
-            session_id: parsed_session_id,
             input_chunks: &input,
             timeout_ms,
         };
-
-        session
-            .services
-            .executor
-            .update_environment(turn.sandbox_policy.clone(), turn.cwd.clone());
 
         let value = session
             .services
@@ -100,6 +94,7 @@ impl ToolHandler for UnifiedExecHandler {
                     sub_id: &sub_id,
                     call_id: &call_id,
                     tool_name: &tool_name,
+                    session_id: parsed_session_id,
                 },
             )
             .await

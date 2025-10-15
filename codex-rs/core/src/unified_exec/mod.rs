@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use portable_pty::CommandBuilder;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
@@ -43,11 +42,11 @@ pub(crate) struct UnifiedExecContext<'a> {
     pub sub_id: &'a str,
     pub call_id: &'a str,
     pub tool_name: &'a str,
+    pub session_id: Option<i32>,
 }
 
 #[derive(Debug)]
 pub(crate) struct UnifiedExecRequest<'a> {
-    pub session_id: Option<i32>,
     pub input_chunks: &'a [String],
     pub timeout_ms: Option<u64>,
 }
@@ -224,7 +223,7 @@ impl UnifiedExecSessionManager {
                 &exec_context,
             )
             .await
-            .map_err(|err| UnifiedExecError::create_session(anyhow!(err.to_string())))?;
+            .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
 
         let launch = plan.initial_launch()?;
 
@@ -270,7 +269,7 @@ impl UnifiedExecSessionManager {
         let output_buffer;
         let output_notify;
 
-        if let Some(existing_id) = request.session_id {
+        if let Some(existing_id) = context.session_id {
             let mut sessions = self.sessions.lock().await;
             match sessions.get(&existing_id) {
                 Some(session) => {
@@ -307,7 +306,7 @@ impl UnifiedExecSessionManager {
             new_session = Some(managed_session);
         };
 
-        if request.session_id.is_some() {
+        if context.session_id.is_some() {
             let joined_input = request.input_chunks.join(" ");
             if !joined_input.is_empty() && writer_tx.send(joined_input.into_bytes()).await.is_err()
             {
@@ -366,7 +365,7 @@ impl UnifiedExecSessionManager {
 
         let should_store_session = if let Some(session) = new_session.as_ref() {
             !session.has_exited()
-        } else if request.session_id.is_some() {
+        } else if context.session_id.is_some() {
             let mut sessions = self.sessions.lock().await;
             if let Some(existing) = sessions.get(&session_id) {
                 if existing.has_exited() {
@@ -421,7 +420,7 @@ async fn create_unified_exec_session(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(UnifiedExecError::create_session)?;
+        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
 
     // Safe thanks to the check at the top of the function.
     let mut command_builder = CommandBuilder::new(launch.program.clone());
@@ -435,7 +434,7 @@ async fn create_unified_exec_session(
     let mut child = pair
         .slave
         .spawn_command(command_builder)
-        .map_err(UnifiedExecError::create_session)?;
+        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
     let killer = child.clone_killer();
 
     let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
@@ -444,7 +443,7 @@ async fn create_unified_exec_session(
     let mut reader = pair
         .master
         .try_clone_reader()
-        .map_err(UnifiedExecError::create_session)?;
+        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
     let output_tx_clone = output_tx.clone();
     let reader_handle = tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
@@ -467,7 +466,7 @@ async fn create_unified_exec_session(
     let writer = pair
         .master
         .take_writer()
-        .map_err(UnifiedExecError::create_session)?;
+        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
     let writer = Arc::new(StdMutex::new(writer));
     let writer_handle = tokio::spawn({
         let writer = writer.clone();

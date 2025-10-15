@@ -3,11 +3,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub(crate) enum UnifiedExecError {
-    #[error("Failed to create unified exec session: {pty_error}")]
-    CreateSession {
-        #[source]
-        pty_error: anyhow::Error,
-    },
+    #[error("Failed to create unified exec session: {message}")]
+    CreateSession { message: String },
     #[error("Unknown session id {session_id}")]
     UnknownSessionId { session_id: i32 },
     #[error("failed to write to stdin")]
@@ -21,8 +18,8 @@ pub(crate) enum UnifiedExecError {
 }
 
 impl UnifiedExecError {
-    pub(crate) fn create_session(error: anyhow::Error) -> Self {
-        Self::CreateSession { pty_error: error }
+    pub(crate) fn create_session(message: String) -> Self {
+        Self::CreateSession { message }
     }
 }
 
