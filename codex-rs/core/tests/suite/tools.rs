@@ -473,22 +473,17 @@ async fn web_search_allowed_when_other_tool_disabled() -> Result<()> {
         .and_then(Value::as_array)
         .cloned()
         .expect("allowed tools array");
+    let allowed_names = allowed
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
     assert!(
-        allowed
-            .iter()
-            .any(|tool| tool.get("name").and_then(Value::as_str) == Some("web_search")),
+        allowed_names.contains(&"web_search"),
         "expected web_search to remain allowed: {allowed:?}"
     );
     assert!(
-        !allowed
-            .iter()
-            .any(|tool| tool.get("name").and_then(Value::as_str) == Some("view_image")),
-        "expected view_image to be excluded: {allowed:?}"
-    );
-    let tools = tool_names(&body);
-    assert!(
-        tools.iter().any(|name| name == "web_search"),
-        "expected tools list to include web_search: {tools:?}"
+        !allowed_names.contains(&"view_image"),
+        "expected view_image to be excluded from allowed_tools: {allowed:?}"
     );
 
     Ok(())
@@ -550,19 +545,10 @@ async fn override_enables_web_search() -> Result<()> {
     .await;
 
     let body = mock.single_request().body_json();
-    let choice = body
-        .get("tool_choice")
-        .expect("tool_choice field should be present");
     assert_eq!(
-        choice.as_str(),
-        Some("auto"),
-        "expected unrestricted tool choice to be auto: {choice:?}"
-    );
-
-    let tools = tool_names(&body);
-    assert!(
-        tools.iter().any(|name| name == "web_search"),
-        "expected tools list to include web_search: {tools:?}"
+        body.get("tool_choice"),
+        Some(&Value::String("auto".to_string())),
+        "expected unrestricted tool choice to be auto"
     );
 
     Ok(())

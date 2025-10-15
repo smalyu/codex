@@ -258,6 +258,11 @@ async fn prompt_tools_are_consistent_across_requests() {
         serde_json::json!(expected_instructions),
     );
     assert_tool_names(&body1, expected_tools_names);
+    assert_eq!(
+        body1.get("tool_choice"),
+        body0.get("tool_choice"),
+        "tool_choice should remain consistent across requests"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
