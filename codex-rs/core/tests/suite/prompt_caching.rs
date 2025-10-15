@@ -12,6 +12,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
+use codex_core::protocol::default_disabled_tools;
 use codex_core::protocol_config_types::ReasoningEffort;
 use codex_core::protocol_config_types::ReasoningSummary;
 use codex_core::shell::Shell;
@@ -443,6 +444,7 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() {
             model: Some("o3".to_string()),
             effort: Some(Some(ReasoningEffort::High)),
             summary: Some(ReasoningSummary::Detailed),
+            disabled_tools: None,
         })
         .await
         .unwrap();
@@ -577,6 +579,7 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() {
             effort: Some(ReasoningEffort::High),
             summary: ReasoningSummary::Detailed,
             final_output_json_schema: None,
+            disabled_tools: default_disabled_tools(),
         })
         .await
         .unwrap();
@@ -688,6 +691,7 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() {
             effort: default_effort,
             summary: default_summary,
             final_output_json_schema: None,
+            disabled_tools: default_disabled_tools(),
         })
         .await
         .unwrap();
@@ -705,6 +709,7 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() {
             effort: default_effort,
             summary: default_summary,
             final_output_json_schema: None,
+            disabled_tools: default_disabled_tools(),
         })
         .await
         .unwrap();
@@ -802,6 +807,7 @@ async fn send_user_turn_with_changes_sends_environment_context() {
             effort: default_effort,
             summary: default_summary,
             final_output_json_schema: None,
+            disabled_tools: default_disabled_tools(),
         })
         .await
         .unwrap();
@@ -819,6 +825,7 @@ async fn send_user_turn_with_changes_sends_environment_context() {
             effort: Some(ReasoningEffort::High),
             summary: ReasoningSummary::Detailed,
             final_output_json_schema: None,
+            disabled_tools: default_disabled_tools(),
         })
         .await
         .unwrap();

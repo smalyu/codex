@@ -16,6 +16,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
+use codex_core::protocol::default_disabled_tools;
 use codex_protocol::config_types::ReasoningSummary;
 use core_test_support::responses;
 use core_test_support::responses::mount_sse_once_match;
@@ -110,6 +111,7 @@ async fn stdio_server_round_trip() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 
@@ -259,6 +261,7 @@ async fn streamable_http_tool_call_round_trip() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 
@@ -440,6 +443,7 @@ async fn streamable_http_with_oauth_round_trip() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 

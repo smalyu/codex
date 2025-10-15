@@ -37,6 +37,11 @@ pub const ENVIRONMENT_CONTEXT_OPEN_TAG: &str = "<environment_context>";
 pub const ENVIRONMENT_CONTEXT_CLOSE_TAG: &str = "</environment_context>";
 pub const USER_MESSAGE_BEGIN: &str = "## My request for Codex:";
 
+/// Default disabled tools used when clients do not explicitly supply one.
+pub fn default_disabled_tools() -> Vec<String> {
+    vec!["web_search".to_string()]
+}
+
 /// Submission Queue Entry - requests from user
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Submission {
@@ -90,6 +95,9 @@ pub enum Op {
         summary: ReasoningSummaryConfig,
         // The JSON schema to use for the final assistant message
         final_output_json_schema: Option<Value>,
+        // disables tools
+        #[serde(default = "default_disabled_tools")]
+        disabled_tools: Vec<String>,
     },
 
     /// Override parts of the persistent turn context for subsequent turns.
@@ -125,6 +133,10 @@ pub enum Op {
         /// Updated reasoning summary preference (honored only for reasoning-capable models).
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<ReasoningSummaryConfig>,
+
+        /// Updated disabled tools.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        disabled_tools: Option<Vec<String>>,
     },
 
     /// Approve a command execution

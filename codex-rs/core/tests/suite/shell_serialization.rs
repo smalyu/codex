@@ -8,6 +8,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
+use codex_core::protocol::default_disabled_tools;
 use codex_protocol::config_types::ReasoningSummary;
 use core_test_support::assert_regex_match;
 use core_test_support::responses::ev_apply_patch_function_call;
@@ -45,6 +46,7 @@ async fn submit_turn(test: &TestCodex, prompt: &str, sandbox_policy: SandboxPoli
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 

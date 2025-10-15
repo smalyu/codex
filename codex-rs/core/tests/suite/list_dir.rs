@@ -5,6 +5,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
+use codex_core::protocol::default_disabled_tools;
 use codex_protocol::config_types::ReasoningSummary;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
@@ -76,6 +77,7 @@ async fn list_dir_tool_returns_entries() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 
@@ -181,6 +183,7 @@ async fn list_dir_tool_depth_one_omits_children() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 
@@ -293,6 +296,7 @@ async fn list_dir_tool_depth_two_includes_children_only() -> anyhow::Result<()> 
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 
@@ -408,6 +412,7 @@ async fn list_dir_tool_depth_three_includes_grandchildren() -> anyhow::Result<()
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 

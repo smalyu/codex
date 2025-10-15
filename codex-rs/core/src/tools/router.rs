@@ -16,6 +16,7 @@ use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::ShellToolCallParams;
+use serde_json::json;
 
 #[derive(Clone)]
 pub struct ToolCall {
@@ -44,6 +45,20 @@ impl ToolRouter {
         self.specs
             .iter()
             .map(|config| config.spec.clone())
+            .collect()
+    }
+
+    pub fn allowed_tools(&self) -> Vec<serde_json::Value> {
+        // return vector of "tools": [
+        // { "type": "function", "name": "get_weather" },
+        //{ "type": "function", "name": "search_docs" }
+        //]
+        self.specs
+            .iter()
+            .map(|config| {
+                let name = config.spec.name();
+                json!({"type": "function", "name": name})
+            })
             .collect()
     }
 

@@ -30,6 +30,7 @@ use codex_protocol::config_types::SandboxMode;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InputMessageKind;
+use codex_protocol::protocol::default_disabled_tools;
 use pretty_assertions::assert_eq;
 use std::env;
 use tempfile::TempDir;
@@ -345,6 +346,7 @@ async fn test_send_user_turn_changes_approval_policy_behavior() {
             model: "mock-model".to_string(),
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await
         .expect("send sendUserTurn");
@@ -483,6 +485,7 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() {
             model: model.clone(),
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await
         .expect("send first sendUserTurn");
@@ -513,6 +516,7 @@ async fn test_send_user_turn_updates_sandbox_and_cwd_between_turns() {
             model: model.clone(),
             effort: Some(ReasoningEffort::Medium),
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await
         .expect("send second sendUserTurn");

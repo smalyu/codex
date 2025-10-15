@@ -5,6 +5,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
+use codex_core::protocol::default_disabled_tools;
 use codex_protocol::config_types::ReasoningSummary;
 use core_test_support::responses;
 use core_test_support::responses::ev_assistant_message;
@@ -74,6 +75,7 @@ async fn read_file_tool_returns_requested_lines() -> anyhow::Result<()> {
             model: session_model,
             effort: None,
             summary: ReasoningSummary::Auto,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
 

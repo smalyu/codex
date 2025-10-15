@@ -239,6 +239,7 @@ impl ModelClient {
             instructions: &full_instructions,
             input: &input_with_instructions,
             tools: &tools_json,
+            allowed_tools: prompt.allowed_tools.as_slice(),
             tool_choice: "auto",
             parallel_tool_calls: prompt.parallel_tool_calls,
             reasoning,

@@ -1751,6 +1751,7 @@ impl ChatWidget {
                     model: Some(model_for_action.clone()),
                     effort: Some(effort_for_action),
                     summary: None,
+                    disabled_tools: None,
                 }));
                 tx.send(AppEvent::UpdateModel(model_for_action.clone()));
                 tx.send(AppEvent::UpdateReasoningEffort(effort_for_action));
@@ -1807,6 +1808,7 @@ impl ChatWidget {
                     model: None,
                     effort: None,
                     summary: None,
+                    disabled_tools: None,
                 }));
                 tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
                 tx.send(AppEvent::UpdateSandboxPolicy(sandbox.clone()));

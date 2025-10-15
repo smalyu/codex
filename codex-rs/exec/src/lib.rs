@@ -25,6 +25,7 @@ use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TaskCompleteEvent;
+use codex_core::protocol::default_disabled_tools;
 use codex_ollama::DEFAULT_OSS_MODEL;
 use codex_protocol::config_types::SandboxMode;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
@@ -348,6 +349,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             effort: default_effort,
             summary: default_summary,
             final_output_json_schema: output_schema,
+            disabled_tools: default_disabled_tools(),
         })
         .await?;
     info!("Sent prompt with event ID: {initial_prompt_task_id}");

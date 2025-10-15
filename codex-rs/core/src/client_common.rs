@@ -41,6 +41,9 @@ pub struct Prompt {
 
     /// Optional the output schema for the model's response.
     pub output_schema: Option<Value>,
+
+    /// The set of tools that are allowed to be used by the model.
+    pub(crate) allowed_tools: Vec<Value>,
 }
 
 impl Prompt {
@@ -85,6 +88,10 @@ impl Prompt {
 
         input
     }
+}
+
+fn json_slice_is_empty(values: &[Value]) -> bool {
+    values.is_empty()
 }
 
 fn reserialize_shell_outputs(items: &mut [ResponseItem]) {
@@ -268,6 +275,8 @@ pub(crate) struct ResponsesApiRequest<'a> {
     // separate enum for serialization.
     pub(crate) input: &'a Vec<ResponseItem>,
     pub(crate) tools: &'a [serde_json::Value],
+    #[serde(skip_serializing_if = "json_slice_is_empty")]
+    pub(crate) allowed_tools: &'a [serde_json::Value],
     pub(crate) tool_choice: &'static str,
     pub(crate) parallel_tool_calls: bool,
     pub(crate) reasoning: Option<Reasoning>,
@@ -457,6 +466,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
+            allowed_tools: &[],
             tool_choice: "auto",
             parallel_tool_calls: true,
             reasoning: None,
@@ -498,6 +508,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
+            allowed_tools: &[],
             tool_choice: "auto",
             parallel_tool_calls: true,
             reasoning: None,
@@ -534,6 +545,7 @@ mod tests {
             instructions: "i",
             input: &input,
             tools: &tools,
+            allowed_tools: &[],
             tool_choice: "auto",
             parallel_tool_calls: true,
             reasoning: None,
@@ -546,5 +558,51 @@ mod tests {
 
         let v = serde_json::to_value(&req).expect("json");
         assert!(v.get("text").is_none());
+    }
+
+    #[test]
+    fn serializes_allowed_tools_when_present() {
+        let input: Vec<ResponseItem> = vec![];
+        let tools: Vec<serde_json::Value> = vec![];
+        let allowed = vec![serde_json::json!({
+            "type": "function",
+            "name": "get_weather"
+        })];
+        let req = ResponsesApiRequest {
+            model: "gpt-5",
+            instructions: "i",
+            input: &input,
+            tools: &tools,
+            allowed_tools: allowed.as_slice(),
+            tool_choice: "auto",
+            parallel_tool_calls: true,
+            reasoning: None,
+            store: false,
+            stream: true,
+            include: vec![],
+            prompt_cache_key: None,
+            text: None,
+        };
+
+        let v = serde_json::to_value(&req).expect("json");
+        assert_eq!(
+            v.get("allowed_tools")
+                .and_then(|val| val.as_array())
+                .map(std::vec::Vec::len),
+            Some(1)
+        );
+        let first = v
+            .get("allowed_tools")
+            .and_then(|val| val.as_array())
+            .and_then(|arr| arr.first())
+            .expect("allowed tool entry");
+        assert_eq!(
+            first.get("type"),
+            Some(&serde_json::Value::String("function".into()))
+        );
+        assert_eq!(
+            first.get("name"),
+            Some(&serde_json::Value::String("get_weather".into()))
+        );
     }
 }
