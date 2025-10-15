@@ -60,10 +60,12 @@ impl SessionState {
         task_kind: TaskKind,
         pending_input: Vec<ResponseItem>,
     ) -> Vec<ResponseItem> {
+        // Ensure any missing tool-call outputs are recorded before
+        // accepting new pending input to preserve correct ordering.
+        self.history.handle_missing_tool_call_output(task_kind);
         if !pending_input.is_empty() {
             self.history.add_pending_input(pending_input, task_kind);
         }
-        self.history.handle_missing_tool_call_output(task_kind);
         self.history.prompt(task_kind)
     }
 
