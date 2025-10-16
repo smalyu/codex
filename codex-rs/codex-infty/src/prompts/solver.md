@@ -34,7 +34,7 @@ The orchestrator routes your structured messages to the Director or Verifier rol
   ```
 
 ## Operating rhythm
-- Never ask humans for approval to continue; the orchestrator supplies direction via the Director role.
+- You MUST always address the comments received by the verifiers.
 - Create `deliverable/summary.txt` before every final delivery. Capture the final answer, how you reached it, and any follow-up instructions.
 - When uncertainty remains, prioritise experiments or reasoning steps that move you closer to a finished proof rather than cataloguing known results.
 - Keep the run resilient to restarts: document intent, intermediate results, and follow-up tasks in `memory/`.
