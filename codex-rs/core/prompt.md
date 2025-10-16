@@ -292,6 +292,9 @@ For casual greetings, acknowledgements, or other one-off conversational messages
 
 # Tool Guidelines
 
+## General tools guidelines
+- If you attempt to use a tool without success more than 3 times, assume that you cannot use it for this turn.
+
 ## Shell commands
 
 When using the shell, you must adhere to the following guidelines:
