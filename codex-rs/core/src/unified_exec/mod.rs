@@ -58,11 +58,12 @@ pub(crate) struct UnifiedExecResult {
 #[derive(Debug, Default)]
 pub(crate) struct UnifiedExecSessionManager {
     next_session_id: AtomicI32,
-    sessions: Mutex<HashMap<i32, ManagedUnifiedExecSession>>,
+    sessions: Mutex<HashMap<i32, UnifiedExecSession>>,
 }
 
 #[derive(Debug)]
-struct ManagedUnifiedExecSession {
+/// Wraps a PTY session with buffered output and sandbox metadata for unified exec.
+struct UnifiedExecSession {
     session: ExecCommandSession,
     output_buffer: OutputBuffer,
     /// Notifies waiters whenever new output has been appended to
@@ -118,7 +119,7 @@ impl OutputBufferState {
 type OutputBuffer = Arc<Mutex<OutputBufferState>>;
 type OutputHandles = (OutputBuffer, Arc<Notify>);
 
-impl ManagedUnifiedExecSession {
+impl UnifiedExecSession {
     fn new(
         session: ExecCommandSession,
         initial_output_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
@@ -191,7 +192,9 @@ impl ManagedUnifiedExecSession {
             return Ok(());
         }
 
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Give the reader task a brief moment to flush any final PTY bytes after exit.
+        let _ =
+            tokio::time::timeout(Duration::from_millis(20), self.output_notify.notified()).await;
 
         let collected_chunks = self.snapshot_output().await;
         let mut aggregated: Vec<u8> = Vec::new();
@@ -247,7 +250,7 @@ impl ManagedUnifiedExecSession {
     }
 }
 
-impl Drop for ManagedUnifiedExecSession {
+impl Drop for UnifiedExecSession {
     fn drop(&mut self) {
         self.output_task.abort();
     }
@@ -258,7 +261,7 @@ impl UnifiedExecSessionManager {
         &self,
         command: Vec<String>,
         context: &UnifiedExecContext<'_>,
-    ) -> Result<ManagedUnifiedExecSession, UnifiedExecError> {
+    ) -> Result<UnifiedExecSession, UnifiedExecError> {
         let executor = &context.session.services.executor;
         let otel_event_manager = context.turn.client.get_otel_event_manager();
         let approval_command = command.clone();
@@ -303,12 +306,19 @@ impl UnifiedExecSessionManager {
             .await
             .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
 
-        let (spawned, sandbox_type) = plan
-            .spawn_interactive_session(context.session)
-            .await
-            .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
-
-        ManagedUnifiedExecSession::from_spawned(spawned, sandbox_type).await
+        plan.attempt_with_retry_if(
+            context.session,
+            |launch| async move {
+                let sandbox_type = launch.sandbox_type;
+                let spawned =
+                    crate::pty::spawn_pty_process(&launch.program, &launch.args, &launch.env)
+                        .await
+                        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
+                UnifiedExecSession::from_spawned(spawned, sandbox_type).await
+            },
+            |err: &UnifiedExecError| matches!(err, UnifiedExecError::SandboxDenied { .. }),
+        )
+        .await
     }
 
     pub async fn handle_request(
@@ -327,7 +337,7 @@ impl UnifiedExecSessionManager {
             None => (DEFAULT_TIMEOUT_MS, None),
         };
 
-        let mut new_session: Option<ManagedUnifiedExecSession> = None;
+        let mut new_session: Option<UnifiedExecSession> = None;
         let session_id;
         let writer_tx;
         let output_buffer;
@@ -369,10 +379,34 @@ impl UnifiedExecSessionManager {
         };
 
         if context.session_id.is_some() {
-            let joined_input = request.input_chunks.join(" ");
-            if !joined_input.is_empty() && writer_tx.send(joined_input.into_bytes()).await.is_err()
-            {
-                return Err(UnifiedExecError::WriteToStdin);
+            let mut trailing_whitespace = true;
+            for chunk in request.input_chunks {
+                if chunk.is_empty() {
+                    continue;
+                }
+
+                let leading_whitespace = chunk
+                    .chars()
+                    .next()
+                    .map(char::is_whitespace)
+                    .unwrap_or(true);
+
+                if !trailing_whitespace
+                    && !leading_whitespace
+                    && writer_tx.send(vec![b' ']).await.is_err()
+                {
+                    return Err(UnifiedExecError::WriteToStdin);
+                }
+
+                if writer_tx.send(chunk.as_bytes().to_vec()).await.is_err() {
+                    return Err(UnifiedExecError::WriteToStdin);
+                }
+
+                trailing_whitespace = chunk
+                    .chars()
+                    .next_back()
+                    .map(char::is_whitespace)
+                    .unwrap_or(trailing_whitespace);
             }
         }
 

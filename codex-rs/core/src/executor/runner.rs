@@ -27,8 +27,6 @@ use crate::executor::sandbox::select_sandbox;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
-use crate::pty::SpawnedPty;
-use crate::pty::spawn_pty_process;
 use crate::shell;
 use crate::tools::context::ExecCommandContext;
 
@@ -126,22 +124,6 @@ impl ExecutionPlan {
         &self.request.approval_command
     }
 
-    pub(crate) async fn spawn_interactive_session(
-        &self,
-        session: &Session,
-    ) -> Result<(SpawnedPty, SandboxType), ExecError> {
-        self.attempt_with_retry(session, |launch| async move {
-            let sandbox_type = launch.sandbox_type;
-            let spawned = spawn_pty_process(&launch.program, &launch.args, &launch.env)
-                .await
-                .map_err(|err| {
-                    ExecError::rejection(format!("failed to spawn interactive command: {err}"))
-                })?;
-            Ok((spawned, sandbox_type))
-        })
-        .await
-    }
-
     pub(crate) async fn prompt_retry_without_sandbox(
         &self,
         session: &Session,
@@ -166,21 +148,6 @@ impl ExecutionPlan {
         .await;
 
         approval.is_some()
-    }
-
-    /// Runs the provided attempt with the initially selected sandbox.
-    /// If it fails and policy allows, prompt to retry without sandbox and run again.
-    pub(crate) async fn attempt_with_retry<R, E, Fut, Attempt>(
-        &self,
-        session: &Session,
-        attempt: Attempt,
-    ) -> Result<R, E>
-    where
-        Attempt: Fn(SandboxLaunch) -> Fut,
-        Fut: Future<Output = Result<R, E>>,
-        E: From<SandboxLaunchError> + std::fmt::Display,
-    {
-        self.attempt_with_retry_if(session, attempt, |_| true).await
     }
 
     /// Like `attempt_with_retry`, but only retries if `should_retry(err)` returns true.
