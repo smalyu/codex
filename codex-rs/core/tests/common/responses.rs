@@ -239,6 +239,20 @@ pub fn ev_apply_patch_function_call(call_id: &str, patch: &str) -> Value {
     })
 }
 
+pub fn ev_function_call_output(call_id: &str, content: &str) -> Value {
+    serde_json::json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": {
+                "content": content,
+                "success": true
+            }
+        }
+    })
+}
+
 pub fn sse_failed(id: &str, code: &str, message: &str) -> String {
     sse(vec![serde_json::json!({
         "type": "response.failed",

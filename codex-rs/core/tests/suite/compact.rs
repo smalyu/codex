@@ -19,12 +19,14 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
+use core_test_support::responses::ev_function_call_output;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_failed;
 use core_test_support::responses::start_mock_server;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 // --- Test helpers -----------------------------------------------------------
 
 pub(super) const FIRST_REPLY: &str = "FIRST_REPLY";
@@ -688,7 +690,9 @@ async fn manual_compact_retries_after_context_window_error() {
         panic!("expected background event after compact retry");
     };
     assert!(
-        event.message.contains("Trimmed 1 older conversation item"),
+        event
+            .message
+            .contains("Trimmed 2 older conversation item(s)"),
         "background event should mention trimmed item count: {}",
         event.message
     );
@@ -710,43 +714,233 @@ async fn manual_compact_retries_after_context_window_error() {
     let retry_input = retry_attempt["input"]
         .as_array()
         .unwrap_or_else(|| panic!("retry attempt missing input array: {retry_attempt}"));
-    assert_eq!(
-        compact_input
-            .last()
-            .and_then(|item| item.get("content"))
-            .and_then(|v| v.as_array())
+
+    fn extract_text(item: &Value) -> Option<String> {
+        item.get("content")
+            .and_then(Value::as_array)
             .and_then(|items| items.first())
             .and_then(|entry| entry.get("text"))
-            .and_then(|text| text.as_str()),
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+
+    assert_eq!(
+        extract_text(compact_input.last().expect("compact input empty")).as_deref(),
         Some(SUMMARIZATION_PROMPT),
-        "compact attempt should include summarization prompt"
+        "compact attempt should include summarization prompt",
     );
     assert_eq!(
-        retry_input
-            .last()
-            .and_then(|item| item.get("content"))
-            .and_then(|v| v.as_array())
-            .and_then(|items| items.first())
-            .and_then(|entry| entry.get("text"))
-            .and_then(|text| text.as_str()),
+        extract_text(retry_input.last().expect("retry input empty")).as_deref(),
         Some(SUMMARIZATION_PROMPT),
-        "retry attempt should include summarization prompt"
+        "retry attempt should include summarization prompt",
     );
+
+    let contains_text = |items: &[Value], needle: &str| {
+        items
+            .iter()
+            .any(|item| extract_text(item).map_or(false, |text| text == needle))
+    };
+
+    assert!(
+        contains_text(compact_input, "first turn"),
+        "compact attempt should include original user message",
+    );
+    assert!(
+        contains_text(compact_input, FIRST_REPLY),
+        "compact attempt should include original assistant reply",
+    );
+    assert!(
+        !contains_text(retry_input, "first turn"),
+        "retry should drop original user message",
+    );
+    assert!(
+        !contains_text(retry_input, FIRST_REPLY),
+        "retry should drop assistant reply tied to original user message",
+    );
+
     assert_eq!(
-        retry_input.len(),
-        compact_input.len().saturating_sub(1),
-        "retry should drop exactly one history item (before {} vs after {})",
+        compact_input.len().saturating_sub(retry_input.len()),
+        2,
+        "retry should drop the most recent user turn (before {} vs after {})",
         compact_input.len(),
         retry_input.len()
     );
-    if let (Some(first_before), Some(first_after)) = (compact_input.first(), retry_input.first()) {
-        assert_ne!(
-            first_before, first_after,
-            "retry should drop the oldest conversation item"
-        );
-    } else {
-        panic!("expected non-empty compact inputs");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compact_trims_last_user_turn_with_function_calls_on_context_error() {
+    skip_if_no_network!();
+
+    const FIRST_USER_MSG: &str = "first user turn";
+    const SECOND_USER_MSG: &str = "second user turn";
+    const FIRST_CALL_A: &str = "call-first-a";
+    const FIRST_CALL_B: &str = "call-first-b";
+    const SECOND_CALL_A: &str = "call-second-a";
+    const SECOND_CALL_B: &str = "call-second-b";
+
+    let server = start_mock_server().await;
+
+    let first_turn_initial = sse(vec![ev_function_call(FIRST_CALL_A, "tool.first.a", "{}")]);
+    let first_turn_second_call = sse(vec![
+        ev_function_call_output(FIRST_CALL_A, "first-call-a output"),
+        ev_function_call(FIRST_CALL_B, "tool.first.b", "{}"),
+    ]);
+    let first_turn_complete = sse(vec![
+        ev_function_call_output(FIRST_CALL_B, "first-call-b output"),
+        ev_assistant_message("assistant-first", "first turn complete"),
+        ev_completed("resp-first"),
+    ]);
+    let second_turn_initial = sse(vec![ev_function_call(SECOND_CALL_A, "tool.second.a", "{}")]);
+    let second_turn_second_call = sse(vec![
+        ev_function_call_output(SECOND_CALL_A, "second-call-a output"),
+        ev_function_call(SECOND_CALL_B, "tool.second.b", "{}"),
+    ]);
+    let second_turn_complete = sse(vec![
+        ev_function_call_output(SECOND_CALL_B, "second-call-b output"),
+        ev_assistant_message("assistant-second", "second turn complete"),
+        ev_completed("resp-second"),
+    ]);
+    let compact_failed = sse_failed(
+        "resp-fail",
+        "context_length_exceeded",
+        CONTEXT_LIMIT_MESSAGE,
+    );
+    let compact_retry = sse(vec![
+        ev_assistant_message("assistant-summary", SUMMARY_TEXT),
+        ev_completed("resp-summary"),
+    ]);
+
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            first_turn_initial,
+            first_turn_second_call,
+            first_turn_complete,
+            second_turn_initial,
+            second_turn_second_call,
+            second_turn_complete,
+            compact_failed,
+            compact_retry,
+        ],
+    )
+    .await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+    let home = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&home);
+    config.model_provider = model_provider;
+    config.model_auto_compact_token_limit = Some(200_000);
+    let codex = ConversationManager::with_auth(CodexAuth::from_api_key("dummy"))
+        .new_conversation(config)
+        .await
+        .unwrap()
+        .conversation;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: FIRST_USER_MSG.into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![InputItem::Text {
+                text: SECOND_USER_MSG.into(),
+            }],
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    codex.submit(Op::Compact).await.unwrap();
+    let EventMsg::BackgroundEvent(event) =
+        wait_for_event(&codex, |ev| matches!(ev, EventMsg::BackgroundEvent(_))).await
+    else {
+        panic!("expected background event after compact retry");
+    };
+    assert!(
+        event
+            .message
+            .contains("Trimmed 2 older conversation item(s)"),
+        "background event should report trimming chunked user turn: {}",
+        event.message
+    );
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        8,
+        "expected two user turns (with tool call round-trips) followed by compact attempt + retry"
+    );
+
+    let compact_attempt = requests[6].body_json();
+    let retry_attempt = requests[7].body_json();
+
+    let compact_input = compact_attempt["input"]
+        .as_array()
+        .expect("compact attempt input array");
+    let retry_input = retry_attempt["input"]
+        .as_array()
+        .expect("retry attempt input array");
+
+    fn extract_text(item: &Value) -> Option<String> {
+        item.get("content")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|entry| entry.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
     }
+
+    let contains_text = |items: &[Value], needle: &str| {
+        items
+            .iter()
+            .any(|item| extract_text(item).map_or(false, |text| text == needle))
+    };
+
+    assert!(
+        contains_text(compact_input, SECOND_USER_MSG),
+        "initial compact attempt should include most recent user message",
+    );
+    assert!(
+        !contains_text(retry_input, SECOND_USER_MSG),
+        "retry should drop the most recent user message",
+    );
+    assert!(
+        contains_text(compact_input, "second turn complete"),
+        "initial compact attempt should include assistant reply for most recent turn",
+    );
+    assert!(
+        !contains_text(retry_input, "second turn complete"),
+        "retry should drop assistant reply for most recent turn",
+    );
+
+    assert_eq!(
+        compact_input.len().saturating_sub(retry_input.len()),
+        2,
+        "retry should drop the most recent user turn from the prompt",
+    );
+
+    let retry_call_ids: std::collections::HashSet<_> = retry_input
+        .iter()
+        .filter_map(|item| item.get("call_id").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        !retry_call_ids.contains(SECOND_CALL_A),
+        "retry should remove function call {SECOND_CALL_A}"
+    );
+    assert!(
+        !retry_call_ids.contains(SECOND_CALL_B),
+        "retry should remove function call {SECOND_CALL_B}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -71,9 +71,9 @@ async fn run_compact_task_inner(
     input: Vec<InputItem>,
 ) {
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-    let mut turn_input = sess
-        .turn_input_with_history(vec![initial_input_for_turn.clone().into()])
-        .await;
+    // Track the items we append for this compact prompt so trimming does not drop them.
+    let extra_items: Vec<ResponseItem> = vec![initial_input_for_turn.clone().into()];
+    let mut turn_input = sess.turn_input_with_history(extra_items.clone()).await;
     let mut truncated_count = 0usize;
 
     let max_retries = turn_context.client.get_provider().stream_max_retries();
@@ -114,11 +114,17 @@ async fn run_compact_task_inner(
                 return;
             }
             Err(e @ CodexErr::ContextWindowExceeded) => {
-                if turn_input.len() > 1 {
-                    turn_input.remove(0);
-                    truncated_count += 1;
-                    retries = 0;
-                    continue;
+                // Drop the most recent user turn (its message plus ensuing traffic) and retry.
+                if turn_input.len() > extra_items.len() {
+                    let history_len = turn_input.len() - extra_items.len();
+                    let mut prompt_items = turn_input.split_off(history_len);
+                    let trimmed = trim_recent_history_to_previous_user_message(&mut turn_input);
+                    turn_input.append(&mut prompt_items);
+                    if trimmed > 0 {
+                        truncated_count += trimmed;
+                        retries = 0;
+                        continue;
+                    }
                 }
                 sess.set_total_tokens_full(&sub_id, turn_context.as_ref())
                     .await;
@@ -175,6 +181,25 @@ async fn run_compact_task_inner(
         }),
     };
     sess.send_event(event).await;
+}
+
+/// Trim conversation history back to the previous user message boundary, removing that user turn.
+fn trim_recent_history_to_previous_user_message(turn_input: &mut Vec<ResponseItem>) -> usize {
+    if turn_input.is_empty() {
+        return 0;
+    }
+    let original_len = turn_input.len();
+    if let Some(last_user_index) = turn_input.iter().rposition(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { role, .. } if role == "user"
+        )
+    }) {
+        turn_input.truncate(last_user_index);
+    } else {
+        turn_input.clear();
+    }
+    original_len.saturating_sub(turn_input.len())
 }
 
 pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
