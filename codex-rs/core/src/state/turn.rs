@@ -76,7 +76,6 @@ pub(crate) struct TurnState {
     // Pre-tool readiness gating (ghost snapshot, etc.)
     pub(crate) pretool_flag: Option<Arc<ReadinessFlag>>,
     pub(crate) pretool_sub_token: Option<Token>,
-    pub(crate) pretool_waited: bool,
 }
 
 impl TurnState {

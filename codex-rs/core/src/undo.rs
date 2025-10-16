@@ -36,7 +36,6 @@ impl Session {
                 let mut ts = active.turn_state.lock().await;
                 ts.pretool_flag = Some(Arc::clone(&flag));
                 ts.pretool_sub_token = Some(token);
-                ts.pretool_waited = false;
             }
         }
 
