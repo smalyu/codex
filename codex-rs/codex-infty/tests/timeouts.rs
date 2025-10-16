@@ -66,9 +66,11 @@ async fn direction_request_times_out_when_director_is_silent() -> anyhow::Result
         verifiers: Vec::new(),
     };
 
-    let mut options = RunExecutionOptions::default();
-    options.objective = Some("Kick off".to_string());
-    options.director_timeout = Duration::from_millis(50);
+    let options = RunExecutionOptions {
+        objective: Some("Kick off".to_string()),
+        director_timeout: Duration::from_millis(50),
+        ..Default::default()
+    };
 
     let err = orchestrator
         .execute_new_run(params, options)

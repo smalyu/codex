@@ -92,11 +92,12 @@ pub(crate) async fn run_create(
     };
 
     if let Some(objective) = args.objective {
-        let mut options = RunExecutionOptions::default();
-        options.objective = Some(objective);
         let timeout = Duration::from_secs(args.timeout_secs);
-        options.director_timeout = timeout;
-        options.verifier_timeout = timeout;
+        let options = RunExecutionOptions {
+            objective: Some(objective),
+            director_timeout: timeout,
+            verifier_timeout: timeout,
+        };
 
         let start = Instant::now();
         let start_header = format!("Starting run {run_id}");

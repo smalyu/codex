@@ -67,8 +67,10 @@ async fn director_request_includes_output_schema() -> anyhow::Result<()> {
         verifiers: Vec::new(),
     };
 
-    let mut options = RunExecutionOptions::default();
-    options.objective = Some("Kick off".to_string());
+    let options = RunExecutionOptions {
+        objective: Some("Kick off".to_string()),
+        ..Default::default()
+    };
 
     // Drive the run in the background; we'll assert the request shape then cancel.
     let fut = tokio::spawn(async move {
@@ -164,8 +166,10 @@ async fn final_delivery_request_includes_output_schema() -> anyhow::Result<()> {
         verifiers: Vec::new(),
     };
 
-    let mut options = RunExecutionOptions::default();
-    options.objective = Some("Kick off".to_string());
+    let options = RunExecutionOptions {
+        objective: Some("Kick off".to_string()),
+        ..Default::default()
+    };
 
     let fut = tokio::spawn(async move {
         let _ = orchestrator.execute_new_run(params, options).await;
@@ -250,8 +254,10 @@ async fn verifier_request_includes_output_schema() -> anyhow::Result<()> {
         verifiers: vec![RoleConfig::new("verifier", verifier_config)],
     };
 
-    let mut options = RunExecutionOptions::default();
-    options.objective = Some("Kick off".to_string());
+    let options = RunExecutionOptions {
+        objective: Some("Kick off".to_string()),
+        ..Default::default()
+    };
 
     let fut = tokio::spawn(async move {
         let _ = orchestrator.execute_new_run(params, options).await;

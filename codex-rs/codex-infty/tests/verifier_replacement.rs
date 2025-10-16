@@ -98,8 +98,10 @@ async fn replaces_passing_verifiers_and_keeps_failing() -> anyhow::Result<()> {
         .and_then(|m| m.rollout_path.clone())
         .expect("beta initial rollout path");
 
-    let mut options = RunExecutionOptions::default();
-    options.verifier_timeout = Duration::from_secs(2);
+    let options = RunExecutionOptions {
+        verifier_timeout: Duration::from_secs(2),
+        ..Default::default()
+    };
 
     // Round 1: alpha pass (should be replaced), beta fail (should be kept)
     let _summary1 = orchestrator
