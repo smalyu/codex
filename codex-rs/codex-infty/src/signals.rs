@@ -21,7 +21,7 @@ impl VerifierDecision {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct VerifierVerdict {
     pub verdict: VerifierDecision,
     #[serde(default)]
@@ -30,7 +30,7 @@ pub struct VerifierVerdict {
     pub suggestions: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct VerifierReport {
     pub role: String,
     pub verdict: VerifierDecision,
@@ -40,10 +40,16 @@ pub struct VerifierReport {
     pub suggestions: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct AggregatedVerifierVerdict {
     #[serde(rename = "type")]
     pub kind: &'static str,
     pub overall: VerifierDecision,
     pub verdicts: Vec<VerifierReport>,
+}
+
+impl From<&AggregatedVerifierVerdict> for String {
+    fn from(value: &AggregatedVerifierVerdict) -> Self {
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string())
+    }
 }

@@ -6,6 +6,7 @@ use codex_core::CodexAuth;
 use codex_core::built_in_model_providers;
 use codex_core::config::Config;
 use codex_core::protocol::Op;
+use codex_core::cross_session::{AssistantMessage, PostUserTurnRequest, RoleOrId};
 use codex_infty::InftyOrchestrator;
 use codex_infty::RoleConfig;
 use codex_infty::RunExecutionOptions;
@@ -58,37 +59,34 @@ async fn orchestrator_routes_between_roles_and_records_store() -> anyhow::Result
         })
         .await?;
 
-    let solver_message = orchestrator
-        .call_role(
-            &sessions.run_id,
-            "solver",
-            "kick off plan",
-            Duration::from_secs(1),
-            None,
-        )
-        .await?;
+    let solver_message = call_role(
+        &orchestrator,
+        &sessions.run_id,
+        "solver",
+        "kick off plan",
+        Duration::from_secs(1),
+    )
+    .await?;
     assert_eq!(solver_message.message.message, "Need direction");
 
-    let director_message = orchestrator
-        .relay_assistant_to_role(
-            &sessions.run_id,
-            "director",
-            &solver_message,
-            Duration::from_secs(1),
-            None,
-        )
-        .await?;
+    let director_message = relay_assistant_to_role(
+        &orchestrator,
+        &sessions.run_id,
+        "director",
+        &solver_message,
+        Duration::from_secs(1),
+    )
+    .await?;
     assert_eq!(director_message.message.message, "Proceed iteratively");
 
-    let solver_reply = orchestrator
-        .relay_assistant_to_role(
-            &sessions.run_id,
-            "solver",
-            &director_message,
-            Duration::from_secs(1),
-            None,
-        )
-        .await?;
+    let solver_reply = relay_assistant_to_role(
+        &orchestrator,
+        &sessions.run_id,
+        "solver",
+        &director_message,
+        Duration::from_secs(1),
+    )
+    .await?;
     assert_eq!(solver_reply.message.message, "Acknowledged");
 
     assert_eq!(response_mock.requests().len(), 3);
@@ -302,4 +300,43 @@ async fn build_config(server: &MockServer) -> anyhow::Result<Config> {
     provider.base_url = Some(format!("{}/v1", server.uri()));
     config.model_provider = provider;
     Ok(config)
+}
+
+async fn call_role(
+    orchestrator: &InftyOrchestrator,
+    run_id: &str,
+    role: &str,
+    text: &str,
+    timeout: Duration,
+) -> anyhow::Result<AssistantMessage> {
+    let hub = orchestrator.hub();
+    let handle = hub
+        .post_user_turn(PostUserTurnRequest {
+            target: RoleOrId::RunRole {
+                run_id: run_id.to_string(),
+                role: role.to_string(),
+            },
+            text: text.to_string(),
+            final_output_json_schema: None,
+        })
+        .await?;
+    let reply = hub.await_first_assistant(&handle, timeout).await?;
+    Ok(reply)
+}
+
+async fn relay_assistant_to_role(
+    orchestrator: &InftyOrchestrator,
+    run_id: &str,
+    target_role: &str,
+    assistant: &AssistantMessage,
+    timeout: Duration,
+) -> anyhow::Result<AssistantMessage> {
+    call_role(
+        orchestrator,
+        run_id,
+        target_role,
+        &assistant.message.message,
+        timeout,
+    )
+    .await
 }
