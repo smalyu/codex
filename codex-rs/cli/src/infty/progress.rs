@@ -103,15 +103,7 @@ impl ProgressReporter for TerminalProgressReporter {
     }
 
     fn solver_agent_message(&self, agent_msg: &AgentMessageEvent) {
-        let mut lines: Vec<String> = agent_msg
-            .message
-            .lines()
-            .map(std::string::ToString::to_string)
-            .collect();
-        if lines.is_empty() {
-            lines.push(String::new());
-        }
-        self.print_exchange("solver", "user", lines, true);
+        tracing::info!("Agent Message: {agent_msg:?}");
     }
 
     fn direction_request(&self, prompt: &str) {
