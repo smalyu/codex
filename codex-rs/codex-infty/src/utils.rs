@@ -71,14 +71,20 @@ mod tests {
         std::fs::create_dir_all(base.join("deliverable")).unwrap();
         std::fs::write(base.join("deliverable").join("a.txt"), "ok").unwrap();
         let resolved = resolve_deliverable_path(base, "deliverable/a.txt").unwrap();
-        assert!(resolved.starts_with(base));
+        let base_abs = base.canonicalize().unwrap();
+        assert!(resolved.starts_with(&base_abs));
     }
 
     #[test]
     fn resolve_deliverable_rejects_escape() {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
-        let err = resolve_deliverable_path(base, "../outside.txt").unwrap_err();
+        // Create a real file outside of base so canonicalization succeeds
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("outside.txt");
+        std::fs::write(&outside_file, "nope").unwrap();
+
+        let err = resolve_deliverable_path(base, outside_file.to_str().unwrap()).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("escapes run store"));
     }

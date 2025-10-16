@@ -513,7 +513,7 @@ impl InftyOrchestrator {
         claim_path: &str,
         options: &RunExecutionOptions,
     ) -> Result<AggregatedVerifierVerdict> {
-        let pool = VerifierPool::from_sessions(
+        let mut pool = VerifierPool::from_sessions(
             Arc::clone(&self.hub),
             sessions,
             options.verifier_timeout,
@@ -521,6 +521,8 @@ impl InftyOrchestrator {
         );
         let req = VerificationRequestPayload::new(claim_path, None, None);
         let round = pool.collect_round(&req).await?;
+        pool.rotate_passing(sessions, &self.conversation_manager, &round.passing_roles)
+            .await?;
         Ok(round.summary)
     }
 }

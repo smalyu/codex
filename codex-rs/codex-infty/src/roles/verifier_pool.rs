@@ -4,8 +4,6 @@ use std::time::Duration;
 use anyhow::Context as _;
 use anyhow::Result;
 use codex_core::ConversationManager;
-use codex_core::config::Config;
-use codex_core::config::ConfigOverrides;
 use codex_core::cross_session::CrossSessionHub;
 use codex_core::protocol::Op;
 
@@ -130,10 +128,9 @@ impl VerifierPool {
             let _ = old.conversation.submit(Op::Shutdown).await;
             let _ = manager.remove_conversation(&old.conversation_id).await;
 
-            // load fresh config and spawn a new session
-            let config = Config::load_with_cli_overrides(Vec::new(), ConfigOverrides::default())
-                .await
-                .context("failed to load Codex config for verifier respawn")?;
+            // Reuse the existing verifier's config so overrides (e.g., base_url in tests)
+            // are preserved when respawning a passing verifier.
+            let config = old.config.clone();
             let role_config = RoleConfig::new(role.to_string(), config);
             let run_path = sessions.store.path();
             let session = session::spawn_role(

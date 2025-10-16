@@ -171,6 +171,15 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
             ),
             responses::ev_completed("solver-resp-4"),
         ]),
+        // Final verification of the deliverable
+        responses::sse(vec![
+            responses::ev_response_created("verifier-resp-3"),
+            responses::ev_assistant_message(
+                "verifier-msg-3",
+                r#"{"verdict":"pass","reasons":[],"suggestions":[]}"#,
+            ),
+            responses::ev_completed("verifier-resp-3"),
+        ]),
     ];
     for body in bodies {
         responses::mount_sse_once(&server, body).await;
