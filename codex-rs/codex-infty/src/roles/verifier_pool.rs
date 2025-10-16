@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::Context as _;
+use anyhow::Result;
 use codex_core::cross_session::CrossSessionHub;
 
 use crate::progress::ProgressReporter;
@@ -36,7 +37,15 @@ impl VerifierPool {
         let roles = sessions
             .verifiers
             .iter()
-            .map(|v| VerifierRole::new(Arc::clone(&hub), sessions.run_id.clone(), v.role.clone(), timeout, progress.clone()))
+            .map(|v| {
+                VerifierRole::new(
+                    Arc::clone(&hub),
+                    sessions.run_id.clone(),
+                    v.role.clone(),
+                    timeout,
+                    progress.clone(),
+                )
+            })
             .collect();
         Self {
             hub,
@@ -80,7 +89,10 @@ impl VerifierPool {
             results.push((name, verdict));
         }
         let summary = aggregate_verdicts(results);
-        Ok(VerificationRound { summary, passing_roles })
+        Ok(VerificationRound {
+            summary,
+            passing_roles,
+        })
     }
 
     pub fn replace_role(&mut self, role_name: &str) {
@@ -93,22 +105,5 @@ impl VerifierPool {
                 self.progress.clone(),
             );
         }
-    }
-
-    pub async fn rotate_passing_with<F, Fut>(
-        &mut self,
-        sessions: &mut RunSessions,
-        passing_roles: &[String],
-        mut respawn_fn: F,
-    ) -> Result<()>
-    where
-        F: FnMut(&str, &mut RunSessions) -> Fut,
-        Fut: std::future::Future<Output = Result<()>>,
-    {
-        for role in passing_roles {
-            respawn_fn(role.as_str(), sessions).await?;
-            self.replace_role(role);
-        }
-        Ok(())
     }
 }

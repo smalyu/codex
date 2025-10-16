@@ -3,12 +3,12 @@
 mod orchestrator;
 mod progress;
 mod prompts;
-pub(crate) mod utils;
 mod roles;
 mod run_store;
 mod session;
 mod signals;
 mod types;
+pub(crate) mod utils;
 
 pub use orchestrator::InftyOrchestrator;
 pub use progress::ProgressReporter;

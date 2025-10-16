@@ -1,6 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::Context;
+use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 
 pub fn trim_to_non_empty(opt: Option<String>) -> Option<String> {
     opt.and_then(|s| {

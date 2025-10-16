@@ -42,6 +42,12 @@ use crate::types::RunOutcome;
 use crate::types::RunParams;
 use crate::types::RunSessions;
 
+#[derive(Default)]
+struct LoopState {
+    waiting_for_signal: bool,
+    pending_solver_turn_completion: bool,
+}
+
 struct SessionCleanup {
     conversation_id: ConversationId,
     conversation: Arc<CodexConversation>,
@@ -64,6 +70,9 @@ pub struct InftyOrchestrator {
 }
 
 impl InftyOrchestrator {
+    fn progress_ref(&self) -> Option<&dyn ProgressReporter> {
+        self.progress.as_deref()
+    }
     pub fn new(auth: CodexAuth) -> Result<Self> {
         let runs_root = crate::default_runs_root()?;
         Ok(Self::with_runs_root(auth, runs_root))
@@ -202,17 +211,16 @@ impl InftyOrchestrator {
         );
 
         let mut solver_events = solver_role.stream_events()?;
-        let mut waiting_for_signal = false;
-        let mut pending_solver_turn_completion = false;
+        let mut state = LoopState::default();
         if let Some(objective) = &options.objective {
             solver_role
                 .post(objective.as_str(), Some(SolverRole::solver_signal_schema()))
                 .await?;
             sessions.store.touch()?;
-            waiting_for_signal = true;
-            if let Some(progress) = self.progress.as_ref() {
-                progress.objective_posted(objective);
-                progress.waiting_for_solver();
+            state.waiting_for_signal = true;
+            if let Some(p) = self.progress_ref() {
+                p.objective_posted(objective);
+                p.waiting_for_solver();
             }
         }
 
@@ -225,25 +233,19 @@ impl InftyOrchestrator {
                     let Some(event) = maybe_event else {
                         break 'event_loop;
                     };
-                    if let Some(progress) = self.progress.as_ref() {
-                        progress.solver_event(&event.event.msg);
-                    }
+                    if let Some(p) = self.progress_ref() { p.solver_event(&event.event.msg); }
                     match &event.event.msg {
                         EventMsg::AgentMessage(agent_msg) => {
-                            if let Some(progress) = self.progress.as_ref() {
-                                progress.solver_agent_message(agent_msg);
-                            }
+                            if let Some(p) = self.progress_ref() { p.solver_agent_message(agent_msg); }
                             if let Some(signal) = parse_solver_signal(&agent_msg.message) {
-                                waiting_for_signal = false;
+                                state.waiting_for_signal = false;
                                 match signal {
                                     SolverSignal::DirectionRequest { prompt } => {
                                         let prompt = crate::utils::required_trimmed(
                                             prompt,
                                             "solver direction_request missing prompt text",
                                         )?;
-                                        if let Some(progress) = self.progress.as_ref() {
-                                            progress.direction_request(&prompt);
-                                        }
+                                        if let Some(p) = self.progress_ref() { p.direction_request(&prompt); }
                                         self
                                             .handle_direction_request(
                                                 &prompt,
@@ -253,19 +255,14 @@ impl InftyOrchestrator {
                                             )
                                             .await?;
                                         sessions.store.touch()?;
-                                        pending_solver_turn_completion = true;
+                                        state.pending_solver_turn_completion = true;
                                     }
                                     SolverSignal::VerificationRequest { claim_path, notes } => {
                                         let claim_path = crate::utils::required_trimmed(
                                             claim_path,
                                             "solver verification_request missing claim_path",
                                         )?;
-                                        if let Some(progress) = self.progress.as_ref() {
-                                            progress.verification_request(
-                                                &claim_path,
-                                                notes.as_deref(),
-                                            );
-                                        }
+                                        if let Some(p) = self.progress_ref() { p.verification_request(&claim_path, notes.as_deref()); }
                                         let verified = self
                                             .handle_verification_request(
                                                 sessions,
@@ -278,7 +275,7 @@ impl InftyOrchestrator {
                                             .await?;
                                         sessions.store.touch()?;
                                         if verified {
-                                            pending_solver_turn_completion = true;
+                                            state.pending_solver_turn_completion = true;
                                         }
                                     }
                                     SolverSignal::FinalDelivery {
@@ -298,9 +295,7 @@ impl InftyOrchestrator {
                                         )?;
                                         let summary_clean = crate::utils::trim_to_non_empty(summary);
                                         let summary_ref = summary_clean.as_deref();
-                                        if let Some(progress) = self.progress.as_ref() {
-                                            progress.final_delivery(&resolved, summary_ref);
-                                        }
+                                        if let Some(p) = self.progress_ref() { p.final_delivery(&resolved, summary_ref); }
                                         let verified = self
                                             .run_final_verification(
                                                 sessions,
@@ -312,7 +307,7 @@ impl InftyOrchestrator {
                                             )
                                             .await?;
                                         if !verified {
-                                            pending_solver_turn_completion = true;
+                                            state.pending_solver_turn_completion = true;
                                             continue;
                                         }
                                         sessions.store.touch()?;
@@ -327,12 +322,12 @@ impl InftyOrchestrator {
                             }
                         }
                         EventMsg::TaskComplete(..) => {
-                            if waiting_for_signal {
+                            if state.waiting_for_signal {
                                 // The solver completed its turn without issuing a signal; ask for one now.
                                 solver_role.request_finalization_signal().await?;
-                            } else if pending_solver_turn_completion {
+                            } else if state.pending_solver_turn_completion {
                                 // We handled a signal earlier in the loop; this completion corresponds to it.
-                                pending_solver_turn_completion = false;
+                                state.pending_solver_turn_completion = false;
                             }
                         }
                         _ => {}
