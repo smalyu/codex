@@ -42,7 +42,7 @@ impl Session {
         let cwd = turn_context.cwd.clone();
         let sess = Arc::clone(self);
         // Capture the readiness flag and token so we can always mark readiness,
-        // avoiding races with locks held by ensure_pretool_ready().
+        // avoiding races with locks held by await_pretool_ready().
         let ready_flag = Arc::clone(&flag);
         let ready_token = token;
         tokio::spawn(async move {
@@ -87,7 +87,7 @@ impl Session {
     }
 
     /// Await pre-tool readiness (ghost snapshot) once. Subsequent calls resolve immediately.
-    pub async fn ensure_pretool_ready(&self) {
+    pub async fn await_pretool_ready(&self) {
         let flag_opt = {
             let active = self.active_turn.lock().await;
             match active.as_ref() {

@@ -860,7 +860,7 @@ impl Session {
         exec_command_context: ExecCommandContext,
     ) {
         // Ensure core pre-tool readiness (e.g., ghost snapshot) before the first tool call.
-        self.ensure_pretool_ready().await;
+        self.await_pretool_ready().await;
         let ExecCommandContext {
             sub_id,
             call_id,
