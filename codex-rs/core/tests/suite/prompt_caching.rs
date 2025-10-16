@@ -153,10 +153,7 @@ async fn codex_mini_latest_tools() {
 
     let body0 = requests[0].body_json::<serde_json::Value>().unwrap();
     assert!(
-        body0
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_some(),
+        body0.get("tools").and_then(Value::as_array).is_some(),
         "first request missing tools field: {body0:?}"
     );
     assert_eq!(
@@ -165,10 +162,7 @@ async fn codex_mini_latest_tools() {
     );
     let body1 = requests[1].body_json::<serde_json::Value>().unwrap();
     assert!(
-        body1
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_some(),
+        body1.get("tools").and_then(Value::as_array).is_some(),
         "second request missing tools field: {body1:?}"
     );
     assert_eq!(
@@ -252,7 +246,13 @@ async fn prompt_tools_are_consistent_across_requests() {
         ),
         (
             "gpt-5-codex",
-            vec!["shell", "update_plan", "apply_patch", "web_search", "view_image"],
+            vec![
+                "shell",
+                "update_plan",
+                "apply_patch",
+                "web_search",
+                "view_image",
+            ],
         ),
     ]);
     let expected_tools_names = tools_by_model
