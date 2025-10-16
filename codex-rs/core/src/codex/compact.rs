@@ -75,6 +75,7 @@ async fn run_compact_task_inner(
     let extra_items: Vec<ResponseItem> = vec![initial_input_for_turn.clone().into()];
     let mut turn_input = sess.turn_input_with_history(extra_items.clone()).await;
     let mut truncated_count = 0usize;
+    let mut trimmed_tails: Vec<Vec<ResponseItem>> = Vec::new();
 
     let max_retries = turn_context.client.get_provider().stream_max_retries();
     let mut retries = 0;
@@ -120,8 +121,9 @@ async fn run_compact_task_inner(
                     let mut prompt_items = turn_input.split_off(history_len);
                     let trimmed = trim_recent_history_to_previous_user_message(&mut turn_input);
                     turn_input.append(&mut prompt_items);
-                    if trimmed > 0 {
-                        truncated_count += trimmed;
+                    if !trimmed.is_empty() {
+                        truncated_count += trimmed.len();
+                        trimmed_tails.push(trimmed);
                         retries = 0;
                         continue;
                     }
@@ -166,7 +168,10 @@ async fn run_compact_task_inner(
     let summary_text = get_last_assistant_message_from_turn(&history_snapshot).unwrap_or_default();
     let user_messages = collect_user_messages(&history_snapshot);
     let initial_context = sess.build_initial_context(turn_context.as_ref());
-    let new_history = build_compacted_history(initial_context, &user_messages, &summary_text);
+    let mut new_history = build_compacted_history(initial_context, &user_messages, &summary_text);
+    for mut trimmed in trimmed_tails.into_iter().rev() {
+        new_history.append(&mut trimmed);
+    }
     sess.replace_history(new_history).await;
 
     let rollout_item = RolloutItem::Compacted(CompactedItem {
@@ -184,22 +189,24 @@ async fn run_compact_task_inner(
 }
 
 /// Trim conversation history back to the previous user message boundary, removing that user turn.
-fn trim_recent_history_to_previous_user_message(turn_input: &mut Vec<ResponseItem>) -> usize {
+///
+/// Returns the removed items in their original order so they can be restored later.
+fn trim_recent_history_to_previous_user_message(
+    turn_input: &mut Vec<ResponseItem>,
+) -> Vec<ResponseItem> {
     if turn_input.is_empty() {
-        return 0;
+        return Vec::new();
     }
-    let original_len = turn_input.len();
     if let Some(last_user_index) = turn_input.iter().rposition(|item| {
         matches!(
             item,
             ResponseItem::Message { role, .. } if role == "user"
         )
     }) {
-        turn_input.truncate(last_user_index);
+        turn_input.split_off(last_user_index)
     } else {
-        turn_input.clear();
+        turn_input.drain(..).collect()
     }
-    original_len.saturating_sub(turn_input.len())
 }
 
 pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
