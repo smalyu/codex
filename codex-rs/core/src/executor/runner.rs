@@ -92,14 +92,6 @@ impl ExecutionPlan {
         self.stdout_stream.clone()
     }
 
-    pub(crate) fn initial_sandbox(&self) -> SandboxType {
-        self.sandbox_decision.initial_sandbox
-    }
-
-    pub(crate) fn should_retry_without_sandbox(&self) -> bool {
-        self.sandbox_decision.escalate_on_failure
-    }
-
     pub(crate) fn initial_launch(&self) -> Result<SandboxLaunch, SandboxLaunchError> {
         build_launch_for_sandbox(
             self.sandbox_decision.initial_sandbox,
@@ -129,7 +121,7 @@ impl ExecutionPlan {
         session: &Session,
         failure_message: impl Into<String>,
     ) -> bool {
-        if !self.should_retry_without_sandbox() {
+        if !self.sandbox_decision.escalate_on_failure {
             return false;
         }
 
@@ -166,7 +158,7 @@ impl ExecutionPlan {
         let initial_launch = self.initial_launch().map_err(E::from)?;
         match attempt(initial_launch).await {
             Ok(result) => Ok(result),
-            Err(err) if self.should_retry_without_sandbox() && should_retry(&err) => {
+            Err(err) if self.sandbox_decision.escalate_on_failure && should_retry(&err) => {
                 let failure = format!("Execution failed: {err}");
                 if self.prompt_retry_without_sandbox(session, failure).await {
                     let retry_launch = self.retry_launch().map_err(E::from)?;
@@ -295,7 +287,7 @@ impl Executor {
                 session,
                 |launch| {
                     let params = plan.request().params.clone();
-                    let sandbox = plan.initial_sandbox();
+                    let sandbox = plan.sandbox_decision.initial_sandbox;
                     let policy = sandbox_policy.clone();
                     let stream = stdout_stream.clone();
                     async move { execute_sandbox_launch(params, launch, sandbox, &policy, stream).await }
