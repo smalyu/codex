@@ -49,6 +49,7 @@ pub(crate) mod linkers {
 
 pub mod errors {
     use crate::error::CodexErr;
+    use crate::executor::SandboxLaunchError;
     use crate::function_tool::FunctionCallError;
     use thiserror::Error;
 
@@ -63,6 +64,12 @@ pub mod errors {
     impl ExecError {
         pub(crate) fn rejection(msg: impl Into<String>) -> Self {
             FunctionCallError::RespondToModel(msg.into()).into()
+        }
+    }
+
+    impl From<SandboxLaunchError> for ExecError {
+        fn from(err: SandboxLaunchError) -> Self {
+            CodexErr::from(err).into()
         }
     }
 }

@@ -26,6 +26,7 @@ use thiserror::Error;
 
 #[derive(Debug)]
 pub(crate) struct SandboxLaunch {
+    pub sandbox_type: SandboxType,
     pub program: String,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
@@ -60,6 +61,7 @@ pub(crate) fn build_launch_for_sandbox(
                 .split_first()
                 .ok_or(SandboxLaunchError::MissingCommandLine)?;
             Ok(SandboxLaunch {
+                sandbox_type: SandboxType::None,
                 program: program.clone(),
                 args: args.to_vec(),
                 env,
@@ -70,6 +72,7 @@ pub(crate) fn build_launch_for_sandbox(
             let args =
                 create_seatbelt_command_args(command.to_vec(), sandbox_policy, sandbox_policy_cwd);
             Ok(SandboxLaunch {
+                sandbox_type: SandboxType::MacosSeatbelt,
                 program: MACOS_PATH_TO_SEATBELT_EXECUTABLE.to_string(),
                 args,
                 env,
@@ -84,6 +87,7 @@ pub(crate) fn build_launch_for_sandbox(
                 sandbox_policy_cwd,
             );
             Ok(SandboxLaunch {
+                sandbox_type: SandboxType::LinuxSeccomp,
                 program: exe.to_string_lossy().to_string(),
                 args,
                 env,
@@ -196,7 +200,7 @@ pub async fn select_sandbox(
     otel_event_manager: &OtelEventManager,
 ) -> Result<SandboxDecision, ExecError> {
     match &request.mode {
-        ExecutionMode::Shell => {
+        ExecutionMode::Shell | ExecutionMode::InteractiveShell => {
             select_shell_sandbox(
                 request,
                 approval_policy,

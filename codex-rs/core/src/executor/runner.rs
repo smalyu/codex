@@ -27,6 +27,8 @@ use crate::executor::sandbox::select_sandbox;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::AskForApproval;
 use crate::protocol::SandboxPolicy;
+use crate::pty::SpawnedPty;
+use crate::pty::spawn_pty_process;
 use crate::shell;
 use crate::tools::context::ExecCommandContext;
 
@@ -122,6 +124,22 @@ impl ExecutionPlan {
 
     pub(crate) fn approval_command(&self) -> &[String] {
         &self.request.approval_command
+    }
+
+    pub(crate) async fn spawn_interactive_session(
+        &self,
+        session: &Session,
+    ) -> Result<(SpawnedPty, SandboxType), ExecError> {
+        self.attempt_with_retry(session, |launch| async move {
+            let sandbox_type = launch.sandbox_type;
+            let spawned = spawn_pty_process(&launch.program, &launch.args, &launch.env)
+                .await
+                .map_err(|err| {
+                    ExecError::rejection(format!("failed to spawn interactive command: {err}"))
+                })?;
+            Ok((spawned, sandbox_type))
+        })
+        .await
     }
 
     pub(crate) async fn prompt_retry_without_sandbox(
@@ -221,7 +239,10 @@ impl Executor {
         approval_policy: AskForApproval,
         context: &ExecCommandContext,
     ) -> Result<ExecutionPlan, ExecError> {
-        if matches!(request.mode, ExecutionMode::Shell) {
+        if matches!(
+            request.mode,
+            ExecutionMode::Shell | ExecutionMode::InteractiveShell
+        ) {
             request.params =
                 maybe_translate_shell_command(request.params, session, request.use_shell_profile);
         }

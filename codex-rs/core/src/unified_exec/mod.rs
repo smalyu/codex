@@ -1,18 +1,12 @@
-use portable_pty::CommandBuilder;
-use portable_pty::PtySize;
-use portable_pty::native_pty_system;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::io::ErrorKind;
-use std::io::Read;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot::error::TryRecvError;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -20,11 +14,15 @@ use tokio::time::Instant;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::exec::ExecParams;
+use crate::exec::ExecToolCallOutput;
+use crate::exec::SandboxType;
+use crate::exec::StreamOutput;
+use crate::exec::is_likely_sandbox_denied;
 use crate::exec_command::ExecCommandSession;
 use crate::executor::ExecutionMode;
 use crate::executor::ExecutionPlan;
 use crate::executor::ExecutionRequest;
-use crate::executor::SandboxLaunch;
+use crate::pty::SpawnedPty;
 use crate::tools::context::ExecCommandContext;
 use crate::truncate::truncate_middle;
 
@@ -71,6 +69,7 @@ struct ManagedUnifiedExecSession {
     /// `output_buffer`, allowing clients to poll for fresh data.
     output_notify: Arc<Notify>,
     output_task: JoinHandle<()>,
+    sandbox_type: SandboxType,
 }
 
 #[derive(Debug, Default)]
@@ -110,6 +109,10 @@ impl OutputBufferState {
         self.total_bytes = 0;
         drained
     }
+
+    fn snapshot(&self) -> Vec<Vec<u8>> {
+        self.chunks.iter().cloned().collect()
+    }
 }
 
 type OutputBuffer = Arc<Mutex<OutputBufferState>>;
@@ -119,6 +122,7 @@ impl ManagedUnifiedExecSession {
     fn new(
         session: ExecCommandSession,
         initial_output_rx: tokio::sync::broadcast::Receiver<Vec<u8>>,
+        sandbox_type: SandboxType,
     ) -> Self {
         let output_buffer = Arc::new(Mutex::new(OutputBufferState::default()));
         let output_notify = Arc::new(Notify::new());
@@ -150,6 +154,7 @@ impl ManagedUnifiedExecSession {
             output_buffer,
             output_notify,
             output_task,
+            sandbox_type,
         }
     }
 
@@ -167,6 +172,79 @@ impl ManagedUnifiedExecSession {
     fn has_exited(&self) -> bool {
         self.session.has_exited()
     }
+
+    fn exit_code(&self) -> Option<i32> {
+        self.session.exit_code()
+    }
+
+    async fn snapshot_output(&self) -> Vec<Vec<u8>> {
+        let guard = self.output_buffer.lock().await;
+        guard.snapshot()
+    }
+
+    fn sandbox_type(&self) -> SandboxType {
+        self.sandbox_type
+    }
+
+    async fn check_for_sandbox_denial(&self) -> Result<(), UnifiedExecError> {
+        if self.sandbox_type() == SandboxType::None || !self.has_exited() {
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let collected_chunks = self.snapshot_output().await;
+        let mut aggregated: Vec<u8> = Vec::new();
+        for chunk in collected_chunks {
+            aggregated.extend_from_slice(&chunk);
+        }
+        let aggregated_text = String::from_utf8_lossy(&aggregated).to_string();
+        let exit_code = self.exit_code().unwrap_or(-1);
+
+        let exec_output = ExecToolCallOutput {
+            exit_code,
+            stdout: StreamOutput::new(aggregated_text.clone()),
+            stderr: StreamOutput::new(String::new()),
+            aggregated_output: StreamOutput::new(aggregated_text.clone()),
+            duration: Duration::ZERO,
+            timed_out: false,
+        };
+
+        if is_likely_sandbox_denied(self.sandbox_type(), &exec_output) {
+            let (snippet, _) = truncate_middle(&aggregated_text, UNIFIED_EXEC_OUTPUT_MAX_BYTES);
+            let message = if snippet.is_empty() {
+                format!("exit code {exit_code}")
+            } else {
+                snippet
+            };
+            return Err(UnifiedExecError::sandbox_denied(message));
+        }
+
+        Ok(())
+    }
+
+    async fn from_spawned(
+        spawned: SpawnedPty,
+        sandbox_type: SandboxType,
+    ) -> Result<Self, UnifiedExecError> {
+        let SpawnedPty {
+            session,
+            output_rx,
+            mut exit_rx,
+        } = spawned;
+        let managed = Self::new(session, output_rx, sandbox_type);
+
+        let exit_ready = match exit_rx.try_recv() {
+            Ok(_) | Err(TryRecvError::Closed) => true,
+            Err(TryRecvError::Empty) => false,
+        };
+
+        if exit_ready {
+            managed.check_for_sandbox_denial().await?;
+        }
+
+        Ok(managed)
+    }
 }
 
 impl Drop for ManagedUnifiedExecSession {
@@ -180,13 +258,7 @@ impl UnifiedExecSessionManager {
         &self,
         command: Vec<String>,
         context: &UnifiedExecContext<'_>,
-    ) -> Result<
-        (
-            ExecCommandSession,
-            tokio::sync::broadcast::Receiver<Vec<u8>>,
-        ),
-        UnifiedExecError,
-    > {
+    ) -> Result<ManagedUnifiedExecSession, UnifiedExecError> {
         let executor = &context.session.services.executor;
         let otel_event_manager = context.turn.client.get_otel_event_manager();
         let approval_command = command.clone();
@@ -210,7 +282,7 @@ impl UnifiedExecSessionManager {
                 justification: None,
             },
             approval_command,
-            mode: ExecutionMode::Shell,
+            mode: ExecutionMode::InteractiveShell,
             stdout_stream: None,
             use_shell_profile: false,
         };
@@ -231,10 +303,12 @@ impl UnifiedExecSessionManager {
             .await
             .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
 
-        plan.attempt_with_retry(context.session, |launch| async move {
-            create_unified_exec_session(&launch).await
-        })
-        .await
+        let (spawned, sandbox_type) = plan
+            .spawn_interactive_session(context.session)
+            .await
+            .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
+
+        ManagedUnifiedExecSession::from_spawned(spawned, sandbox_type).await
     }
 
     pub async fn handle_request(
@@ -285,9 +359,7 @@ impl UnifiedExecSessionManager {
         } else {
             let command = request.input_chunks.to_vec();
             let new_id = self.next_session_id.fetch_add(1, Ordering::SeqCst);
-            let (session, initial_output_rx) =
-                self.open_session_with_sandbox(command, &context).await?;
-            let managed_session = ManagedUnifiedExecSession::new(session, initial_output_rx);
+            let managed_session = self.open_session_with_sandbox(command, &context).await?;
             let (buffer, notify) = managed_session.output_handles();
             writer_tx = managed_session.writer_sender();
             output_buffer = buffer;
@@ -386,112 +458,6 @@ impl UnifiedExecSessionManager {
             })
         }
     }
-}
-
-async fn create_unified_exec_session(
-    launch: &SandboxLaunch,
-) -> Result<
-    (
-        ExecCommandSession,
-        tokio::sync::broadcast::Receiver<Vec<u8>>,
-    ),
-    UnifiedExecError,
-> {
-    if launch.program.is_empty() {
-        return Err(UnifiedExecError::MissingCommandLine);
-    }
-
-    let pty_system = native_pty_system();
-
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
-
-    // Safe thanks to the check at the top of the function.
-    let mut command_builder = CommandBuilder::new(launch.program.clone());
-    for arg in &launch.args {
-        command_builder.arg(arg.clone());
-    }
-    for (key, value) in &launch.env {
-        command_builder.env(key.clone(), value.clone());
-    }
-
-    let mut child = pair
-        .slave
-        .spawn_command(command_builder)
-        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
-    let killer = child.clone_killer();
-
-    let (writer_tx, mut writer_rx) = mpsc::channel::<Vec<u8>>(128);
-    let (output_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
-
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
-    let output_tx_clone = output_tx.clone();
-    let reader_handle = tokio::task::spawn_blocking(move || {
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let _ = output_tx_clone.send(buf[..n].to_vec());
-                }
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|err| UnifiedExecError::create_session(err.to_string()))?;
-    let writer = Arc::new(StdMutex::new(writer));
-    let writer_handle = tokio::spawn({
-        let writer = writer.clone();
-        async move {
-            while let Some(bytes) = writer_rx.recv().await {
-                let writer = writer.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    if let Ok(mut guard) = writer.lock() {
-                        use std::io::Write;
-                        let _ = guard.write_all(&bytes);
-                        let _ = guard.flush();
-                    }
-                })
-                .await;
-            }
-        }
-    });
-
-    let exit_status = Arc::new(AtomicBool::new(false));
-    let wait_exit_status = Arc::clone(&exit_status);
-    let wait_handle = tokio::task::spawn_blocking(move || {
-        let _ = child.wait();
-        wait_exit_status.store(true, Ordering::SeqCst);
-    });
-
-    let (session, initial_output_rx) = ExecCommandSession::new(
-        writer_tx,
-        output_tx,
-        killer,
-        reader_handle,
-        writer_handle,
-        wait_handle,
-        exit_status,
-    );
-    Ok((session, initial_output_rx))
 }
 
 #[cfg(test)]

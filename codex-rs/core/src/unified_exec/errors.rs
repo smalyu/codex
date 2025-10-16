@@ -13,11 +13,17 @@ pub(crate) enum UnifiedExecError {
     MissingCommandLine,
     #[error("missing codex-linux-sandbox executable path")]
     MissingLinuxSandboxExecutable,
+    #[error("Command denied by sandbox: {message}")]
+    SandboxDenied { message: String },
 }
 
 impl UnifiedExecError {
     pub(crate) fn create_session(message: String) -> Self {
         Self::CreateSession { message }
+    }
+
+    pub(crate) fn sandbox_denied(message: String) -> Self {
+        Self::SandboxDenied { message }
     }
 }
 

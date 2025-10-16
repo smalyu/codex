@@ -190,6 +190,7 @@ async fn spawn_with_launch(
         program,
         args,
         env: launch_env,
+        ..
     } = launch;
     env.extend(launch_env);
 
@@ -233,7 +234,10 @@ pub(crate) mod errors {
 /// error, but the command itself might fail or succeed for other reasons.
 /// For now, we conservatively check for well known command failure exit codes and
 /// also look for common sandbox denial keywords in the command output.
-fn is_likely_sandbox_denied(sandbox_type: SandboxType, exec_output: &ExecToolCallOutput) -> bool {
+pub(crate) fn is_likely_sandbox_denied(
+    sandbox_type: SandboxType,
+    exec_output: &ExecToolCallOutput,
+) -> bool {
     if sandbox_type == SandboxType::None || exec_output.exit_code == 0 {
         return false;
     }
