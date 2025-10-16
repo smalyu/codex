@@ -738,7 +738,7 @@ async fn manual_compact_retries_after_context_window_error() {
     let contains_text = |items: &[Value], needle: &str| {
         items
             .iter()
-            .any(|item| extract_text(item).map_or(false, |text| text == needle))
+            .any(|item| extract_text(item).is_some_and(|text| text == needle))
     };
 
     assert!(
@@ -903,7 +903,7 @@ async fn manual_compact_trims_last_user_turn_with_function_calls_on_context_erro
     let contains_text = |items: &[Value], needle: &str| {
         items
             .iter()
-            .any(|item| extract_text(item).map_or(false, |text| text == needle))
+            .any(|item| extract_text(item).is_some_and(|text| text == needle))
     };
 
     assert!(
