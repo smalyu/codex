@@ -106,7 +106,7 @@ impl ProgressReporter for TerminalProgressReporter {
         let mut lines: Vec<String> = agent_msg
             .message
             .lines()
-            .map(|line| line.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         if lines.is_empty() {
             lines.push(String::new());

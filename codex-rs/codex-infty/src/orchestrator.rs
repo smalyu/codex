@@ -231,7 +231,6 @@ impl InftyOrchestrator {
                     if let Some(p) = self.progress_ref() { p.solver_event(&event.event.msg); }
                     match &event.event.msg {
                         EventMsg::AgentMessage(agent_msg) => {
-                            println!(); // TODO drop
                             if let Some(p) = self.progress_ref() { p.solver_agent_message(agent_msg); }
                             if let Some(signal) = parse_solver_signal(&agent_msg.message) {
                                 state.waiting_for_signal = false;
@@ -308,10 +307,10 @@ impl InftyOrchestrator {
                             }
                         }
                         EventMsg::Error(error) => {
-                            println!("Error: {:?}", error);
+                            tracing::error!("Error: {:?}", error);
                         }
                         EventMsg::StreamError(error) => {
-                            println!("Stream error: {:?}", error);
+                            tracing::error!("Stream error: {:?}", error);
                         }
                         e => {
                             tracing::info!("Unhandled event: {:?}", e); // todo move to trace
@@ -386,6 +385,7 @@ impl InftyOrchestrator {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_final_verification(
         &self,
         sessions: &mut RunSessions,
