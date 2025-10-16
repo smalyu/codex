@@ -13,11 +13,13 @@ pub use ghost_commits::restore_ghost_commit;
 pub use ghost_commits::restore_to_commit;
 pub use platform::create_symlink;
 
+type CommitID = String;
+
 /// Details of a ghost commit created from a repository state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GhostCommit {
-    id: String,
-    parent: Option<String>,
+    id: CommitID,
+    parent: Option<CommitID>,
     preexisting_untracked_files: Vec<PathBuf>,
     preexisting_untracked_dirs: Vec<PathBuf>,
 }
@@ -25,8 +27,8 @@ pub struct GhostCommit {
 impl GhostCommit {
     /// Create a new ghost commit wrapper from a raw commit ID and optional parent.
     pub fn new(
-        id: String,
-        parent: Option<String>,
+        id: CommitID,
+        parent: Option<CommitID>,
         preexisting_untracked_files: Vec<PathBuf>,
         preexisting_untracked_dirs: Vec<PathBuf>,
     ) -> Self {

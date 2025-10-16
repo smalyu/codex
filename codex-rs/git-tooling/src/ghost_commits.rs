@@ -177,6 +177,8 @@ pub fn restore_to_commit(repo_path: &Path, commit_id: &str) -> Result<(), GitToo
     restore_to_commit_inner(repo_root.as_path(), repo_prefix.as_deref(), commit_id)
 }
 
+/// Restores the working tree and index to the given commit using `git restore`.
+/// The repository root and optional repository-relative prefix limit the restore scope.
 fn restore_to_commit_inner(
     repo_root: &Path,
     repo_prefix: Option<&Path>,
@@ -206,6 +208,7 @@ struct UntrackedSnapshot {
     dirs: Vec<PathBuf>,
 }
 
+/// Captures the repository's untracked files and directories scoped to an optional subdirectory.
 fn capture_existing_untracked(
     repo_root: &Path,
     repo_prefix: Option<&Path>,
@@ -258,6 +261,7 @@ fn capture_existing_untracked(
     Ok(snapshot)
 }
 
+/// Removes untracked files and directories that were not present when the snapshot was captured.
 fn remove_new_untracked(
     repo_root: &Path,
     preserved_files: &[PathBuf],
@@ -288,6 +292,7 @@ fn remove_new_untracked(
     Ok(())
 }
 
+/// Determines whether an untracked path should be kept because it existed in the snapshot.
 fn should_preserve(
     path: &Path,
     preserved_files: &HashSet<PathBuf>,
@@ -302,6 +307,7 @@ fn should_preserve(
         .any(|dir| path.starts_with(dir.as_path()))
 }
 
+/// Deletes the file or directory at the provided path, ignoring if it is already absent.
 fn remove_path(path: &Path) -> Result<(), GitToolingError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
