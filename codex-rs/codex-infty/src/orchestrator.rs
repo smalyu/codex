@@ -306,7 +306,8 @@ impl InftyOrchestrator {
                         EventMsg::StreamError(error) => {
                             println!("Stream error: {:?}", error);
                         }
-                        _ => {
+                        e => {
+                            tracing::info!("Unhandled event: {:?}", e);
                             print!(".");
                             let _ = std::io::stdout().flush();
                         }

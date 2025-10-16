@@ -1,4 +1,5 @@
 use std::fs;
+use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -25,7 +26,11 @@ use codex_infty::RunParams;
 use codex_infty::RunStore;
 use owo_colors::OwoColorize;
 use serde::Serialize;
+use std::sync::OnceLock;
 use supports_color::Stream;
+use tracing_appender::non_blocking;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::prelude::*;
 
 use super::args::CreateArgs;
 use super::args::ListArgs;
@@ -52,6 +57,7 @@ pub(crate) async fn run_create(
     args: CreateArgs,
 ) -> Result<()> {
     let config = load_config(config_overrides).await?;
+    init_infty_logging(&config)?;
     let auth = load_auth(&config)?;
     let runs_root = resolve_runs_root(runs_root_override)?;
     let color_enabled = supports_color::on(Stream::Stdout).is_some();
@@ -155,6 +161,8 @@ pub(crate) async fn run_create(
 }
 
 pub(crate) fn run_list(runs_root_override: Option<PathBuf>, args: ListArgs) -> Result<()> {
+    // Initialize logging using default Codex home discovery.
+    let _ = init_infty_logging_from_home();
     let runs_root = resolve_runs_root(runs_root_override)?;
     let listings = collect_run_summaries(&runs_root)?;
 
@@ -181,6 +189,7 @@ pub(crate) fn run_list(runs_root_override: Option<PathBuf>, args: ListArgs) -> R
 
 pub(crate) fn run_show(runs_root_override: Option<PathBuf>, args: ShowArgs) -> Result<()> {
     validate_run_id(&args.run_id)?;
+    let _ = init_infty_logging_from_home();
     let runs_root = resolve_runs_root(runs_root_override)?;
     let run_path = runs_root.join(&args.run_id);
     let store =
@@ -319,6 +328,75 @@ fn collect_run_summaries(root: &Path) -> Result<Vec<RunSummary>> {
 
     summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(summaries)
+}
+
+fn init_infty_logging(config: &codex_core::config::Config) -> std::io::Result<()> {
+    let log_dir = codex_core::config::log_dir(config)?;
+    std::fs::create_dir_all(&log_dir)?;
+
+    let mut log_file_opts = OpenOptions::new();
+    log_file_opts.create(true).append(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        log_file_opts.mode(0o600);
+    }
+
+    let log_file = log_file_opts.open(log_dir.join("codex-infty.log"))?;
+    let (non_blocking, guard) = non_blocking(log_file);
+    static INFTY_LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+    let _ = INFTY_LOG_GUARD.set(guard);
+
+    // Use RUST_LOG if set, otherwise default to info for common codex crates
+    let env_filter = || {
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("codex_core=info,codex_infty=info,codex_cli=info"))
+    };
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_target(false)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_filter(env_filter());
+
+    // Initialize once; subsequent calls are no‑ops.
+    let _ = tracing_subscriber::registry().with(file_layer).try_init();
+    Ok(())
+}
+
+fn init_infty_logging_from_home() -> std::io::Result<()> {
+    let mut log_dir = codex_core::config::find_codex_home()?;
+    log_dir.push("log");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let mut log_file_opts = OpenOptions::new();
+    log_file_opts.create(true).append(true);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        log_file_opts.mode(0o600);
+    }
+
+    let log_file = log_file_opts.open(log_dir.join("codex-infty.log"))?;
+    let (non_blocking, guard) = non_blocking(log_file);
+    static INFTY_LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+    let _ = INFTY_LOG_GUARD.set(guard);
+
+    let env_filter = || {
+        EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("codex_core=info,codex_infty=info,codex_cli=info"))
+    };
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_target(false)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+        .with_filter(env_filter());
+
+    let _ = tracing_subscriber::registry().with(file_layer).try_init();
+    Ok(())
 }
 
 #[cfg(test)]

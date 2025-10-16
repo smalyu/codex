@@ -7,7 +7,6 @@ use codex_infty::ProgressReporter;
 use codex_infty::VerifierDecision;
 use codex_infty::VerifierVerdict;
 use crossterm::style::Stylize;
-use owo_colors::OwoColorize;
 use std::path::Path;
 use supports_color::Stream;
 

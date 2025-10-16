@@ -973,6 +973,8 @@ dependencies = [
  "textwrap 0.16.2",
  "tokio",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]
