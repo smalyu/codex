@@ -1,3 +1,35 @@
+//! Unified Exec: interactive PTY execution with session management.
+//!
+//! Purpose and responsibilities
+//! - Manages interactive PTY sessions (create, reuse, buffer output with caps).
+//! - Delegates sandbox selection, approvals, and policy decisions to the
+//!   executor (single source of truth) via `prepare_execution_plan`.
+//! - Spawns the PTY using the `SandboxLaunch` produced by the plan and reuses
+//!   `ExecutionPlan::attempt_with_retry_if` to optionally retry without a
+//!   sandbox when policy allows and the user approves.
+//! - After process exit, classifies sandbox denials using the shared
+//!   `is_likely_sandbox_denied` heuristic so denial messages stay consistent.
+//!
+//! Why not call `executor.run`?
+//! `executor.run` drives a non‑PTY (piped) execution flow end‑to‑end. Unified
+//! Exec needs an interactive PTY that persists across requests and supports
+//! streaming I/O. To keep policy logic centralized while still owning the PTY
+//! lifecycle, Unified Exec builds an `ExecutionRequest` with
+//! `ExecutionMode::InteractiveShell`, asks the executor for an
+//! `ExecutionPlan`, then performs the PTY spawn itself with the plan’s
+//! sandboxed command and environment.
+//!
+//! Handoff at a glance
+//! 1) Build `ExecutionRequest` (interactive shell).
+//! 2) `executor.update_environment(turn.sandbox_policy, turn.cwd)`.
+//! 3) `plan = executor.prepare_execution_plan(request, …)`.
+//! 4) `plan.attempt_with_retry_if(|launch| spawn_pty_process(launch), retry_on_denied)`.
+//! 5) Buffer+stream output, apply timeouts, and return `UnifiedExecResult`.
+//!
+//! This structure ensures Unified Exec benefits from the same approval,
+//! sandbox selection, and escalation rules as regular exec, while keeping the
+//! PTY/session concerns isolated here.
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
