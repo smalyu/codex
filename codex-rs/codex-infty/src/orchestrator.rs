@@ -355,7 +355,6 @@ impl InftyOrchestrator {
             state.waiting_for_signal = true;
             if let Some(p) = self.progress_ref() {
                 p.objective_posted(objective);
-                p.waiting_for_solver();
             }
         }
         Ok(())

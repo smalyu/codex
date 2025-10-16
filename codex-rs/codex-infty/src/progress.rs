@@ -9,7 +9,6 @@ use crate::signals::VerifierVerdict;
 
 pub trait ProgressReporter: Send + Sync {
     fn objective_posted(&self, _objective: &str) {}
-    fn waiting_for_solver(&self) {}
     fn solver_event(&self, _event: &EventMsg) {}
     fn role_event(&self, _role: &str, _event: &EventMsg) {}
     fn solver_agent_message(&self, _message: &AgentMessageEvent) {}
