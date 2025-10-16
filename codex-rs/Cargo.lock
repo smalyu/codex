@@ -1194,6 +1194,7 @@ dependencies = [
  "codex-protocol",
  "core_test_support",
  "dirs",
+ "futures",
  "serde",
  "serde_json",
  "tempfile",

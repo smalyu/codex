@@ -18,7 +18,6 @@ pub use signals::DirectiveResponse;
 pub use signals::VerifierDecision;
 pub use signals::VerifierReport;
 pub use signals::VerifierVerdict;
-pub use types::ResumeParams;
 pub use types::RoleConfig;
 pub use types::RoleSession;
 pub use types::RunExecutionOptions;

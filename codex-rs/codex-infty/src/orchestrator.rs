@@ -12,6 +12,8 @@ use anyhow::bail;
 use codex_core::CodexAuth;
 use codex_core::CodexConversation;
 use codex_core::ConversationManager;
+use codex_core::config::Config;
+use codex_core::config::ConfigOverrides;
 use codex_core::cross_session::AssistantMessage;
 use codex_core::cross_session::CrossSessionHub;
 use codex_core::cross_session::SessionEventStream;
@@ -39,7 +41,6 @@ use crate::signals::VerifierDecision;
 use crate::signals::VerifierReport;
 use crate::signals::VerifierVerdict;
 use crate::types::FINALIZATION_PROMPT;
-use crate::types::ResumeParams;
 use crate::types::RoleConfig;
 use crate::types::RoleSession;
 use crate::types::RunExecutionOptions;
@@ -146,14 +147,7 @@ impl InftyOrchestrator {
         self.drive_run(sessions, options).await
     }
 
-    pub async fn execute_existing_run(
-        &self,
-        params: ResumeParams,
-        options: RunExecutionOptions,
-    ) -> Result<RunOutcome> {
-        let sessions = self.resume_run(params).await?;
-        self.drive_run(sessions, options).await
-    }
+    // resumable runs are disabled; execute_existing_run removed
 
     pub async fn spawn_run(&self, params: RunParams) -> Result<RunSessions> {
         let RunParams {
@@ -215,67 +209,7 @@ impl InftyOrchestrator {
         })
     }
 
-    pub async fn resume_run(&self, params: ResumeParams) -> Result<RunSessions> {
-        let ResumeParams {
-            run_path,
-            solver,
-            director,
-            verifiers,
-        } = params;
-
-        let mut store = RunStore::load(&run_path)?;
-        let run_id = store.metadata().run_id.clone();
-        let mut cleanup = Vec::new();
-
-        let run_path = store.path().to_path_buf();
-
-        let solver_session = match self
-            .resume_and_register_role(&run_id, &run_path, &solver, &mut store, &mut cleanup)
-            .await
-        {
-            Ok(session) => session,
-            Err(err) => {
-                self.cleanup_failed_resume(cleanup).await;
-                return Err(err);
-            }
-        };
-
-        let director_session = match self
-            .resume_and_register_role(&run_id, &run_path, &director, &mut store, &mut cleanup)
-            .await
-        {
-            Ok(session) => session,
-            Err(err) => {
-                self.cleanup_failed_resume(cleanup).await;
-                return Err(err);
-            }
-        };
-
-        let mut verifier_sessions = Vec::with_capacity(verifiers.len());
-        for verifier in verifiers.iter() {
-            let session = match self
-                .resume_and_register_role(&run_id, &run_path, verifier, &mut store, &mut cleanup)
-                .await
-            {
-                Ok(session) => session,
-                Err(err) => {
-                    self.cleanup_failed_resume(cleanup).await;
-                    return Err(err);
-                }
-            };
-            verifier_sessions.push(session);
-        }
-
-        store.touch()?;
-
-        Ok(RunSessions {
-            run_id,
-            solver: solver_session,
-            director: director_session,
-            verifiers: verifier_sessions,
-            store,
-        })
-    }
+    // resumable runs are disabled; resume_run removed
 
     async fn drive_run(
         &self,
@@ -534,7 +468,7 @@ impl InftyOrchestrator {
 
     async fn handle_verification_request(
         &self,
-        sessions: &RunSessions,
+        sessions: &mut RunSessions,
         claim_path: &str,
         notes: Option<&str>,
         options: &RunExecutionOptions,
@@ -556,7 +490,7 @@ impl InftyOrchestrator {
 
     async fn run_final_verification(
         &self,
-        sessions: &RunSessions,
+        sessions: &mut RunSessions,
         deliverable_path: &Path,
         summary: Option<&str>,
         options: &RunExecutionOptions,
@@ -604,7 +538,7 @@ impl InftyOrchestrator {
 
     async fn collect_verification_summary(
         &self,
-        sessions: &RunSessions,
+        sessions: &mut RunSessions,
         claim_path: &str,
         notes: Option<&str>,
         objective: Option<&str>,
@@ -621,7 +555,8 @@ impl InftyOrchestrator {
             objective,
         };
         let request_text = serde_json::to_string_pretty(&request)?;
-        let mut collected = Vec::with_capacity(sessions.verifiers.len());
+        let mut results: Vec<(String, VerifierVerdict)> =
+            Vec::with_capacity(sessions.verifiers.len());
         for verifier in &sessions.verifiers {
             let handle = session::post_turn(
                 self.hub.as_ref(),
@@ -649,10 +584,70 @@ impl InftyOrchestrator {
             if let Some(progress) = self.progress.as_ref() {
                 progress.verifier_verdict(&verifier.role, &verdict);
             }
-            collected.push((verifier.role.clone(), verdict));
+            results.push((verifier.role.clone(), verdict));
         }
 
-        Ok(aggregate_verdicts(collected))
+        // Replace any verifier that passed with a fresh session; keep failures.
+        // Build a set of roles to replace to avoid borrowing issues while mutating.
+        let to_replace: Vec<String> = results
+            .iter()
+            .filter_map(|(role, verdict)| {
+                if verdict.verdict.is_pass() {
+                    Some(role.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for role in to_replace {
+            if let Err(err) = self.replace_verifier_session(sessions, &role).await {
+                warn!(role = %role, ?err, "failed to replace verifier session; keeping existing");
+            }
+        }
+
+        // Aggregate directly from the collected results
+        Ok(aggregate_verdicts(results))
+    }
+
+    async fn replace_verifier_session(&self, sessions: &mut RunSessions, role: &str) -> Result<()> {
+        // Find the existing verifier session index by role
+        let idx = sessions
+            .verifiers
+            .iter()
+            .position(|s| s.role == role)
+            .ok_or_else(|| anyhow!(format!("verifier role {role} not found")))?;
+
+        // Shut down the old session and unregister it from the hub
+        let old = &sessions.verifiers[idx];
+        // best-effort shutdown; ignore errors but proceed to unregister
+        let _ = old.conversation.submit(Op::Shutdown).await;
+        let _ = self
+            .conversation_manager
+            .remove_conversation(&old.conversation_id)
+            .await;
+
+        // Prepare a fresh Config using current user defaults, then apply our autonomous policies
+        let config = Config::load_with_cli_overrides(Vec::new(), ConfigOverrides::default())
+            .await
+            .context("failed to load Codex config for verifier respawn")?;
+        // RoleConfig::new applies sandbox + approval; mimic that here via the constructor
+        let role_config = crate::types::RoleConfig::new(role.to_string(), config);
+
+        // Spawn a new verifier session and register it
+        let mut dummy = Vec::new();
+        let run_path = sessions.store.path().to_path_buf();
+        let new_session = self
+            .spawn_and_register_role(
+                &sessions.run_id,
+                &run_path,
+                &role_config,
+                &mut sessions.store,
+                &mut dummy,
+            )
+            .await?;
+
+        sessions.verifiers[idx] = new_session;
+        Ok(())
     }
 
     fn emit_verification_summary(&self, summary: &AggregatedVerifierVerdict) {
@@ -691,9 +686,7 @@ impl InftyOrchestrator {
         }
     }
 
-    async fn cleanup_failed_resume(&self, sessions: Vec<SessionCleanup>) {
-        self.shutdown_sessions(sessions).await;
-    }
+    // resumable runs are disabled; cleanup_failed_resume removed
 
     async fn shutdown_sessions(&self, sessions: Vec<SessionCleanup>) {
         for session in sessions {
@@ -786,38 +779,20 @@ impl InftyOrchestrator {
         Ok(session)
     }
 
-    async fn resume_and_register_role(
-        &self,
-        run_id: &str,
-        run_path: &Path,
-        role_config: &RoleConfig,
-        store: &mut RunStore,
-        cleanup: &mut Vec<SessionCleanup>,
-    ) -> Result<RoleSession> {
-        let metadata = store
-            .role_metadata(&role_config.role)
-            .ok_or_else(|| anyhow!("role {} not found in run metadata", role_config.role))?;
-        let rollout_path = metadata
-            .rollout_path
-            .as_ref()
-            .ok_or_else(|| anyhow!("missing rollout path for role {}", role_config.role))?;
+    // resumable runs are disabled; resume_and_register_role removed
+}
 
-        let session = session::resume_role(
-            Arc::clone(&self.hub),
-            &self.conversation_manager,
-            run_id,
-            run_path,
-            role_config,
-            rollout_path,
-            prompts::ensure_instructions,
-        )
-        .await?;
-        cleanup.push(SessionCleanup::new(&session));
-        store.update_rollout_path(&session.role, session.rollout_path.clone())?;
-        if let Some(path) = role_config.config_path.clone() {
-            store.set_role_config_path(&session.role, path)?;
-        }
-        Ok(session)
+impl InftyOrchestrator {
+    /// Test-only helper to run a single verification round against all verifiers,
+    /// applying the replacement policy (replace passes, keep failures).
+    pub async fn verify_round_for_test(
+        &self,
+        sessions: &mut RunSessions,
+        claim_path: &str,
+        options: &RunExecutionOptions,
+    ) -> Result<AggregatedVerifierVerdict> {
+        self.collect_verification_summary(sessions, claim_path, None, None, options)
+            .await
     }
 }
 

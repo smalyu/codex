@@ -7,7 +7,6 @@ use codex_core::built_in_model_providers;
 use codex_core::config::Config;
 use codex_core::protocol::Op;
 use codex_infty::InftyOrchestrator;
-use codex_infty::ResumeParams;
 use codex_infty::RoleConfig;
 use codex_infty::RunExecutionOptions;
 use codex_infty::RunParams;
@@ -108,79 +107,7 @@ async fn orchestrator_routes_between_roles_and_records_store() -> anyhow::Result
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn orchestrator_resumes_existing_run() -> anyhow::Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = responses::start_mock_server().await;
-    let bodies = vec![
-        responses::sse(vec![
-            responses::ev_response_created("solver-resp-1"),
-            responses::ev_assistant_message("solver-msg-1", "Need direction"),
-            responses::ev_completed("solver-resp-1"),
-        ]),
-        responses::sse(vec![
-            responses::ev_response_created("director-resp-1"),
-            responses::ev_assistant_message("director-msg-1", "Proceed iteratively"),
-            responses::ev_completed("director-resp-1"),
-        ]),
-        responses::sse(vec![
-            responses::ev_response_created("solver-resp-2"),
-            responses::ev_assistant_message("solver-msg-2", "Acknowledged"),
-            responses::ev_completed("solver-resp-2"),
-        ]),
-    ];
-    for body in bodies {
-        responses::mount_sse_once(&server, body).await;
-    }
-
-    let runs_root = TempDir::new()?;
-    let orchestrator =
-        InftyOrchestrator::with_runs_root(CodexAuth::from_api_key("dummy-key"), runs_root.path());
-    let run_id = "run-resume".to_string();
-
-    let solver_config = build_config(&server).await?;
-    let director_config = build_config(&server).await?;
-
-    let sessions = orchestrator
-        .spawn_run(RunParams {
-            run_id: run_id.clone(),
-            run_root: Some(runs_root.path().join("runs").join(&run_id)),
-            solver: RoleConfig::new("solver", solver_config.clone()),
-            director: RoleConfig::new("director", director_config.clone()),
-            verifiers: Vec::new(),
-        })
-        .await?;
-
-    sessions.solver.conversation.submit(Op::Shutdown).await.ok();
-    sessions
-        .director
-        .conversation
-        .submit(Op::Shutdown)
-        .await
-        .ok();
-    drop(sessions);
-
-    let resume = orchestrator
-        .resume_run(ResumeParams {
-            run_path: runs_root.path().join("runs").join(&run_id),
-            solver: RoleConfig::new("solver", solver_config),
-            director: RoleConfig::new("director", director_config),
-            verifiers: Vec::new(),
-        })
-        .await?;
-
-    assert_eq!(resume.run_id, run_id);
-    assert!(
-        resume
-            .store
-            .role_metadata("solver")
-            .unwrap()
-            .rollout_path
-            .is_some()
-    );
-    Ok(())
-}
+// resumable runs are disabled; resume test removed
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {

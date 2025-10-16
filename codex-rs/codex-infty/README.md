@@ -81,8 +81,8 @@ JSON may be fenced as ```json … ```; the orchestrator will strip the fence.
 
 - Orchestrator: `codex-infty/src/orchestrator.rs`
   - `InftyOrchestrator`: spawns/resumes role sessions, drives the event loop, and routes signals.
-  - `execute_new_run` / `execute_existing_run`: one‑shot helpers that spawn/resume and then drive.
-  - `spawn_run` / `resume_run`: set up sessions and the run store.
+  - `execute_new_run`: one‑shot helper that spawns and then drives.
+  - `spawn_run`: set up sessions and the run store.
   - `call_role`, `relay_assistant_to_role`, `post_to_role`, `await_first_assistant`, `stream_events`: utilities when integrating custom flows.
 
 - Run store: `codex-infty/src/run_store.rs`
@@ -90,7 +90,7 @@ JSON may be fenced as ```json … ```; the orchestrator will strip the fence.
 
 - Types: `codex-infty/src/types.rs`
   - `RoleConfig`: wraps a `Config` and sets sensible defaults for autonomous flows (no approvals, full sandbox access). Also used to persist optional config paths.
-  - `RunParams`, `ResumeParams`: input to spawn/resume runs.
+  - `RunParams`: input to spawn runs.
   - `RunExecutionOptions`: per‑run options (objective, timeouts).
   - `RunOutcome`: returned on successful final delivery.
 
@@ -157,28 +157,7 @@ async fn main() -> anyhow::Result<()> {
 # fn load_config() -> codex_core::config::Config { codex_core::config::Config::default() }
 ```
 
-Resuming an existing run:
-
-```rust
-use codex_infty::{InftyOrchestrator, ResumeParams, RoleConfig};
-
-async fn resume_example(orchestrator: &InftyOrchestrator) -> anyhow::Result<()> {
-    let solver = RoleConfig::new("solver", load_config());
-    let director = RoleConfig::new("director", load_config());
-    let verifiers = vec![];
-
-    let resume = ResumeParams {
-        run_path: std::path::PathBuf::from("/path/to/run"),
-        solver,
-        director,
-        verifiers,
-    };
-    let outcome = orchestrator.execute_existing_run(resume, Default::default()).await?;
-    println!("{}", outcome.run_id);
-    Ok(())
-}
-# fn load_config() -> codex_core::config::Config { codex_core::config::Config::default() }
-```
+Note: Resuming runs is currently disabled.
 
 ## CLI Quickstart
 
@@ -192,8 +171,7 @@ codex infty create --run-id demo --objective "Build and test feature"
 codex infty list
 codex infty show demo
 
-# Send a one-off message to a role in a running/resumable run
-codex infty drive demo solver "Summarize progress"
+# Sending one-off messages to stored runs is currently disabled
 ```
 
 Flags allow customizing the Director’s model and reasoning effort; see `codex infty create --help`.

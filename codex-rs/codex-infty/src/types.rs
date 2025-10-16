@@ -9,8 +9,8 @@ use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_protocol::ConversationId;
 
-pub(crate) const DEFAULT_DIRECTOR_TIMEOUT: Duration = Duration::from_secs(120);
-pub(crate) const DEFAULT_VERIFIER_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const DEFAULT_DIRECTOR_TIMEOUT: Duration = Duration::from_secs(1200);
+pub(crate) const DEFAULT_VERIFIER_TIMEOUT: Duration = Duration::from_secs(1800);
 pub(crate) const FINALIZATION_PROMPT: &str = "Create deliverable/: include compiled artifacts or scripts, usage docs, and tests. Write deliverable/summary.txt capturing the final answer, evidence, and follow-up steps. Also provide deliverable/README.md with overview, manifest (paths and sizes), verification steps, and limitations. Remove scratch files. Reply with JSON: {\"type\":\"final_delivery\",\"deliverable_path\":\"deliverable/summary.txt\",\"summary\":\"<answer plus supporting context>\"}.";
 
 #[derive(Clone)]
@@ -48,13 +48,6 @@ pub struct RunParams {
     pub verifiers: Vec<RoleConfig>,
 }
 
-pub struct ResumeParams {
-    pub run_path: PathBuf,
-    pub solver: RoleConfig,
-    pub director: RoleConfig,
-    pub verifiers: Vec<RoleConfig>,
-}
-
 #[derive(Clone)]
 pub struct RunExecutionOptions {
     pub objective: Option<String>,
@@ -85,16 +78,18 @@ pub struct RoleSession {
     pub conversation: Arc<CodexConversation>,
     pub session_configured: codex_core::protocol::SessionConfiguredEvent,
     pub rollout_path: PathBuf,
+    pub config: Config,
 }
 
 impl RoleSession {
-    pub(crate) fn from_new(role: String, session: NewConversation) -> Self {
+    pub(crate) fn from_new(role: String, session: NewConversation, config: Config) -> Self {
         Self {
             role,
             conversation_id: session.conversation_id,
             conversation: session.conversation,
             session_configured: session.session_configured.clone(),
             rollout_path: session.session_configured.rollout_path.clone(),
+            config,
         }
     }
 }

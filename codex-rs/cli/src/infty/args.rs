@@ -31,9 +31,7 @@ enum InftyCommand {
 
     /// Show metadata for a stored run.
     Show(ShowArgs),
-
-    /// Send a message to a role within a run and print the first reply.
-    Drive(DriveArgs),
+    // resumable runs are disabled; Drive command removed
 }
 
 #[derive(Debug, Parser)]
@@ -81,21 +79,7 @@ pub(crate) struct ShowArgs {
     pub json: bool,
 }
 
-#[derive(Debug, Parser)]
-pub(crate) struct DriveArgs {
-    /// Run id to resume.
-    pub run_id: String,
-
-    /// Role to address (e.g. solver, director).
-    pub role: String,
-
-    /// Message to send to the role.
-    pub message: String,
-
-    /// Timeout in seconds to await the first assistant message.
-    #[arg(long = "timeout-secs", default_value_t = super::commands::DEFAULT_TIMEOUT_SECS)]
-    pub timeout_secs: u64,
-}
+// resumable runs are disabled; DriveArgs removed
 
 impl InftyCli {
     pub async fn run(self) -> Result<()> {
@@ -111,9 +95,7 @@ impl InftyCli {
             }
             InftyCommand::List(args) => commands::run_list(runs_root, args)?,
             InftyCommand::Show(args) => commands::run_show(runs_root, args)?,
-            InftyCommand::Drive(args) => {
-                commands::run_drive(config_overrides, runs_root, args).await?;
-            }
+            // Drive removed
         }
 
         Ok(())

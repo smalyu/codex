@@ -35,9 +35,10 @@ pub async fn spawn_role(
     } = role_config;
     config.cwd = run_path.to_path_buf();
     ensure_instructions(&role, &mut config);
+    let cfg_for_session = config.clone();
     let session = manager
         .new_conversation_with_cross_session(
-            config,
+            cfg_for_session,
             CrossSessionSpawnParams {
                 hub: Arc::clone(&hub),
                 run_id: Some(run_id.to_string()),
@@ -45,34 +46,11 @@ pub async fn spawn_role(
             },
         )
         .await?;
-    Ok(RoleSession::from_new(role, session))
+    // Note: include the final config used to spawn the session
+    Ok(RoleSession::from_new(role, session, config))
 }
 
-pub async fn resume_role(
-    hub: Arc<CrossSessionHub>,
-    manager: &ConversationManager,
-    run_id: &str,
-    run_path: &Path,
-    role_config: &RoleConfig,
-    rollout_path: &Path,
-    ensure_instructions: impl FnOnce(&str, &mut Config),
-) -> Result<RoleSession> {
-    let mut config = role_config.config.clone();
-    config.cwd = run_path.to_path_buf();
-    ensure_instructions(&role_config.role, &mut config);
-    let session = manager
-        .resume_conversation_with_cross_session(
-            config,
-            rollout_path.to_path_buf(),
-            CrossSessionSpawnParams {
-                hub: Arc::clone(&hub),
-                run_id: Some(run_id.to_string()),
-                role: Some(role_config.role.clone()),
-            },
-        )
-        .await?;
-    Ok(RoleSession::from_new(role_config.role.clone(), session))
-}
+// resumable runs are disabled for now; resume_role removed
 
 pub async fn post_turn(
     hub: &CrossSessionHub,

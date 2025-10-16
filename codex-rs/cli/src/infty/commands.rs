@@ -19,7 +19,6 @@ use codex_core::auth::read_openai_api_key_from_env;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_infty::InftyOrchestrator;
-use codex_infty::ResumeParams;
 use codex_infty::RoleConfig;
 use codex_infty::RunExecutionOptions;
 use codex_infty::RunParams;
@@ -29,7 +28,6 @@ use serde::Serialize;
 use supports_color::Stream;
 
 use super::args::CreateArgs;
-use super::args::DriveArgs;
 use super::args::ListArgs;
 use super::args::ShowArgs;
 use super::progress::TerminalProgressReporter;
@@ -37,7 +35,7 @@ use super::summary::print_run_summary_box;
 
 const DEFAULT_VERIFIER_ROLES: [&str; 3] = ["verifier-alpha", "verifier-beta", "verifier-gamma"];
 
-pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 60;
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 6000;
 
 #[derive(Debug, Serialize)]
 struct RunSummary {
@@ -218,60 +216,7 @@ pub(crate) fn run_show(runs_root_override: Option<PathBuf>, args: ShowArgs) -> R
     Ok(())
 }
 
-pub(crate) async fn run_drive(
-    config_overrides: CliConfigOverrides,
-    runs_root_override: Option<PathBuf>,
-    args: DriveArgs,
-) -> Result<()> {
-    validate_run_id(&args.run_id)?;
-    let config = load_config(config_overrides).await?;
-    let auth = load_auth(&config)?;
-    let runs_root = resolve_runs_root(runs_root_override)?;
-    let run_path = runs_root.join(&args.run_id);
-    let store =
-        RunStore::load(&run_path).with_context(|| format!("failed to load run {}", args.run_id))?;
-
-    let solver_role = store
-        .role_metadata("solver")
-        .ok_or_else(|| anyhow!("run {} is missing solver role", args.run_id))?;
-    let director_role = store
-        .role_metadata("director")
-        .ok_or_else(|| anyhow!("run {} is missing director role", args.run_id))?;
-
-    let verifiers: Vec<_> = store
-        .metadata()
-        .roles
-        .iter()
-        .filter(|role| role.role != solver_role.role && role.role != director_role.role)
-        .map(|role| RoleConfig::new(role.role.clone(), config.clone()))
-        .collect();
-
-    let orchestrator = InftyOrchestrator::with_runs_root(auth, runs_root)
-        .with_progress(Arc::new(TerminalProgressReporter::default()));
-    let sessions = orchestrator
-        .resume_run(ResumeParams {
-            run_path: run_path.clone(),
-            solver: RoleConfig::new(solver_role.role.clone(), config.clone()),
-            director: RoleConfig::new(director_role.role.clone(), config.clone()),
-            verifiers,
-        })
-        .await
-        .with_context(|| format!("failed to resume run {}", args.run_id))?;
-
-    let timeout = Duration::from_secs(args.timeout_secs);
-    let reply = orchestrator
-        .call_role(&sessions.run_id, &args.role, args.message, timeout, None)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to deliver message to role {} in run {}",
-                args.role, sessions.run_id
-            )
-        })?;
-
-    println!("{}", reply.message.message);
-    Ok(())
-}
+// resumable runs are disabled; run_drive removed
 
 fn generate_run_id() -> String {
     let timestamp = Utc::now().format("run-%Y%m%d-%H%M%S");
