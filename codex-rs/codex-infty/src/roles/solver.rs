@@ -99,7 +99,14 @@ impl SolverRole {
             Some(Self::final_delivery_schema()),
         )
         .await?;
-        let _ = session::await_first_idle(self.hub.as_ref(), &handle, Duration::from_secs(5), None)
+        // Allow more time for the solver to start emitting the
+        // finalization signal before timing out as "idle".
+        let _ = session::await_first_idle(
+            self.hub.as_ref(),
+            &handle,
+            Duration::from_secs(120),
+            None,
+        )
             .await?;
         Ok(())
     }

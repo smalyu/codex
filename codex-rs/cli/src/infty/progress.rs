@@ -106,6 +106,15 @@ impl ProgressReporter for TerminalProgressReporter {
         tracing::info!("Agent Message: {agent_msg:?}");
     }
 
+    fn invalid_solver_signal(&self, raw_message: &str) {
+        let heading = "Warning".yellow().bold();
+        let body = format!(
+            "solver reply did not match expected JSON signal; got: {}",
+            raw_message
+        );
+        println!("{} {} {}", self.timestamp(), heading, body);
+    }
+
     fn direction_request(&self, prompt: &str) {
         let prompt_line = format!("{}", prompt.yellow());
         self.print_exchange("solver", "director", vec![prompt_line], true);

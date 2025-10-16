@@ -12,6 +12,9 @@ pub trait ProgressReporter: Send + Sync {
     fn solver_event(&self, _event: &EventMsg) {}
     fn role_event(&self, _role: &str, _event: &EventMsg) {}
     fn solver_agent_message(&self, _message: &AgentMessageEvent) {}
+    /// Called when the solver emits a message that failed to parse as a valid
+    /// JSON signal according to the expected `solver_signal_schema`.
+    fn invalid_solver_signal(&self, _raw_message: &str) {}
     fn direction_request(&self, _prompt: &str) {}
     fn director_response(&self, _directive: &DirectiveResponse) {}
     fn verification_request(&self, _claim_path: &str, _notes: Option<&str>) {}
