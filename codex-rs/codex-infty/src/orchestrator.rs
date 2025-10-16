@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -225,6 +226,7 @@ impl InftyOrchestrator {
                     if let Some(p) = self.progress_ref() { p.solver_event(&event.event.msg); }
                     match &event.event.msg {
                         EventMsg::AgentMessage(agent_msg) => {
+                            println!(); // TODO drop
                             if let Some(p) = self.progress_ref() { p.solver_agent_message(agent_msg); }
                             if let Some(signal) = parse_solver_signal(&agent_msg.message) {
                                 state.waiting_for_signal = false;
@@ -275,13 +277,16 @@ impl InftyOrchestrator {
                                             deliverable_path,
                                             "solver final_delivery missing deliverable_path",
                                         )?;
-                                        if deliverable_path.is_empty() {
-                                            bail!("solver final_delivery provided empty path");
-                                        }
+                                        if deliverable_path.is_empty() { bail!("solver final_delivery provided empty path"); }
+
+                                        // Minimal behavior: if the provided path cannot be resolved,
+                                        // send a placeholder claim so verifiers can fail it.
                                         let resolved = crate::utils::resolve_deliverable_path(
                                             sessions.store.path(),
                                             &deliverable_path,
-                                        )?;
+                                        )
+                                        .unwrap_or_else(|_| std::path::PathBuf::from("file not existing"));
+
                                         let summary_clean = crate::utils::trim_to_non_empty(summary);
                                         let summary_ref = summary_clean.as_deref();
                                         if let Some(p) = self.progress_ref() { p.final_delivery(&resolved, summary_ref); }
@@ -295,10 +300,7 @@ impl InftyOrchestrator {
                                                 &solver_role,
                                             )
                                             .await?;
-                                        if !verified {
-                                            state.pending_solver_turn_completion = true;
-                                            continue;
-                                        }
+                                        if !verified { state.pending_solver_turn_completion = true; continue; }
                                         sessions.store.touch()?;
                                         return Ok(RunOutcome {
                                             run_id: sessions.run_id.clone(),
@@ -319,7 +321,16 @@ impl InftyOrchestrator {
                                 state.pending_solver_turn_completion = false;
                             }
                         }
-                        _ => {}
+                        EventMsg::Error(error) => {
+                            println!("Error: {:?}", error);
+                        }
+                        EventMsg::StreamError(error) => {
+                            println!("Stream error: {:?}", error);
+                        }
+                        _ => {
+                            print!(".");
+                            let _ = std::io::stdout().flush();
+                        }
                     }
                 }
                 _ = &mut ctrl_c => {

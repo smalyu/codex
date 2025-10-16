@@ -77,10 +77,7 @@ impl TerminalProgressReporter {
 
 impl ProgressReporter for TerminalProgressReporter {
     fn objective_posted(&self, objective: &str) {
-        let objective_line = format!(
-            "{}",
-            format!("→ objective: {objective}")
-        );
+        let objective_line = format!("{}", format!("→ objective: {objective}"));
         self.print_exchange("user", "solver", vec![objective_line], true);
     }
 
