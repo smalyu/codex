@@ -58,3 +58,28 @@ pub fn objective_as_str(options: &crate::types::RunExecutionOptions) -> Option<&
         .map(str::trim)
         .filter(|s| !s.is_empty())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn resolve_deliverable_within_base() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        std::fs::create_dir_all(base.join("deliverable")).unwrap();
+        std::fs::write(base.join("deliverable").join("a.txt"), "ok").unwrap();
+        let resolved = resolve_deliverable_path(base, "deliverable/a.txt").unwrap();
+        assert!(resolved.starts_with(base));
+    }
+
+    #[test]
+    fn resolve_deliverable_rejects_escape() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let err = resolve_deliverable_path(base, "../outside.txt").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("escapes run store"));
+    }
+}

@@ -10,8 +10,6 @@ use anyhow::bail;
 use codex_core::CodexAuth;
 use codex_core::CodexConversation;
 use codex_core::ConversationManager;
-use codex_core::config::Config;
-use codex_core::config::ConfigOverrides;
 use codex_core::cross_session::CrossSessionHub;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::Op;
@@ -212,17 +210,8 @@ impl InftyOrchestrator {
 
         let mut solver_events = solver_role.stream_events()?;
         let mut state = LoopState::default();
-        if let Some(objective) = &options.objective {
-            solver_role
-                .post(objective.as_str(), Some(SolverRole::solver_signal_schema()))
-                .await?;
-            sessions.store.touch()?;
-            state.waiting_for_signal = true;
-            if let Some(p) = self.progress_ref() {
-                p.objective_posted(objective);
-                p.waiting_for_solver();
-            }
-        }
+        self.maybe_post_objective(&solver_role, sessions, &mut state, options)
+            .await?;
 
         let ctrl_c = signal::ctrl_c();
         tokio::pin!(ctrl_c);
@@ -349,6 +338,29 @@ impl InftyOrchestrator {
         ))
     }
 
+    async fn maybe_post_objective(
+        &self,
+        solver: &crate::roles::solver::SolverRole,
+        sessions: &mut RunSessions,
+        state: &mut LoopState,
+        options: &RunExecutionOptions,
+    ) -> Result<()> {
+        if let Some(objective) = options.objective.as_deref()
+            && !objective.trim().is_empty()
+        {
+            solver
+                .post(objective, Some(SolverRole::solver_signal_schema()))
+                .await?;
+            sessions.store.touch()?;
+            state.waiting_for_signal = true;
+            if let Some(p) = self.progress_ref() {
+                p.objective_posted(objective);
+                p.waiting_for_solver();
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_direction_request(
         &self,
         prompt: &str,
@@ -385,13 +397,9 @@ impl InftyOrchestrator {
             return Ok(true);
         }
         let round = verifier_pool.collect_round(&request).await?;
-        for role in &round.passing_roles {
-            if let Err(err) = self.replace_verifier_session(sessions, role).await {
-                warn!(role = %role, ?err, "failed to replace verifier session; keeping existing");
-            } else {
-                verifier_pool.replace_role(role);
-            }
-        }
+        verifier_pool
+            .rotate_passing(sessions, &self.conversation_manager, &round.passing_roles)
+            .await?;
         let summary = round.summary;
         self.emit_verification_summary(&summary);
         let req = SolverRequest::from(&summary);
@@ -421,59 +429,14 @@ impl InftyOrchestrator {
             return Ok(true);
         }
         let round = verifier_pool.collect_round(&request).await?;
-        for role in &round.passing_roles {
-            if let Err(err) = self.replace_verifier_session(sessions, role).await {
-                warn!(role = %role, ?err, "failed to replace verifier session; keeping existing");
-            } else {
-                verifier_pool.replace_role(role);
-            }
-        }
+        verifier_pool
+            .rotate_passing(sessions, &self.conversation_manager, &round.passing_roles)
+            .await?;
         let summary_result = round.summary;
         self.emit_verification_summary(&summary_result);
         let req = SolverRequest::from(&summary_result);
         solver_role.call(&req).await?;
         Ok(summary_result.overall.is_pass())
-    }
-
-    async fn replace_verifier_session(&self, sessions: &mut RunSessions, role: &str) -> Result<()> {
-        // Find the existing verifier session index by role
-        let idx = sessions
-            .verifiers
-            .iter()
-            .position(|s| s.role == role)
-            .ok_or_else(|| anyhow!(format!("verifier role {role} not found")))?;
-
-        // Shut down the old session and unregister it from the hub
-        let old = &sessions.verifiers[idx];
-        // best-effort shutdown; ignore errors but proceed to unregister
-        let _ = old.conversation.submit(Op::Shutdown).await;
-        let _ = self
-            .conversation_manager
-            .remove_conversation(&old.conversation_id)
-            .await;
-
-        // Prepare a fresh Config using current user defaults, then apply our autonomous policies
-        let config = Config::load_with_cli_overrides(Vec::new(), ConfigOverrides::default())
-            .await
-            .context("failed to load Codex config for verifier respawn")?;
-        // RoleConfig::new applies sandbox + approval; mimic that here via the constructor
-        let role_config = crate::types::RoleConfig::new(role.to_string(), config);
-
-        // Spawn a new verifier session and register it
-        let mut dummy = Vec::new();
-        let run_path = sessions.store.path().to_path_buf();
-        let new_session = self
-            .spawn_and_register_role(
-                &sessions.run_id,
-                &run_path,
-                &role_config,
-                &mut sessions.store,
-                &mut dummy,
-            )
-            .await?;
-
-        sessions.verifiers[idx] = new_session;
-        Ok(())
     }
 
     fn emit_verification_summary(&self, summary: &AggregatedVerifierVerdict) {
