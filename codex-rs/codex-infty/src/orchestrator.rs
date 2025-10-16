@@ -248,27 +248,6 @@ impl InftyOrchestrator {
                                         sessions.store.touch()?;
                                         state.pending_solver_turn_completion = true;
                                     }
-                                    SolverSignal::VerificationRequest { claim_path, notes } => {
-                                        let claim_path = crate::utils::required_trimmed(
-                                            claim_path,
-                                            "solver verification_request missing claim_path",
-                                        )?;
-                                        if let Some(p) = self.progress_ref() { p.verification_request(&claim_path, notes.as_deref()); }
-                                        let verified = self
-                                            .handle_verification_request(
-                                                sessions,
-                                                &mut verifier_pool,
-                                                &claim_path,
-                                                notes.as_deref(),
-                                                options,
-                                                &solver_role,
-                                            )
-                                            .await?;
-                                        sessions.store.touch()?;
-                                        if verified {
-                                            state.pending_solver_turn_completion = true;
-                                        }
-                                    }
                                     SolverSignal::FinalDelivery {
                                         deliverable_path,
                                         summary,
@@ -389,32 +368,6 @@ impl InftyOrchestrator {
         let req = SolverRequest::from(directive_payload);
         solver_role.call(&req).await?;
         Ok(())
-    }
-
-    async fn handle_verification_request(
-        &self,
-        sessions: &mut RunSessions,
-        verifier_pool: &mut VerifierPool,
-        claim_path: &str,
-        notes: Option<&str>,
-        options: &RunExecutionOptions,
-        solver_role: &SolverRole,
-    ) -> Result<bool> {
-        let objective = crate::utils::objective_as_str(options);
-
-        let request = VerificationRequestPayload::new(claim_path, notes, objective);
-        if verifier_pool.is_empty() {
-            return Ok(true);
-        }
-        let round = verifier_pool.collect_round(&request).await?;
-        verifier_pool
-            .rotate_passing(sessions, &self.conversation_manager, &round.passing_roles)
-            .await?;
-        let summary = round.summary;
-        self.emit_verification_summary(&summary);
-        let req = SolverRequest::from(&summary);
-        solver_role.call(&req).await?;
-        Ok(summary.overall.is_pass())
     }
 
     async fn run_final_verification(

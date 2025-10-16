@@ -133,35 +133,8 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
         ]),
         responses::sse(vec![
             responses::ev_response_created("solver-resp-2"),
-            responses::ev_assistant_message(
-                "solver-msg-2",
-                r#"{"type":"verification_request","prompt":null,"claim_path":"memory/claims/attempt1.json","notes":null,"deliverable_path":null,"summary":null}"#,
-            ),
+            responses::ev_assistant_message("solver-msg-2", "Acknowledged"),
             responses::ev_completed("solver-resp-2"),
-        ]),
-        responses::sse(vec![
-            responses::ev_response_created("verifier-resp-1"),
-            responses::ev_assistant_message(
-                "verifier-msg-1",
-                r#"{"verdict":"fail","reasons":["Missing tests"],"suggestions":["Add regression tests"]}"#,
-            ),
-            responses::ev_completed("verifier-resp-1"),
-        ]),
-        responses::sse(vec![
-            responses::ev_response_created("solver-resp-3"),
-            responses::ev_assistant_message(
-                "solver-msg-3",
-                r#"{"type":"verification_request","prompt":null,"claim_path":"memory/claims/attempt2.json","notes":null,"deliverable_path":null,"summary":null}"#,
-            ),
-            responses::ev_completed("solver-resp-3"),
-        ]),
-        responses::sse(vec![
-            responses::ev_response_created("verifier-resp-2"),
-            responses::ev_assistant_message(
-                "verifier-msg-2",
-                r#"{"verdict":"pass","reasons":[],"suggestions":[]}"#,
-            ),
-            responses::ev_completed("verifier-resp-2"),
         ]),
         responses::sse(vec![
             responses::ev_response_created("solver-resp-4"),

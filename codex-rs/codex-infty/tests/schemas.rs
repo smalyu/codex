@@ -208,12 +208,12 @@ async fn verifier_request_includes_output_schema() -> anyhow::Result<()> {
 
     let server = responses::start_mock_server().await;
 
-    // 1) Solver: emit a verification_request so the orchestrator calls the Verifier.
+    // 1) Solver: issue a final_delivery which triggers verifier requests.
     let body_solver = responses::sse(vec![
         responses::ev_response_created("solver-resp-1"),
         responses::ev_assistant_message(
             "solver-msg-1",
-            r#"{"type":"verification_request","prompt":null,"claim_path":"memory/claims/baseline-computation.json","notes":null,"deliverable_path":null,"summary":null}"#,
+            r#"{"type":"final_delivery","deliverable_path":"deliverable/summary.txt","summary":null}"#,
         ),
         responses::ev_completed("solver-resp-1"),
     ]);

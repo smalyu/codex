@@ -14,14 +14,13 @@ The crate is designed to be embedded (via the library API) and also powers the `
 ```
 objective → Solver
   Solver → direction_request → Director → directive → Solver
-  Solver → verification_request → Verifier(s) → aggregated summary → Solver
   … (iterate) …
   Solver → final_delivery → Orchestrator returns RunOutcome
 ```
 
 - The Solver always speaks structured JSON. The orchestrator parses those messages and decides the next hop.
 - The Director provides crisp guidance (also JSON) that is forwarded back to the Solver.
-- One or more Verifiers assess claims and return verdicts; the orchestrator aggregates results and reports a summary to the Solver.
+- One or more Verifiers may assess the final deliverable; the orchestrator aggregates results and reports a summary to the Solver.
 - On final_delivery, the orchestrator resolves and validates the deliverable path and returns the `RunOutcome`.
 
 ## Directory Layout (Run Store)
@@ -55,18 +54,12 @@ You can provide your own instructions by pre‑populating `Config.base_instructi
 
 ## Solver Signal Contract
 
-The Solver communicates intent using JSON messages (possibly wrapped in a fenced block). The orchestrator accepts three shapes:
+The Solver communicates intent using JSON messages (possibly wrapped in a fenced block). The orchestrator accepts two shapes:
 
 - Direction request (sent to Director):
 
 ```json
 {"type":"direction_request","prompt":"<question or decision>"}
-```
-
-- Verification request (sent to Verifier(s)):
-
-```json
-{"type":"verification_request","claim_path":"memory/claims/<file>.json","notes":null}
 ```
 
 - Final delivery (completes the run):
@@ -107,14 +100,10 @@ JSON may be fenced as ```json … ```; the orchestrator will strip the fence.
 3. On `direction_request`:
    - Post a structured request to the Director and await the first assistant message.
    - Parse it into a `DirectiveResponse` and forward the normalized JSON to the Solver.
-4. On `verification_request`:
-   - Send structured requests to each Verifier and await each first assistant message.
-   - Aggregate verdicts into an `AggregatedVerifierVerdict` and post the summary back to the Solver.
-5. On `final_delivery`:
+4. On `final_delivery`:
    - Canonicalize and validate that `deliverable_path` stays within the run directory.
+   - Optionally run a verification pass using configured Verifier(s), aggregate results, and post a summary back to the Solver.
    - Notify the progress reporter, touch the run store, and return `RunOutcome`.
-
-Note: The orchestrator does not re‑run verification after `final_delivery`. Verification is performed whenever the Solver issues a `verification_request` during the run.
 
 ## Library Usage
 

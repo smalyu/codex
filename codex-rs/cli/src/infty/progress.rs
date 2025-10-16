@@ -77,7 +77,7 @@ impl TerminalProgressReporter {
 
 impl ProgressReporter for TerminalProgressReporter {
     fn objective_posted(&self, objective: &str) {
-        let objective_line = format!("{}", format!("→ objective: {objective}"));
+        let objective_line = format!("{}", format!("→ objective: {objective}").dim());
         self.print_exchange("user", "solver", vec![objective_line], true);
     }
 
@@ -169,19 +169,18 @@ impl ProgressReporter for TerminalProgressReporter {
     fn final_delivery(&self, deliverable_path: &Path, summary: Option<&str>) {
         let delivery_line = format!(
             "{}",
-            format!(
-                "✓ solver reported final delivery at {}",
-                deliverable_path.display()
-            )
-            .green()
-            .bold()
+            format!("→ path: {}", deliverable_path.display()).dim()
         );
-        let mut lines = vec![delivery_line];
-        if summary.is_some_and(|summary| !summary.is_empty()) {
-            let hint = "  (final summary will be shown below)".to_string();
-            lines.push(format!("{}", hint.dim()));
-        }
-        self.print_exchange("solver", "verifier", lines, true);
+        let summary_line = format!(
+            "{}",
+            format!("→ summary: {}", summary.unwrap_or("<none>")).dim()
+        );
+        self.print_exchange(
+            "solver",
+            "verifier",
+            vec![delivery_line, summary_line],
+            true,
+        );
     }
 
     fn run_interrupted(&self) {

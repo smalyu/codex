@@ -41,27 +41,16 @@ impl SolverRole {
     }
 
     pub fn solver_signal_schema() -> Value {
+        // Only allow asking the director or sending the final result.
         serde_json::json!({
             "type": "object",
             "properties": {
-                "type": {
-                    "type": "string",
-                    "enum": ["direction_request", "verification_request", "final_delivery"]
-                },
+                "type": { "type": "string", "enum": ["direction_request", "final_delivery"] },
                 "prompt": { "type": ["string", "null"] },
-                "claim_path": { "type": ["string", "null"] },
-                "notes": { "type": ["string", "null"] },
                 "deliverable_path": { "type": ["string", "null"] },
                 "summary": { "type": ["string", "null"] }
             },
-            "required": [
-                "type",
-                "prompt",
-                "claim_path",
-                "notes",
-                "deliverable_path",
-                "summary"
-            ],
+            "required": ["type", "prompt", "deliverable_path", "summary"],
             "additionalProperties": false
         })
     }
@@ -186,12 +175,6 @@ pub enum SolverSignal {
     DirectionRequest {
         #[serde(default)]
         prompt: Option<String>,
-    },
-    VerificationRequest {
-        #[serde(default)]
-        claim_path: Option<String>,
-        #[serde(default)]
-        notes: Option<String>,
     },
     FinalDelivery {
         #[serde(default)]
