@@ -1822,6 +1822,27 @@ pub(crate) async fn run_task(
                             );
                         }
                         (
+                            ResponseItem::LocalShellCall {
+                                call_id: Some(call_id),
+                                ..
+                            },
+                            None,
+                        ) => {
+                            items_to_record_in_conversation_history.push(item.clone());
+                            items_to_record_in_conversation_history
+                                .push(make_aborted_function_call_output(call_id.clone()));
+                        }
+                        (ResponseItem::FunctionCall { call_id, .. }, None) => {
+                            items_to_record_in_conversation_history.push(item.clone());
+                            items_to_record_in_conversation_history
+                                .push(make_aborted_function_call_output(call_id.clone()));
+                        }
+                        (ResponseItem::CustomToolCall { call_id, .. }, None) => {
+                            items_to_record_in_conversation_history.push(item.clone());
+                            items_to_record_in_conversation_history
+                                .push(make_aborted_custom_tool_call_output(call_id.clone()));
+                        }
+                        (
                             ResponseItem::Reasoning {
                                 id,
                                 summary,
@@ -2409,6 +2430,23 @@ fn convert_call_tool_result_to_function_call_output_payload(
     }
 }
 
+fn make_aborted_function_call_output(call_id: String) -> ResponseItem {
+    ResponseItem::FunctionCallOutput {
+        call_id,
+        output: FunctionCallOutputPayload {
+            content: "aborted".to_string(),
+            success: Some(false),
+        },
+    }
+}
+
+fn make_aborted_custom_tool_call_output(call_id: String) -> ResponseItem {
+    ResponseItem::CustomToolCallOutput {
+        call_id,
+        output: "aborted".to_string(),
+    }
+}
+
 /// Emits an ExitedReviewMode Event with optional ReviewOutput,
 /// and records a developer message with the review output.
 pub(crate) async fn exit_review_mode(
@@ -2569,6 +2607,33 @@ mod tests {
         };
 
         assert_eq!(expected, got);
+    }
+
+    #[test]
+    fn aborted_function_call_output_marks_failure() {
+        let output = make_aborted_function_call_output("call-123".to_string());
+
+        match output {
+            ResponseItem::FunctionCallOutput { call_id, output } => {
+                assert_eq!(call_id, "call-123");
+                assert_eq!(output.content, "aborted");
+                assert_eq!(output.success, Some(false));
+            }
+            other => panic!("unexpected response item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn aborted_custom_tool_call_output_marks_failure() {
+        let output = make_aborted_custom_tool_call_output("custom-call".to_string());
+
+        match output {
+            ResponseItem::CustomToolCallOutput { call_id, output } => {
+                assert_eq!(call_id, "custom-call");
+                assert_eq!(output, "aborted");
+            }
+            other => panic!("unexpected response item: {other:?}"),
+        }
     }
 
     #[test]
