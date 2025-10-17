@@ -1930,11 +1930,27 @@ impl ChatWidget {
 
         if self.bottom_pane.is_task_running() {
             self.bottom_pane.show_ctrl_c_quit_hint();
-            self.submit_op(Op::Interrupt);
+            if !self.cancel_security_review() {
+                self.submit_op(Op::Interrupt);
+            }
             return;
         }
 
         self.submit_op(Op::Shutdown);
+    }
+
+    fn cancel_security_review(&mut self) -> bool {
+        if let Some(handle) = self.security_review_task.take() {
+            handle.abort();
+            self.bottom_pane.set_task_running(false);
+            self.bottom_pane
+                .update_status_header(String::from("Working"));
+            self.security_review_context = None;
+            self.security_review_artifacts = None;
+            self.add_info_message("Security review cancelled.".to_string(), None);
+            return true;
+        }
+        false
     }
 
     pub(crate) fn composer_is_empty(&self) -> bool {
@@ -2137,7 +2153,6 @@ impl ChatWidget {
             return;
         }
 
-        let scope_prompt = scope_prompt;
         let mut resolved_paths: Vec<PathBuf> = Vec::new();
         let mut display_paths: Vec<String> = Vec::new();
 
@@ -2266,51 +2281,46 @@ impl ChatWidget {
             None,
             Box::new(move |input: String| {
                 let trimmed = input.trim();
-                let mut include_paths: Vec<String> = Vec::new();
-                let mut scope_prompt: Option<String> = None;
-
-                if trimmed.is_empty() {
-                    scope_prompt = Some(match mode {
-                        SecurityReviewMode::Full => {
-                            "Select the most security-relevant directories for a full security review."
-                        }
-                        SecurityReviewMode::Bugs => {
-                            "Select the highest risk areas for a quick security bug sweep."
-                        }
-                    }
-                    .to_string());
-                } else {
-                    let mut all_valid = true;
-
-                    for segment in trimmed.split_whitespace() {
-                        let candidate = if Path::new(segment).is_absolute() {
-                            PathBuf::from(segment)
-                        } else {
-                            repo_root.join(segment)
+                let (include_paths, scope_prompt_override): (Vec<String>, Option<String>) =
+                    if trimmed.is_empty() {
+                        let prompt = match mode {
+                            SecurityReviewMode::Full => {
+                                "Select the most security-relevant directories for a full security review.".to_string()
+                            }
+                            SecurityReviewMode::Bugs => {
+                                "Select the highest risk areas for a quick security bug sweep.".to_string()
+                            }
                         };
-                        if candidate.exists() {
-                            include_paths.push(segment.to_string());
-                        } else {
-                            all_valid = false;
-                            break;
-                        }
-                    }
-
-                    scope_prompt = if all_valid && !include_paths.is_empty() {
-                        None
+                        (Vec::new(), Some(prompt))
                     } else {
-                        Some(trimmed.to_string())
-                    };
+                        let mut collected: Vec<String> = Vec::new();
+                        let mut all_valid = true;
 
-                    if scope_prompt.is_some() {
-                        include_paths.clear();
-                    }
-                }
+                        for segment in trimmed.split_whitespace() {
+                            let candidate = if Path::new(segment).is_absolute() {
+                                PathBuf::from(segment)
+                            } else {
+                                repo_root.join(segment)
+                            };
+                            if candidate.exists() {
+                                collected.push(segment.to_string());
+                            } else {
+                                all_valid = false;
+                                break;
+                            }
+                        }
+
+                        if all_valid && !collected.is_empty() {
+                            (collected, None)
+                        } else {
+                            (Vec::new(), Some(trimmed.to_string()))
+                        }
+                    };
 
                 tx.send(AppEvent::StartSecurityReview {
                     mode,
                     include_paths,
-                    scope_prompt,
+                    scope_prompt: scope_prompt_override,
                 });
             }),
         );
