@@ -15,6 +15,8 @@ pub enum SlashCommand {
     Model,
     Approvals,
     Review,
+    #[strum(serialize = "secreview")]
+    SecReview,
     New,
     Init,
     Compact,
@@ -37,6 +39,7 @@ impl SlashCommand {
             SlashCommand::Init => "create an AGENTS.md file with instructions for Codex",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
+            SlashCommand::SecReview => "run an AppSec security review over the repo",
             SlashCommand::Undo => "restore the workspace to the last Codex snapshot",
             SlashCommand::Quit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
@@ -67,6 +70,7 @@ impl SlashCommand {
             | SlashCommand::Model
             | SlashCommand::Approvals
             | SlashCommand::Review
+            | SlashCommand::SecReview
             | SlashCommand::Logout => false,
             SlashCommand::Diff
             | SlashCommand::Mention

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
+use chrono::Utc;
 use codex_core::config::Config;
 use codex_core::config_types::Notifications;
 use codex_core::git_info::current_branch_name;
@@ -53,18 +55,25 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tracing::debug;
 
 use crate::app_event::AppEvent;
+use crate::app_event::SecurityReviewAutoScopeSelection;
+use crate::app_event::SecurityReviewCommandState;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::InputResult;
+use crate::bottom_pane::SecurityReviewScopeConfirmView;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
@@ -80,9 +89,16 @@ use crate::history_cell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
+use crate::history_cell::PlainHistoryCell;
 use crate::markdown::append_markdown;
+use crate::security_review::SecurityReviewFailure;
+use crate::security_review::SecurityReviewMode;
+use crate::security_review::SecurityReviewRequest;
+use crate::security_review::SecurityReviewResult;
+use crate::security_review::run_security_review;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
+use crate::status_indicator_widget::fmt_elapsed_compact;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
@@ -263,6 +279,10 @@ pub(crate) struct ChatWidget {
     // Whether to add a final message separator after the last message
     needs_final_message_separator: bool,
 
+    security_review_task: Option<JoinHandle<()>>,
+    security_review_context: Option<SecurityReviewContext>,
+    security_review_artifacts: Option<SecurityReviewArtifactsState>,
+
     last_rendered_width: std::cell::Cell<Option<usize>>,
 }
 
@@ -286,6 +306,26 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
     } else {
         Some(UserMessage { text, image_paths })
     }
+}
+
+struct SecurityReviewContext {
+    mode: SecurityReviewMode,
+    include_paths: Vec<String>,
+    output_root: PathBuf,
+    repo_path: PathBuf,
+    model: String,
+    provider_name: String,
+    started_at: Instant,
+    last_log: Option<String>,
+}
+
+#[allow(dead_code)]
+struct SecurityReviewArtifactsState {
+    repo_root: PathBuf,
+    snapshot_path: PathBuf,
+    bugs_path: PathBuf,
+    report_path: Option<PathBuf>,
+    report_html_path: Option<PathBuf>,
 }
 
 impl ChatWidget {
@@ -954,6 +994,9 @@ impl ChatWidget {
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
+            security_review_task: None,
+            security_review_context: None,
+            security_review_artifacts: None,
             last_rendered_width: std::cell::Cell::new(None),
         }
     }
@@ -1019,6 +1062,9 @@ impl ChatWidget {
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
+            security_review_task: None,
+            security_review_context: None,
+            security_review_artifacts: None,
             last_rendered_width: std::cell::Cell::new(None),
         }
     }
@@ -1136,6 +1182,9 @@ impl ChatWidget {
             }
             SlashCommand::Review => {
                 self.open_review_popup();
+            }
+            SlashCommand::SecReview => {
+                self.open_security_review_popup();
             }
             SlashCommand::Model => {
                 self.open_model_popup();
@@ -1999,6 +2048,468 @@ impl ChatWidget {
             items,
             ..Default::default()
         });
+    }
+
+    pub(crate) fn open_security_review_popup(&mut self) {
+        let mut items: Vec<SelectionItem> = Vec::new();
+
+        items.push(SelectionItem {
+            name: "Full security review".to_string(),
+            description: Some("(bugs + full report)".into()),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::StartSecurityReview {
+                    mode: SecurityReviewMode::Full,
+                    include_paths: Vec::new(),
+                    scope_prompt: None,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Quick bug sweep".to_string(),
+            description: Some("(bugs only)".into()),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::StartSecurityReview {
+                    mode: SecurityReviewMode::Bugs,
+                    include_paths: Vec::new(),
+                    scope_prompt: None,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Full review for specific paths".to_string(),
+            description: Some("Enter relative paths to scope the run".into()),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::OpenSecurityReviewPathPrompt(
+                    SecurityReviewMode::Full,
+                ));
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        items.push(SelectionItem {
+            name: "Bug sweep for specific paths".to_string(),
+            actions: vec![Box::new(|tx: &AppEventSender| {
+                tx.send(AppEvent::OpenSecurityReviewPathPrompt(
+                    SecurityReviewMode::Bugs,
+                ));
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Security review options".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn start_security_review(
+        &mut self,
+        mode: SecurityReviewMode,
+        include_paths: Vec<String>,
+        scope_prompt: Option<String>,
+    ) {
+        if self.bottom_pane.is_task_running() || self.security_review_context.is_some() {
+            self.add_error_message(
+                "A security review is already running. Wait for it to finish before starting another."
+                    .to_string(),
+            );
+            return;
+        }
+
+        self.security_review_artifacts = None;
+
+        let repo_path = self.config.cwd.clone();
+        if !repo_path.exists() {
+            self.add_error_message(format!(
+                "Repository path {} does not exist.",
+                repo_path.display()
+            ));
+            return;
+        }
+
+        let mut resolved_paths: Vec<PathBuf> = Vec::new();
+        let mut display_paths: Vec<String> = Vec::new();
+
+        if !include_paths.is_empty() {
+            for raw in include_paths {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let candidate = if Path::new(trimmed).is_absolute() {
+                    PathBuf::from(trimmed)
+                } else {
+                    repo_path.join(trimmed)
+                };
+
+                if !candidate.exists() {
+                    self.add_error_message(format!(
+                        "Path `{}` was not found within {}.",
+                        trimmed,
+                        repo_path.display()
+                    ));
+                    return;
+                }
+
+                let canonical = candidate.canonicalize().unwrap_or(candidate.clone());
+                resolved_paths.push(canonical.clone());
+                display_paths.push(display_path_for(&canonical, &repo_path));
+            }
+
+            if resolved_paths.is_empty() {
+                self.add_error_message(
+                    "No valid paths were provided for the security review.".to_string(),
+                );
+                return;
+            }
+        }
+
+        let mut context_paths = display_paths.clone();
+        if context_paths.is_empty()
+            && let Some(prompt) = scope_prompt.as_ref()
+        {
+            let summary = truncate_text(prompt, 72);
+            context_paths.push(format!("Auto scope requested: {summary}"));
+        }
+
+        let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let output_root = repo_path.join("appsec_review").join(timestamp);
+
+        self.bottom_pane.set_task_running(true);
+        self.bottom_pane
+            .update_status_header(format!("Security review ({}) — preparing", mode.as_str()));
+
+        let scope_text = if context_paths.is_empty() {
+            "entire repository".to_string()
+        } else {
+            context_paths.join(", ")
+        };
+
+        self.add_info_message(
+            if context_paths.is_empty() {
+                format!(">> Security review started (mode: {}) <<", mode.as_str())
+            } else {
+                format!(
+                    ">> Security review started (mode: {}, scope: {}) <<",
+                    mode.as_str(),
+                    scope_text
+                )
+            },
+            None,
+        );
+
+        self.security_review_context = Some(SecurityReviewContext {
+            mode,
+            include_paths: context_paths,
+            output_root: output_root.clone(),
+            repo_path: repo_path.clone(),
+            model: self.config.model.clone(),
+            provider_name: self.config.model_provider.name.clone(),
+            started_at: Instant::now(),
+            last_log: None,
+        });
+
+        let request = SecurityReviewRequest {
+            repo_path,
+            include_paths: resolved_paths,
+            output_root,
+            mode,
+            include_spec_in_bug_analysis: true,
+            triage_model: self.config.review_model.clone(),
+            model: self.config.model.clone(),
+            provider: self.config.model_provider.clone(),
+            auth: self.auth_manager.auth(),
+            progress_sender: Some(self.app_event_tx.clone()),
+            auto_scope_prompt: scope_prompt,
+        };
+
+        let tx = self.app_event_tx.clone();
+        let handle = tokio::spawn(async move {
+            match run_security_review(request).await {
+                Ok(result) => {
+                    tx.send(AppEvent::SecurityReviewComplete { result });
+                }
+                Err(error) => {
+                    tx.send(AppEvent::SecurityReviewFailed { error });
+                }
+            }
+        });
+        self.security_review_task = Some(handle);
+    }
+
+    pub(crate) fn show_security_review_path_prompt(&mut self, mode: SecurityReviewMode) {
+        let tx = self.app_event_tx.clone();
+        let repo_root = self.config.cwd.clone();
+        let title = match mode {
+            SecurityReviewMode::Full => "Full security review (scoped)".to_string(),
+            SecurityReviewMode::Bugs => "Bug sweep (scoped)".to_string(),
+        };
+        let hint = match mode {
+            SecurityReviewMode::Full => "Type relative paths (space-separated) to include, then press Enter to run the full review".to_string(),
+            SecurityReviewMode::Bugs => "Type relative paths (space-separated) to include, then press Enter to run the bug sweep".to_string(),
+        };
+        let view = CustomPromptView::new(
+            title,
+            hint,
+            None,
+            Box::new(move |input: String| {
+                let trimmed = input.trim();
+                if trimmed.is_empty() {
+                    return;
+                }
+
+                let mut include_paths: Vec<String> = Vec::new();
+                let mut all_valid = true;
+
+                for segment in trimmed.split_whitespace() {
+                    let candidate = if Path::new(segment).is_absolute() {
+                        PathBuf::from(segment)
+                    } else {
+                        repo_root.join(segment)
+                    };
+                    if candidate.exists() {
+                        include_paths.push(segment.to_string());
+                    } else {
+                        all_valid = false;
+                        break;
+                    }
+                }
+
+                let scope_prompt = if all_valid && !include_paths.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                };
+
+                if scope_prompt.is_some() {
+                    include_paths.clear();
+                }
+
+                tx.send(AppEvent::StartSecurityReview {
+                    mode,
+                    include_paths,
+                    scope_prompt,
+                });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn show_security_review_scope_confirmation(
+        &mut self,
+        mode: SecurityReviewMode,
+        prompt: String,
+        selections: Vec<SecurityReviewAutoScopeSelection>,
+        responder: oneshot::Sender<bool>,
+    ) {
+        let view = SecurityReviewScopeConfirmView::new(mode, prompt, selections, responder);
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn on_security_review_scope_resolved(&mut self, paths: Vec<String>) {
+        if let Some(ctx) = self.security_review_context.as_mut() {
+            ctx.include_paths = if paths.is_empty() { Vec::new() } else { paths };
+        }
+    }
+
+    pub(crate) fn on_security_review_log(&mut self, message: String) {
+        if let Some(ctx) = self.security_review_context.as_mut() {
+            ctx.last_log = Some(message.clone());
+            let truncated = truncate_text(&message, 96);
+            let header = format!("Security review ({}) — {}", ctx.mode.as_str(), truncated);
+            self.bottom_pane.update_status_header(header);
+        }
+    }
+
+    pub(crate) fn on_security_review_command_status(
+        &mut self,
+        _id: u64,
+        summary: String,
+        state: SecurityReviewCommandState,
+        preview: Vec<String>,
+    ) {
+        if let Some(ctx) = self.security_review_context.as_mut() {
+            let state_label = match state {
+                SecurityReviewCommandState::Running => "running",
+                SecurityReviewCommandState::Matches => "matches",
+                SecurityReviewCommandState::NoMatches => "no matches",
+                SecurityReviewCommandState::Error => "error",
+            };
+            let mut text = summary;
+            if let Some(first) = preview.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                text = format!("{text} — {first}");
+            }
+            let truncated = truncate_text(&text, 96);
+            self.bottom_pane.update_status_header(format!(
+                "Security review ({}) — [{state_label}] {truncated}",
+                ctx.mode.as_str()
+            ));
+            ctx.last_log = Some(text);
+        }
+    }
+
+    pub(crate) fn on_security_review_complete(&mut self, result: SecurityReviewResult) {
+        self.bottom_pane.set_task_running(false);
+        self.bottom_pane
+            .update_status_header(String::from("Working"));
+        self.security_review_task = None;
+
+        let context = self.security_review_context.take();
+        let (mode, scope_paths, output_root, repo_path, model, provider, started_at, last_log) =
+            if let Some(ctx) = context {
+                (
+                    ctx.mode,
+                    ctx.include_paths,
+                    ctx.output_root,
+                    ctx.repo_path,
+                    ctx.model,
+                    ctx.provider_name,
+                    ctx.started_at,
+                    ctx.last_log,
+                )
+            } else {
+                (
+                    SecurityReviewMode::Full,
+                    Vec::new(),
+                    PathBuf::new(),
+                    self.config.cwd.clone(),
+                    self.config.model.clone(),
+                    self.config.model_provider.name.clone(),
+                    Instant::now(),
+                    None,
+                )
+            };
+
+        let duration = started_at.elapsed();
+        let duration_display = fmt_elapsed_compact(duration.as_secs());
+        let scope_text = if scope_paths.is_empty() {
+            "entire repository".to_string()
+        } else {
+            scope_paths.join(", ")
+        };
+        let findings_summary_text = result.findings_summary.clone();
+        let bugs_display = display_path_for(&result.bugs_path, &repo_path);
+        let report_markdown_display = result
+            .report_path
+            .as_ref()
+            .map(|path| display_path_for(path, &repo_path));
+        let report_html_display = result
+            .report_html_path
+            .as_ref()
+            .map(|path| display_path_for(path, &repo_path));
+
+        let mut summary_lines: Vec<Line<'static>> = Vec::new();
+        summary_lines.push(vec!["• ".dim(), format!("Mode: {}", mode.as_str()).into()].into());
+        summary_lines.push(vec!["  • ".into(), format!("Scope: {scope_text}").into()].into());
+        summary_lines.push(
+            vec![
+                "  • ".into(),
+                format!("Duration: {duration_display}").into(),
+            ]
+            .into(),
+        );
+        summary_lines.push(
+            vec![
+                "  • ".into(),
+                format!("Model: {model} via {provider}").into(),
+            ]
+            .into(),
+        );
+        summary_lines.push(
+            vec![
+                "  • ".into(),
+                format!("Findings: {}", findings_summary_text.as_str()).into(),
+            ]
+            .into(),
+        );
+        summary_lines.push(
+            vec![
+                "  • ".into(),
+                format!("Bugs: {}", bugs_display.as_str()).into(),
+            ]
+            .into(),
+        );
+        if let Some(report_line) = match (
+            report_markdown_display.as_ref(),
+            report_html_display.as_ref(),
+        ) {
+            (Some(md), Some(html)) => Some(format!("Report: md {md}, html {html}")),
+            (Some(md), None) => Some(format!("Report: md {md}")),
+            (None, Some(html)) => Some(format!("Report: html {html}")),
+            (None, None) => None,
+        } {
+            summary_lines.push(vec!["  • ".into(), report_line.into()].into());
+        }
+        if let Some(last_log) = last_log {
+            summary_lines
+                .push(vec!["  • ".into(), format!("Last update: {last_log}").dim()].into());
+        }
+        summary_lines.push(
+            vec![
+                "  • ".into(),
+                format!("Log entries: {}", result.logs.len()).dim(),
+            ]
+            .into(),
+        );
+
+        self.add_to_history(PlainHistoryCell::new(summary_lines));
+
+        if !result.logs.is_empty() {
+            let mut log_lines: Vec<Line<'static>> = Vec::new();
+            log_lines.push(vec!["Logs".bold()].into());
+            for entry in &result.logs {
+                log_lines.push(vec!["  ↳ ".dim(), entry.clone().into()].into());
+            }
+            self.add_to_history(PlainHistoryCell::new(log_lines));
+        }
+
+        self.security_review_artifacts = Some(SecurityReviewArtifactsState {
+            repo_root: repo_path.clone(),
+            snapshot_path: result.snapshot_path.clone(),
+            bugs_path: result.bugs_path.clone(),
+            report_path: result.report_path.clone(),
+            report_html_path: result.report_html_path.clone(),
+        });
+
+        if !output_root.as_os_str().is_empty() {
+            self.add_info_message(
+                format!(
+                    "Security review artifacts saved to {}",
+                    display_path_for(&output_root, &self.config.cwd)
+                ),
+                None,
+            );
+        }
+    }
+
+    pub(crate) fn on_security_review_failed(&mut self, error: SecurityReviewFailure) {
+        self.bottom_pane.set_task_running(false);
+        self.bottom_pane
+            .update_status_header(String::from("Working"));
+        self.security_review_task = None;
+        self.security_review_context = None;
+
+        self.add_error_message(format!("Security review failed: {}", error.message));
+
+        if !error.logs.is_empty() {
+            let mut log_lines: Vec<Line<'static>> = Vec::new();
+            log_lines.push(vec!["Logs".bold()].into());
+            for entry in error.logs {
+                log_lines.push(vec!["  ↳ ".dim(), entry.into()].into());
+            }
+            self.add_to_history(PlainHistoryCell::new(log_lines));
+        }
     }
 
     pub(crate) async fn show_review_branch_picker(&mut self, cwd: &Path) {

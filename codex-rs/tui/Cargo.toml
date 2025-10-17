@@ -60,6 +60,7 @@ ratatui = { workspace = true, features = [
     "unstable-widget-ref",
 ] }
 regex-lite = { workspace = true }
+regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["preserve_order"] }
 shlex = { workspace = true }
@@ -71,6 +72,7 @@ textwrap = { workspace = true }
 tree-sitter-highlight = { workspace = true }
 tree-sitter-bash = { workspace = true }
 tokio = { workspace = true, features = [
+    "fs",
     "io-std",
     "macros",
     "process",
@@ -85,6 +87,9 @@ opentelemetry-appender-tracing = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-width = { workspace = true }
 url = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+time = { workspace = true, features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

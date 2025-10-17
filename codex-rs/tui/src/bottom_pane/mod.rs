@@ -30,8 +30,11 @@ pub(crate) use list_selection_view::SelectionViewParams;
 mod paste_burst;
 pub mod popup_consts;
 mod scroll_state;
+mod security_review_scope_confirm_view;
 mod selection_popup_common;
 mod textarea;
+
+pub(crate) use security_review_scope_confirm_view::SecurityReviewScopeConfirmView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CancellationEvent {

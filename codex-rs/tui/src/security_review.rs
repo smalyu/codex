@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::app_event::AppEvent;
 use crate::app_event::SecurityReviewAutoScopeSelection;
 use crate::app_event::SecurityReviewCommandState;
