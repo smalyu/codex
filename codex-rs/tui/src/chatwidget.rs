@@ -2211,16 +2211,13 @@ impl ChatWidget {
         }
 
         let mut scope_prompt = scope_prompt;
-        if resolved_paths.is_empty() && scope_prompt.is_none() {
-            let default_prompt = match mode {
-                SecurityReviewMode::Full => {
-                    "Identify the most security-relevant directories (3-8) for a comprehensive review. Focus on production services, externally reachable interfaces, auth/authz modules, secret management, and critical infrastructure. Exclude tests, vendor bundles, docs, and generated files."
-                }
-                SecurityReviewMode::Bugs => {
-                    "Suggest the smallest set of directories (3-8) most likely to contain exploitable bugs. Prioritise request parsing, input validation, authentication, authorisation, and secret handling. Skip tests, vendor bundles, docs, and generated files."
-                }
-            };
-            scope_prompt = Some(default_prompt.to_string());
+        if matches!(mode, SecurityReviewMode::Bugs)
+            && resolved_paths.is_empty()
+            && scope_prompt.is_none()
+        {
+            scope_prompt = Some(
+                "Suggest up to 20 directories most likely to contain exploitable bugs. Prioritise request parsing, input validation, authentication, authorisation, and secret handling. Skip tests, vendor bundles, docs, and generated files.".to_string(),
+            );
         }
 
         let mut context_paths = display_paths.clone();
@@ -2268,9 +2265,13 @@ impl ChatWidget {
             last_log: None,
         });
 
-        let annotated_scope_prompt = scope_prompt
-            .as_ref()
-            .map(|prompt| annotate_scope_prompt(prompt.as_str()));
+        let annotated_scope_prompt = if matches!(mode, SecurityReviewMode::Bugs) {
+            scope_prompt
+                .as_ref()
+                .map(|prompt| annotate_scope_prompt(prompt.as_str()))
+        } else {
+            None
+        };
 
         let request = SecurityReviewRequest {
             repo_path,

@@ -725,7 +725,8 @@ pub(crate) async fn run_security_review(
     let mut include_paths = request.include_paths.clone();
     let git_link_info = build_git_link_info(&repo_path).await;
 
-    if include_paths.is_empty()
+    if matches!(request.mode, SecurityReviewMode::Bugs)
+        && include_paths.is_empty()
         && let Some(prompt) = request.auto_scope_prompt.as_ref().and_then(|value| {
             let trimmed = value.trim();
             if trimmed.is_empty() {
