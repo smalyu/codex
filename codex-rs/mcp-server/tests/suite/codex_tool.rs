@@ -3,6 +3,7 @@ use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_core::parse_command;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::ReviewDecision;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
@@ -24,6 +25,7 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 use wiremock::MockServer;
 
+use core_test_support::skip_if_no_network;
 use mcp_test_support::McpProcess;
 use mcp_test_support::create_apply_patch_sse_response;
 use mcp_test_support::create_final_assistant_message_sse_response;
@@ -172,9 +174,10 @@ fn create_expected_elicitation_request(
 ) -> anyhow::Result<JSONRPCRequest> {
     let expected_message = format!(
         "Allow Codex to run `{}` in `{}`?",
-        shlex::try_join(command.iter().map(|s| s.as_ref()))?,
+        shlex::try_join(command.iter().map(std::convert::AsRef::as_ref))?,
         workdir.to_string_lossy()
     );
+    let codex_parsed_cmd = parse_command::parse_command(&command);
     Ok(JSONRPCRequest {
         jsonrpc: JSONRPC_VERSION.into(),
         id: elicitation_request_id,
@@ -192,6 +195,7 @@ fn create_expected_elicitation_request(
             codex_command: command,
             codex_cwd: workdir.to_path_buf(),
             codex_call_id: "call1234".to_string(),
+            codex_parsed_cmd,
         })?),
     })
 }
@@ -307,12 +311,7 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_codex_tool_passes_base_instructions() {
-    if std::env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
-        println!(
-            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
-        );
-        return;
-    }
+    skip_if_no_network!();
 
     // Apparently `#[tokio::test]` must return `()`, so we create a helper
     // function that returns `Result` so we can use `?` in favor of `unwrap`.

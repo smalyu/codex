@@ -22,7 +22,7 @@ use codex_core::protocol::InputItem;
 use codex_core::protocol::Op;
 use codex_core::protocol::Submission;
 use codex_core::protocol::TaskCompleteEvent;
-use codex_protocol::mcp_protocol::ConversationId;
+use codex_protocol::ConversationId;
 use mcp_types::CallToolResult;
 use mcp_types::ContentBlock;
 use mcp_types::RequestId;
@@ -178,6 +178,7 @@ async fn run_codex_tool_session_inner(
                         cwd,
                         call_id,
                         reason: _,
+                        parsed_cmd,
                     }) => {
                         handle_exec_approval_request(
                             command,
@@ -188,6 +189,7 @@ async fn run_codex_tool_session_inner(
                             request_id_str.clone(),
                             event.id.clone(),
                             call_id,
+                            parsed_cmd,
                         )
                         .await;
                         continue;
@@ -280,6 +282,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::ConversationPath(_)
                     | EventMsg::UserMessage(_)
                     | EventMsg::ShutdownComplete
+                    | EventMsg::ViewImageToolCall(_)
                     | EventMsg::EnteredReviewMode(_)
                     | EventMsg::ExitedReviewMode(_) => {
                         // For now, we do not do anything extra for these

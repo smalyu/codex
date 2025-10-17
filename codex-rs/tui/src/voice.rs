@@ -332,18 +332,16 @@ async fn resolve_auth() -> Result<(String, Option<String>), String> {
         .map_err(|e| format!("failed to read auth.json: {e}"))?
         .ok_or_else(|| "No Codex auth is configured; please run `codex login`".to_string())?;
 
-    if auth.mode != AuthMode::ChatGPT {
-        return Err(
-            "Voice transcription requires ChatGPT auth; please run `codex login`".to_string(),
-        );
-    }
+    let chatgpt_account_id = match auth.mode {
+        AuthMode::ChatGPT => auth.get_account_id(),
+        AuthMode::ApiKey => None,
+    };
 
     let token = auth
         .get_token()
         .await
         .map_err(|e| format!("failed to get auth token: {e}"))?;
-    let account_id = auth.get_account_id();
-    Ok((token, account_id))
+    Ok((token, chatgpt_account_id))
 }
 
 async fn transcribe_bytes(
