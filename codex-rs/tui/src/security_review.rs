@@ -89,6 +89,8 @@ Examples:
 - Static analysis high alert that only touches dead code ⇒ risk_score 10, severity "Informational", reason "dead code path".
 - High-severity SQL injection finding that uses fully parameterized queries ⇒ risk_score 20, severity "Low", reason "parameterized queries".
 - SSRF flagged as critical but the target requires internal metadata access tokens ⇒ risk_score 24, severity "Low", reason "internal metadata token".
+- Critical-looking command injection in an internal-only CLI guarded by SSO and audited logging ⇒ risk_score 22, severity "Low", reason "internal CLI".
+- Reported secret leak found in sample dev config with rotate-on-startup hook ⇒ risk_score 12, severity "Informational", reason "sample config only".
 
 Instructions:
 - Output severity **only** from ["High","Medium","Low","Informational"]. Map "critical"/"p0" to "High".
@@ -96,6 +98,7 @@ Instructions:
 - Review the repository summary, spec excerpt, blame metadata, and file locations before requesting anything new; reuse existing specs or context attachments when possible.
 - If you still lack certainty, request concrete follow-up (e.g., repo_search, read_file, git blame) in the reason and cite the spec section you need.
 - Reference concrete evidence (spec section, tool name, log line) in the reason when you confirm mitigations or reclassify a finding.
+- Prefer reusing existing tool outputs and cached specs before launching new expensive calls; only request fresh tooling when the supplied artifacts truly lack the needed context.
 - Down-rank issues when mitigations or limited blast radius materially reduce customer risk, even if the initial triage labeled them "High".
 - Upgrade issues when exploitability or exposure was understated, or when multiple components amplify the blast radius.
 - Respond with one JSON object per finding, **in the same order**, formatted exactly as:
@@ -778,67 +781,15 @@ pub(crate) async fn run_security_review(
                         selection_summaries.push((display_path, reason));
                     }
 
+                    include_paths = resolved_paths;
                     if let Some(tx) = request.progress_sender.as_ref() {
-                        let (confirm_tx, confirm_rx) = oneshot::channel();
-                        let selections_for_ui: Vec<SecurityReviewAutoScopeSelection> =
-                            selection_summaries
-                                .iter()
-                                .map(|(path, reason)| SecurityReviewAutoScopeSelection {
-                                    display_path: path.clone(),
-                                    reason: reason.clone(),
-                                })
-                                .collect();
-                        tx.send(AppEvent::SecurityReviewAutoScopeConfirm {
-                            mode: request.mode,
-                            prompt: prompt.to_string(),
-                            selections: selections_for_ui,
-                            responder: confirm_tx,
+                        let display_paths: Vec<String> = selection_summaries
+                            .iter()
+                            .map(|(path, _)| path.clone())
+                            .collect();
+                        tx.send(AppEvent::SecurityReviewScopeResolved {
+                            paths: display_paths,
                         });
-
-                        record(
-                            "Waiting for user confirmation of auto-detected scope...".to_string(),
-                        );
-
-                        match confirm_rx.await {
-                            Ok(true) => {
-                                record("Auto scope confirmed by user.".to_string());
-                                include_paths = resolved_paths;
-                                let display_paths: Vec<String> = selection_summaries
-                                    .iter()
-                                    .map(|(path, _)| path.clone())
-                                    .collect();
-                                tx.send(AppEvent::SecurityReviewScopeResolved {
-                                    paths: display_paths,
-                                });
-                            }
-                            Ok(false) => {
-                                record(
-                                    "Auto scope selection rejected by user; cancelling review."
-                                        .to_string(),
-                                );
-                                tx.send(AppEvent::OpenSecurityReviewPathPrompt(request.mode));
-                                return Err(SecurityReviewFailure {
-                                    message:
-                                        "Security review cancelled after auto scope rejection."
-                                            .to_string(),
-                                    logs,
-                                });
-                            }
-                            Err(_) => {
-                                record(
-                                    "Auto scope confirmation interrupted; cancelling review."
-                                        .to_string(),
-                                );
-                                return Err(SecurityReviewFailure {
-                                    message:
-                                        "Auto scope confirmation interrupted; review cancelled."
-                                            .to_string(),
-                                    logs,
-                                });
-                            }
-                        }
-                    } else {
-                        include_paths = resolved_paths;
                     }
                 }
             }

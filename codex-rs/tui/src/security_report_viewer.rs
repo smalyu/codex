@@ -1,5 +1,8 @@
 const REPORT_STYLES: &str = include_str!("security_report_assets/styles.css");
 const REPORT_SCRIPT: &str = include_str!("security_report_assets/script.js");
+const MARKED_JS: &str = include_str!("security_report_assets/marked.min.js");
+const HIGHLIGHT_JS: &str = include_str!("security_report_assets/highlight.min.js");
+const MERMAID_JS: &str = include_str!("security_report_assets/mermaid.min.js");
 
 fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -81,9 +84,9 @@ pub(crate) fn build_report_html(title: &str, markdown: &str) -> String {
     </footer>
 
     <script>window.REPORT_MD = {report_payload};</script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js" integrity="sha512-34C8F1MjeV8ie9mZ3Ky2CkLq0xJQbrV8ipkTA2sLQoFE3U8g9Tz6tERx2B4f+0vtoTz0xJ9vC8vI5I3w1lMqDA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" integrity="sha512-oV9EIt4K+YIjWh1fH2gdJELQ7dC2mCZkMql4aO8D5mBVYIvXcSDCDY7ZZfW4s8l9bGQZ5w0mJ6R1r5gE9c6o8w==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>{MARKED_JS}</script>
+    <script>{HIGHLIGHT_JS}</script>
+    <script>{MERMAID_JS}</script>
     <script>{script}</script>
   </body>
 </html>
