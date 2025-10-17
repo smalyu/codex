@@ -220,7 +220,7 @@ fn trim_recent_history_to_previous_user_message(
     }) {
         turn_input.split_off(last_user_index)
     } else {
-        turn_input.drain(..).collect()
+        std::mem::take(turn_input)
     }
 }
 
