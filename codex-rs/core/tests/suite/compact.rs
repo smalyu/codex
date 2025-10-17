@@ -32,6 +32,7 @@ use serde_json::Value;
 pub(super) const FIRST_REPLY: &str = "FIRST_REPLY";
 pub(super) const SUMMARY_TEXT: &str = "SUMMARY_ONLY_CONTEXT";
 const THIRD_USER_MSG: &str = "next turn";
+const THIRD_ASSISTANT_MSG: &str = "post compact assistant";
 const AUTO_SUMMARY_TEXT: &str = "AUTO_SUMMARY";
 const FIRST_AUTO_MSG: &str = "token limit start";
 const SECOND_AUTO_MSG: &str = "token limit push";
@@ -646,6 +647,10 @@ async fn manual_compact_retries_after_context_window_error() {
         ev_assistant_message("m2", SUMMARY_TEXT),
         ev_completed("r2"),
     ]);
+    let third_turn = sse(vec![
+        ev_assistant_message("m3", THIRD_ASSISTANT_MSG),
+        ev_completed("r3"),
+    ]);
 
     let request_log = mount_sse_sequence(
         &server,
@@ -653,6 +658,7 @@ async fn manual_compact_retries_after_context_window_error() {
             user_turn.clone(),
             compact_failed.clone(),
             compact_succeeds.clone(),
+            third_turn,
         ],
     )
     .await;
@@ -711,8 +717,8 @@ async fn manual_compact_retries_after_context_window_error() {
     let requests = request_log.requests();
     assert_eq!(
         requests.len(),
-        3,
-        "expected user turn and two compact attempts"
+        4,
+        "expected user turn, two compact attempts, and one follow-up turn"
     );
 
     let compact_attempt = requests[1].body_json();
