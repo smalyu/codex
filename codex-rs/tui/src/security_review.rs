@@ -22,6 +22,7 @@ use reqwest::Client;
 use reqwest::header::ACCEPT;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
 use std::cmp::Ordering as CmpOrdering;
@@ -126,6 +127,12 @@ You are assisting with an application security review. Given the repository loca
 # Request
 <intent>{user_query}</intent>
 
+# Request keywords
+{keywords}
+
+# Keyword directory hints
+{keyword_matches}
+
 # Selection rules
 - Prefer code that serves production traffic, handles external input, or configures deployed infrastructure.
 - Return directories (not files). Use the highest level that contains the relevant implementation; avoid returning both a parent and its child.
@@ -142,6 +149,28 @@ const AUTO_SCOPE_MAX_DIRS: usize = 64;
 const AUTO_SCOPE_MAX_LANGUAGES: usize = 4;
 const AUTO_SCOPE_MAX_MARKERS: usize = 4;
 const AUTO_SCOPE_CHILD_PREVIEW: usize = 4;
+const AUTO_SCOPE_MAX_KEYWORDS: usize = 6;
+const AUTO_SCOPE_KEYWORD_MATCH_LIMIT: usize = 5;
+const AUTO_SCOPE_KEYWORD_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "that", "this", "from", "into", "when", "where", "which", "while",
+    "using", "use", "need", "please", "should", "scope", "scoped", "bug", "bugs", "review",
+    "security", "analysis", "related", "request",
+];
+const AUTO_SCOPE_KEYWORD_SYSTEM_PROMPT: &str = "You expand security review prompts into concise code search keywords. Respond only with JSON Lines.";
+const AUTO_SCOPE_KEYWORD_PROMPT_TEMPLATE: &str = r#"
+Determine the most relevant search keywords for the repository request below. Produce at most {max_keywords} keywords.
+
+Request:
+{user_query}
+
+Guidelines:
+- Prefer feature, component, service, or technology names that are likely to appear in directory names.
+- Keep each keyword to 1–3 words; follow repository naming conventions (snake_case, kebab-case) when obvious.
+- Skip generic words like "security", "review", "code", "bug", or "analysis".
+- If nothing applies, return a single JSON object {{"keyword": "{fallback_keyword}"}} that restates the subject clearly.
+
+Output format: JSON Lines, each {{"keyword": "<term>"}}. Do not add commentary or fences.
+"#;
 const AUTO_SCOPE_MARKER_FILES: [&str; 25] = [
     "Cargo.toml",
     "Cargo.lock",
@@ -758,7 +787,10 @@ pub(crate) async fn run_security_review(
         )
         .await
         {
-            Ok(selections) => {
+            Ok((selections, scope_logs)) => {
+                for line in scope_logs {
+                    record(line);
+                }
                 if selections.is_empty() {
                     record(
                         "Auto scope returned no directories; reviewing entire repository."
@@ -1993,6 +2025,8 @@ fn build_auto_scope_prompt(
     repo_root: &Path,
     candidates: &[AutoScopeCandidate],
     user_query: &str,
+    keywords: &[String],
+    keyword_matches: &[(String, Vec<String>)],
 ) -> String {
     let mut lines: Vec<String> = Vec::new();
     if candidates.is_empty() {
@@ -2014,10 +2048,475 @@ fn build_auto_scope_prompt(
     } else {
         lines.join("\n")
     };
+    let keywords_section = if keywords.is_empty() {
+        "None".to_string()
+    } else {
+        keywords
+            .iter()
+            .map(|keyword| format!("- {keyword}"))
+            .collect::<Vec<String>>()
+            .join("\n")
+    };
+    let keyword_matches_section = if keyword_matches.is_empty() {
+        "No directory matches were found automatically.".to_string()
+    } else {
+        keyword_matches
+            .iter()
+            .map(|(keyword, dirs)| {
+                if dirs.is_empty() {
+                    format!("- {keyword}: no matches")
+                } else {
+                    format!("- {keyword}: {}", dirs.join(", "))
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
+    };
     let base = AUTO_SCOPE_PROMPT_TEMPLATE
         .replace("{locations}", &merged_locations)
-        .replace("{user_query}", user_query.trim());
+        .replace("{user_query}", user_query.trim())
+        .replace("{keywords}", &keywords_section)
+        .replace("{keyword_matches}", &keyword_matches_section);
     format!("{base}\n{AUTO_SCOPE_JSON_GUARD}")
+}
+
+fn normalize_keyword_candidate(candidate: &str) -> Option<(String, String)> {
+    let trimmed = candidate
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'')
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let cleaned = trimmed
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<&str>>()
+        .join(" ");
+    if cleaned.is_empty() {
+        return None;
+    }
+    let lowercase = cleaned.to_ascii_lowercase();
+    if lowercase.len() <= 1 {
+        return None;
+    }
+    if AUTO_SCOPE_KEYWORD_STOPWORDS
+        .iter()
+        .any(|stop| lowercase == *stop)
+    {
+        return None;
+    }
+    Some((cleaned, lowercase))
+}
+
+fn extract_keywords_from_value(value: &Value, output: &mut Vec<String>) {
+    match value {
+        Value::String(text) => output.push(text.to_string()),
+        Value::Array(items) => {
+            for item in items {
+                extract_keywords_from_value(item, output);
+            }
+        }
+        Value::Object(map) => {
+            for key in ["keyword", "keywords", "term", "value", "name"] {
+                if let Some(val) = map.get(key) {
+                    extract_keywords_from_value(val, output);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_keyword_response(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        let mut collected = Vec::new();
+        extract_keywords_from_value(&value, &mut collected);
+        if !collected.is_empty() {
+            return collected;
+        }
+    }
+
+    let mut collected: Vec<String> = Vec::new();
+    for line in trimmed.lines() {
+        let stripped = line
+            .trim()
+            .trim_start_matches(|c: char| c == '-' || c == '*' || c == '•')
+            .trim();
+        if stripped.is_empty() || stripped.eq_ignore_ascii_case("none") {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(stripped) {
+            extract_keywords_from_value(&value, &mut collected);
+            continue;
+        }
+        for fragment in stripped.split(|c| matches!(c, ',' | ';' | '/')) {
+            let fragment_trimmed = fragment.trim();
+            if !fragment_trimmed.is_empty() {
+                collected.push(fragment_trimmed.to_string());
+            }
+        }
+    }
+    collected
+}
+
+fn fallback_keywords_from_prompt(user_query: &str) -> Vec<String> {
+    let mut keywords = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for token in user_query.split(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-') {
+        if token.is_empty() {
+            continue;
+        }
+        let normalized = token.to_ascii_lowercase();
+        if normalized.len() <= 2 {
+            continue;
+        }
+        if AUTO_SCOPE_KEYWORD_STOPWORDS
+            .iter()
+            .any(|stop| normalized == *stop)
+        {
+            continue;
+        }
+        if seen.insert(normalized) {
+            keywords.push(token.to_string());
+            if keywords.len() >= AUTO_SCOPE_MAX_KEYWORDS {
+                break;
+            }
+        }
+    }
+    keywords
+}
+
+async fn expand_auto_scope_keywords(
+    client: &Client,
+    provider: &ModelProviderInfo,
+    auth: &Option<CodexAuth>,
+    user_query: &str,
+    metrics: Arc<ReviewMetrics>,
+) -> Result<Vec<String>, String> {
+    let trimmed_query = truncate_text(user_query, 600);
+    if trimmed_query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fallback_keyword = fallback_keywords_from_prompt(&trimmed_query)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| trimmed_query.clone());
+
+    let prompt = AUTO_SCOPE_KEYWORD_PROMPT_TEMPLATE
+        .replace("{user_query}", &trimmed_query)
+        .replace("{max_keywords}", &AUTO_SCOPE_MAX_KEYWORDS.to_string())
+        .replace("{fallback_keyword}", &fallback_keyword);
+
+    let response = call_model(
+        client,
+        provider,
+        auth,
+        AUTO_SCOPE_MODEL,
+        AUTO_SCOPE_KEYWORD_SYSTEM_PROMPT,
+        &prompt,
+        metrics.clone(),
+        0.0,
+    )
+    .await
+    .map_err(|err| format!("keyword expansion model call failed: {err}"))?;
+
+    let raw_candidates = parse_keyword_response(&response);
+    let mut keywords: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for candidate in raw_candidates {
+        if let Some((display, key)) = normalize_keyword_candidate(&candidate) {
+            if seen.insert(key) {
+                keywords.push(display);
+                if keywords.len() >= AUTO_SCOPE_MAX_KEYWORDS {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(keywords)
+}
+
+fn parse_search_output_paths(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.ends_with("(truncated)") {
+                return None;
+            }
+            let without_prefix = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            let cleaned = without_prefix.trim();
+            if cleaned.is_empty() {
+                None
+            } else {
+                Some(cleaned.to_string())
+            }
+        })
+        .collect()
+}
+
+async fn collect_keyword_directory_matches(
+    repo_root: &Path,
+    keywords: &[String],
+    metrics: Arc<ReviewMetrics>,
+) -> (Vec<(String, Vec<String>)>, Vec<String>) {
+    if keywords.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut results: Vec<(String, Vec<String>)> = Vec::new();
+    let mut logs: Vec<String> = Vec::new();
+
+    for keyword in keywords {
+        let search_result = run_file_search(repo_root, keyword, SearchMode::Regex, &metrics).await;
+        match search_result {
+            SearchResult::Matches(output) => {
+                let mut directories: Vec<String> = Vec::new();
+                let mut seen_dirs: HashSet<String> = HashSet::new();
+                for path in parse_search_output_paths(&output) {
+                    let absolute = repo_root.join(&path);
+                    let canonical = absolute.canonicalize().unwrap_or(absolute.clone());
+                    if !canonical.starts_with(repo_root) {
+                        continue;
+                    }
+                    let directory = if canonical.is_dir() {
+                        canonical
+                    } else {
+                        canonical
+                            .parent()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| repo_root.to_path_buf())
+                    };
+                    if !directory.starts_with(repo_root) {
+                        continue;
+                    }
+                    let display = display_path_for(&directory, repo_root);
+                    if display == "." {
+                        continue;
+                    }
+                    if seen_dirs.insert(display.clone()) {
+                        directories.push(display);
+                        if directories.len() >= AUTO_SCOPE_KEYWORD_MATCH_LIMIT {
+                            break;
+                        }
+                    }
+                }
+                if directories.is_empty() {
+                    logs.push(format!(
+                        "Auto scope keyword `{keyword}` matched files but no directories were recorded."
+                    ));
+                } else {
+                    logs.push(format!(
+                        "Auto scope keyword `{keyword}` matched directories: {}",
+                        directories.join(", ")
+                    ));
+                }
+                results.push((keyword.clone(), directories));
+            }
+            SearchResult::NoMatches => {
+                logs.push(format!(
+                    "Auto scope keyword `{keyword}` produced no matches."
+                ));
+                results.push((keyword.clone(), Vec::new()));
+            }
+            SearchResult::Error(err) => {
+                logs.push(format!(
+                    "Auto scope keyword search for `{keyword}` failed: {err}"
+                ));
+                results.push((keyword.clone(), Vec::new()));
+            }
+        }
+    }
+
+    (results, logs)
+}
+
+#[derive(Debug, Clone)]
+struct RawAutoScopeSelection {
+    path: String,
+    reason: Option<String>,
+}
+
+enum AutoScopeParseResult {
+    All,
+    Selections(Vec<RawAutoScopeSelection>),
+}
+
+fn parse_include_flag(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        Value::String(text) => {
+            let normalized = text.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "true" | "yes" | "y" | "include" | "1" => Some(true),
+                "false" | "no" | "n" | "exclude" | "0" => Some(false),
+                _ => None,
+            }
+        }
+        Value::Number(number) => {
+            if let Some(as_int) = number.as_i64() {
+                return Some(as_int != 0);
+            }
+            number.as_f64().map(|value| value != 0.0)
+        }
+        _ => None,
+    }
+}
+
+fn parse_raw_auto_scope_selection(map: &Map<String, Value>) -> Option<RawAutoScopeSelection> {
+    let include = map
+        .get("include")
+        .and_then(parse_include_flag)
+        .unwrap_or(false);
+    if !include {
+        return None;
+    }
+
+    let raw_path = map
+        .get("path")
+        .or_else(|| map.get("dir"))
+        .or_else(|| map.get("directory"))
+        .and_then(|value| value.as_str().map(str::trim))
+        .filter(|value| !value.is_empty())?;
+
+    let reason = map.get("reason").and_then(|value| match value {
+        Value::Null => None,
+        Value::String(text) => {
+            let trimmed = text.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        other => {
+            let rendered = other.to_string();
+            (!rendered.is_empty()).then_some(rendered)
+        }
+    });
+
+    Some(RawAutoScopeSelection {
+        path: raw_path.to_string(),
+        reason,
+    })
+}
+
+fn collect_auto_scope_values(value: &Value, output: &mut Vec<RawAutoScopeSelection>) -> bool {
+    match value {
+        Value::String(text) => text.trim().eq_ignore_ascii_case("all"),
+        Value::Array(items) => {
+            let mut include_all = false;
+            for item in items {
+                if collect_auto_scope_values(item, output) {
+                    include_all = true;
+                }
+            }
+            include_all
+        }
+        Value::Object(map) => {
+            if let Some(selection) = parse_raw_auto_scope_selection(map) {
+                output.push(selection);
+            }
+            let mut include_all = false;
+            for (key, item) in map {
+                if matches!(
+                    key.as_str(),
+                    "path" | "dir" | "directory" | "reason" | "include"
+                ) {
+                    continue;
+                }
+                if collect_auto_scope_values(item, output) {
+                    include_all = true;
+                }
+            }
+            include_all
+        }
+        _ => false,
+    }
+}
+
+fn extract_json_objects(raw: &str) -> Vec<String> {
+    let mut result: Vec<String> = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (index, ch) in raw.char_indices() {
+        if let Some(begin) = start {
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if ch == '\\' {
+                    escape = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    if depth == 0 {
+                        let end = index + ch.len_utf8();
+                        result.push(raw[begin..end].to_string());
+                        start = None;
+                    } else {
+                        depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+        } else if ch == '{' {
+            start = Some(index);
+            depth = 0;
+            in_string = false;
+            escape = false;
+        }
+    }
+
+    result
+}
+
+fn parse_auto_scope_response(raw: &str) -> AutoScopeParseResult {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return AutoScopeParseResult::Selections(Vec::new());
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        let mut selections: Vec<RawAutoScopeSelection> = Vec::new();
+        let include_all = collect_auto_scope_values(&value, &mut selections);
+        if include_all && selections.is_empty() {
+            return AutoScopeParseResult::All;
+        }
+        return AutoScopeParseResult::Selections(selections);
+    }
+
+    let mut selections: Vec<RawAutoScopeSelection> = Vec::new();
+    let mut include_all = false;
+    for snippet in extract_json_objects(trimmed) {
+        if let Ok(value) = serde_json::from_str::<Value>(&snippet)
+            && collect_auto_scope_values(&value, &mut selections)
+        {
+            include_all = true;
+        }
+    }
+
+    if selections.is_empty()
+        && (include_all
+            || trimmed
+                .lines()
+                .any(|line| line.trim().eq_ignore_ascii_case("all")))
+    {
+        AutoScopeParseResult::All
+    } else {
+        AutoScopeParseResult::Selections(selections)
+    }
 }
 
 async fn auto_detect_scope(
@@ -2028,10 +2527,61 @@ async fn auto_detect_scope(
     repo_root: &Path,
     user_query: &str,
     metrics: Arc<ReviewMetrics>,
-) -> Result<Vec<AutoScopeSelection>, SecurityReviewFailure> {
+) -> Result<(Vec<AutoScopeSelection>, Vec<String>), SecurityReviewFailure> {
+    let mut logs: Vec<String> = Vec::new();
     let candidates = collect_auto_scope_candidates(repo_root);
-    let prompt = build_auto_scope_prompt(repo_root, &candidates, user_query);
-    let response = call_model(
+
+    let mut keywords =
+        match expand_auto_scope_keywords(client, provider, auth, user_query, metrics.clone()).await
+        {
+            Ok(values) => {
+                if values.is_empty() {
+                    logs.push(
+                        "Auto scope keyword expansion returned no keywords; using fallback terms."
+                            .to_string(),
+                    );
+                } else {
+                    logs.push(format!(
+                        "Auto scope keywords suggested by model: {}",
+                        values.join(", ")
+                    ));
+                }
+                values
+            }
+            Err(err) => {
+                logs.push(format!("Auto scope keyword expansion failed: {err}"));
+                Vec::new()
+            }
+        };
+
+    if keywords.is_empty() {
+        let fallback = fallback_keywords_from_prompt(user_query);
+        if fallback.is_empty() {
+            logs.push(
+                "Auto scope keyword fallback produced no usable tokens; continuing with raw prompt."
+                    .to_string(),
+            );
+        } else {
+            logs.push(format!(
+                "Auto scope fallback keywords derived from prompt: {}",
+                fallback.join(", ")
+            ));
+            keywords = fallback;
+        }
+    }
+
+    let (keyword_matches, keyword_logs) =
+        collect_keyword_directory_matches(repo_root, &keywords, metrics.clone()).await;
+    logs.extend(keyword_logs);
+
+    let prompt = build_auto_scope_prompt(
+        repo_root,
+        &candidates,
+        user_query,
+        &keywords,
+        &keyword_matches,
+    );
+    let response = match call_model(
         client,
         provider,
         auth,
@@ -2042,95 +2592,135 @@ async fn auto_detect_scope(
         0.0,
     )
     .await
-    .map_err(|err| SecurityReviewFailure {
-        message: format!("Failed to auto-detect scope: {err}"),
-        logs: Vec::new(),
-    })?;
-
-    let trimmed = response.trim();
-    if trimmed.eq_ignore_ascii_case("all") {
-        let canonical = repo_root
-            .canonicalize()
-            .unwrap_or_else(|_| repo_root.to_path_buf());
-        return Ok(vec![AutoScopeSelection {
-            display_path: display_path_for(&canonical, repo_root),
-            abs_path: canonical,
-            reason: Some("LLM requested full repository".to_string()),
-        }]);
-    }
-
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut selections: Vec<AutoScopeSelection> = Vec::new();
-
-    for line in response.lines() {
-        let s = line.trim();
-        if s.is_empty() {
-            continue;
+    {
+        Ok(text) => text,
+        Err(err) => {
+            logs.push(format!("Auto scope model request failed: {err}"));
+            return Err(SecurityReviewFailure {
+                message: format!("Failed to auto-detect scope: {err}"),
+                logs,
+            });
         }
-        if s.eq_ignore_ascii_case("all") {
+    };
+
+    let parse_result = parse_auto_scope_response(&response);
+    match parse_result {
+        AutoScopeParseResult::All => {
             let canonical = repo_root
                 .canonicalize()
                 .unwrap_or_else(|_| repo_root.to_path_buf());
-            if seen.insert(canonical.clone()) {
-                selections.push(AutoScopeSelection {
+            logs.push("Auto scope model requested the entire repository.".to_string());
+            Ok((
+                vec![AutoScopeSelection {
                     display_path: display_path_for(&canonical, repo_root),
                     abs_path: canonical,
                     reason: Some("LLM requested full repository".to_string()),
+                }],
+                logs,
+            ))
+        }
+        AutoScopeParseResult::Selections(raw_selections) => {
+            let mut seen: HashSet<PathBuf> = HashSet::new();
+            let mut selections: Vec<AutoScopeSelection> = Vec::new();
+
+            for raw in raw_selections {
+                let mut candidate = PathBuf::from(&raw.path);
+                if !candidate.is_absolute() {
+                    candidate = repo_root.join(&candidate);
+                }
+                let canonical = match candidate.canonicalize() {
+                    Ok(path) => path,
+                    Err(_) => continue,
+                };
+                if !canonical.starts_with(repo_root) || !canonical.is_dir() {
+                    continue;
+                }
+                if !seen.insert(canonical.clone()) {
+                    continue;
+                }
+                selections.push(AutoScopeSelection {
+                    display_path: display_path_for(&canonical, repo_root),
+                    abs_path: canonical,
+                    reason: raw.reason,
                 });
             }
-            continue;
-        }
-        let obj: serde_json::Value = match serde_json::from_str(s) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let include = obj
-            .get("include")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if !include {
-            continue;
-        }
-        let path_value = obj
-            .get("path")
-            .or_else(|| obj.get("dir"))
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|p| !p.is_empty());
-        let Some(raw_path) = path_value else {
-            continue;
-        };
 
-        let mut candidate = PathBuf::from(raw_path);
-        if !candidate.is_absolute() {
-            candidate = repo_root.join(&candidate);
+            Ok((selections, logs))
         }
-        let canonical = match candidate.canonicalize() {
-            Ok(path) => path,
-            Err(_) => continue,
-        };
-        if !canonical.starts_with(repo_root) {
-            continue;
+    }
+}
+
+#[cfg(test)]
+mod auto_scope_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn parse_paths(input: &str) -> Option<Vec<(String, Option<String>)>> {
+        match parse_auto_scope_response(input) {
+            AutoScopeParseResult::All => None,
+            AutoScopeParseResult::Selections(selections) => Some(
+                selections
+                    .into_iter()
+                    .map(|selection| (selection.path, selection.reason))
+                    .collect(),
+            ),
         }
-        if !canonical.is_dir() {
-            continue;
-        }
-        if !seen.insert(canonical.clone()) {
-            continue;
-        }
-        let reason = obj
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .map(|text| text.trim().to_string())
-            .filter(|text| !text.is_empty());
-        selections.push(AutoScopeSelection {
-            display_path: display_path_for(&canonical, repo_root),
-            abs_path: canonical,
-            reason,
-        });
     }
 
-    Ok(selections)
+    #[test]
+    fn parses_simple_json_lines() {
+        let input = r#"
+{"path": "api", "include": true, "reason": "handles requests"}
+{"path": "cli", "include": false}
+{"path": "auth", "include": true}
+"#;
+
+        let result = parse_paths(input).expect("expected selections");
+        assert_eq!(
+            result,
+            vec![
+                ("api".to_string(), Some("handles requests".to_string())),
+                ("auth".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_wrapped_json_objects() {
+        let input = r#"
+LLM summary:
+- relevant dirs below
+{"path": "services/gateway", "include": "yes", "reason": "external entrypoint"}
+{"path": "docs", "include": "no"}
+Trailing note"#;
+
+        let result = parse_paths(input).expect("expected selections");
+        assert_eq!(
+            result,
+            vec![(
+                "services/gateway".to_string(),
+                Some("external entrypoint".to_string())
+            )]
+        );
+    }
+
+    #[test]
+    fn detects_all_request() {
+        let input = r#"
+Some explanation first
+ALL
+"#;
+
+        assert!(parse_paths(input).is_none());
+    }
+
+    #[test]
+    fn parses_nested_json_array() {
+        let input = r#"{"selections":[{"dir":"backend","include":1},{"dir":"tests","include":0}]}"#;
+
+        let result = parse_paths(input).expect("expected selections");
+        assert_eq!(result, vec![("backend".to_string(), None)],);
+    }
 }
 
 async fn filter_spec_directories(
@@ -2362,9 +2952,21 @@ async fn generate_threat_model(
         0.1,
     )
     .await
-    .map_err(|err| SecurityReviewFailure {
-        message: format!("Threat model generation failed: {err}"),
-        logs: Vec::new(),
+    .map_err(|err| {
+        let mut failure_logs = vec![
+            "Threat model provider returned a response that could not be parsed.".to_string(),
+            format!("Model error: {err}"),
+            "Double-check API credentials and network availability for the security review process.".to_string(),
+        ];
+        if let Some(tx) = progress_sender.as_ref() {
+            for line in &failure_logs {
+                tx.send(AppEvent::SecurityReviewLog(line.clone()));
+            }
+        }
+        SecurityReviewFailure {
+            message: format!("Threat model generation failed: {err}"),
+            logs: failure_logs,
+        }
     })?;
     let mut sanitized_response = fix_mermaid_blocks(&response);
     sanitized_response = sort_threat_table(&sanitized_response).unwrap_or(sanitized_response);
@@ -2388,9 +2990,21 @@ async fn generate_threat_model(
             0.1,
         )
         .await
-        .map_err(|err| SecurityReviewFailure {
-            message: format!("Threat model regeneration failed: {err}"),
-            logs: Vec::new(),
+        .map_err(|err| {
+            let mut failure_logs = vec![
+                "Threat model retry still failed to decode the provider response.".to_string(),
+                format!("Model error: {err}"),
+                "Verify the provider is returning JSON (no HTML/proxy pages) and that credentials are correct.".to_string(),
+            ];
+            if let Some(tx) = progress_sender.as_ref() {
+                for line in &failure_logs {
+                    tx.send(AppEvent::SecurityReviewLog(line.clone()));
+                }
+            }
+            SecurityReviewFailure {
+                message: format!("Threat model regeneration failed: {err}"),
+                logs: failure_logs,
+            }
         })?;
         sanitized_response = fix_mermaid_blocks(&response);
         sanitized_response = sort_threat_table(&sanitized_response).unwrap_or(sanitized_response);
@@ -5287,7 +5901,23 @@ async fn call_model(
                 return Err(format!("Model request failed with status {status}: {body}"));
             }
 
-            parse_responses_stream_output(&body)
+            match parse_responses_stream_output(&body) {
+                Ok(output) => Ok(output),
+                Err(err) => {
+                    let snippet = truncate_text(&body, 400);
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+                        parse_responses_output(value).map_err(|fallback_err| {
+                            format!(
+                                "{err}; fallback parse failed: {fallback_err}. Response snippet: {snippet}"
+                            )
+                        })
+                    } else {
+                        Err(format!(
+                            "{err}. This usually means the provider returned non-JSON (missing credentials, network restrictions, or proxy HTML). Response snippet: {snippet}"
+                        ))
+                    }
+                }
+            }
         }
         WireApi::Chat => {
             let builder = provider
@@ -5313,14 +5943,29 @@ async fn call_model(
                 .map_err(|e| e.to_string())?;
 
             let status = response.status();
+            let body_bytes = response.bytes().await.map_err(|e| e.to_string())?;
+            let body_text = String::from_utf8_lossy(&body_bytes).to_string();
+
             if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!("Model request failed with status {status}: {body}"));
+                return Err(format!(
+                    "Model request failed with status {status}: {body_text}"
+                ));
             }
 
-            let value: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+            let value = match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                Ok(value) => value,
+                Err(err) => {
+                    let snippet = truncate_text(&body_text, 400);
+                    return Err(format!(
+                        "error decoding response body: {err}. This usually means the provider returned non-JSON (missing credentials, network restrictions, or proxy HTML). Response snippet: {snippet}"
+                    ));
+                }
+            };
 
-            parse_chat_output(value)
+            parse_chat_output(value).map_err(|err| {
+                let snippet = truncate_text(&body_text, 400);
+                format!("{err}; response snippet: {snippet}")
+            })
         }
     }
 }
