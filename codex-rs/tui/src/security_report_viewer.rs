@@ -1,3 +1,6 @@
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+
 const REPORT_STYLES: &str = include_str!("security_report_assets/styles.css");
 const REPORT_SCRIPT: &str = include_str!("security_report_assets/script.js");
 const MARKED_JS: &str = include_str!("security_report_assets/marked.min.js");
@@ -21,7 +24,7 @@ fn escape_html(input: &str) -> String {
 
 pub(crate) fn build_report_html(title: &str, markdown: &str) -> String {
     let escaped_title = escape_html(title);
-    let report_payload = serde_json::to_string(markdown).unwrap_or_else(|_| "\"\"".to_string());
+    let report_payload = BASE64_STANDARD.encode(markdown);
     let styles = REPORT_STYLES;
     let script = REPORT_SCRIPT;
     format!(
@@ -83,7 +86,32 @@ pub(crate) fn build_report_html(title: &str, markdown: &str) -> String {
       <div>Drag & drop a Markdown file anywhere, or use Open.</div>
     </footer>
 
-    <script>window.REPORT_MD = {report_payload};</script>
+    <script>
+      (function() {{
+        const base64 = "{report_payload}";
+        try {{
+          const binary = atob(base64);
+          if (typeof TextDecoder === "function") {{
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) {{
+              bytes[i] = binary.charCodeAt(i);
+            }}
+            window.REPORT_MD = new TextDecoder("utf-8").decode(bytes);
+          }} else {{
+            const percentEncoded = Array.prototype.map
+              .call(binary, function (ch) {{
+                const code = ch.charCodeAt(0).toString(16).padStart(2, "0");
+                return "%" + code;
+              }})
+              .join("");
+            window.REPORT_MD = decodeURIComponent(percentEncoded);
+          }}
+        }} catch (err) {{
+          console.error("Failed to decode embedded report markdown", err);
+          window.REPORT_MD = "";
+        }}
+      }})();
+    </script>
     <script>{MARKED_JS}</script>
     <script>{HIGHLIGHT_JS}</script>
     <script>{MERMAID_JS}</script>
