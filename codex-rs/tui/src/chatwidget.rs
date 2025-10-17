@@ -2266,35 +2266,45 @@ impl ChatWidget {
             None,
             Box::new(move |input: String| {
                 let trimmed = input.trim();
-                if trimmed.is_empty() {
-                    return;
-                }
-
                 let mut include_paths: Vec<String> = Vec::new();
-                let mut all_valid = true;
+                let mut scope_prompt: Option<String> = None;
 
-                for segment in trimmed.split_whitespace() {
-                    let candidate = if Path::new(segment).is_absolute() {
-                        PathBuf::from(segment)
-                    } else {
-                        repo_root.join(segment)
-                    };
-                    if candidate.exists() {
-                        include_paths.push(segment.to_string());
-                    } else {
-                        all_valid = false;
-                        break;
+                if trimmed.is_empty() {
+                    scope_prompt = Some(match mode {
+                        SecurityReviewMode::Full => {
+                            "Select the most security-relevant directories for a full security review."
+                        }
+                        SecurityReviewMode::Bugs => {
+                            "Select the highest risk areas for a quick security bug sweep."
+                        }
                     }
-                }
-
-                let scope_prompt = if all_valid && !include_paths.is_empty() {
-                    None
+                    .to_string());
                 } else {
-                    Some(trimmed.to_string())
-                };
+                    let mut all_valid = true;
 
-                if scope_prompt.is_some() {
-                    include_paths.clear();
+                    for segment in trimmed.split_whitespace() {
+                        let candidate = if Path::new(segment).is_absolute() {
+                            PathBuf::from(segment)
+                        } else {
+                            repo_root.join(segment)
+                        };
+                        if candidate.exists() {
+                            include_paths.push(segment.to_string());
+                        } else {
+                            all_valid = false;
+                            break;
+                        }
+                    }
+
+                    scope_prompt = if all_valid && !include_paths.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
+
+                    if scope_prompt.is_some() {
+                        include_paths.clear();
+                    }
                 }
 
                 tx.send(AppEvent::StartSecurityReview {

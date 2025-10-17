@@ -87,12 +87,15 @@ Examples:
 - Originally escalated CSRF on an internal admin tool behind SSO ⇒ risk_score 28, severity "Low", reason "internal-only with SSO".
 - Header injection in a deprecated endpoint with response sanitization ⇒ risk_score 18, severity "Informational", reason "sanitized legacy endpoint".
 - Static analysis high alert that only touches dead code ⇒ risk_score 10, severity "Informational", reason "dead code path".
+- High-severity SQL injection finding that uses fully parameterized queries ⇒ risk_score 20, severity "Low", reason "parameterized queries".
+- SSRF flagged as critical but the target requires internal metadata access tokens ⇒ risk_score 24, severity "Low", reason "internal metadata token".
 
 Instructions:
 - Output severity **only** from ["High","Medium","Low","Informational"]. Map "critical"/"p0" to "High".
 - Produce `risk_score` between 0-100 (higher means greater customer impact) and use the full range for comparability.
 - Review the repository summary, spec excerpt, blame metadata, and file locations before requesting anything new; reuse existing specs or context attachments when possible.
 - If you still lack certainty, request concrete follow-up (e.g., repo_search, read_file, git blame) in the reason and cite the spec section you need.
+- Reference concrete evidence (spec section, tool name, log line) in the reason when you confirm mitigations or reclassify a finding.
 - Down-rank issues when mitigations or limited blast radius materially reduce customer risk, even if the initial triage labeled them "High".
 - Upgrade issues when exploitability or exposure was understated, or when multiple components amplify the blast radius.
 - Respond with one JSON object per finding, **in the same order**, formatted exactly as:
