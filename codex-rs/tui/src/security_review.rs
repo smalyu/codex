@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::app_event::AppEvent;
+use crate::app_event::SecurityReviewAutoScopeSelection;
 use crate::app_event::SecurityReviewCommandState;
 use crate::app_event_sender::AppEventSender;
 use crate::diff_render::display_path_for;
@@ -44,6 +45,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::fs as tokio_fs;
 use tokio::process::Command;
+use tokio::sync::oneshot;
 use tokio::task::spawn_blocking;
 use url::Url;
 
@@ -779,15 +781,67 @@ pub(crate) async fn run_security_review(
                         selection_summaries.push((display_path, reason));
                     }
 
-                    include_paths = resolved_paths;
                     if let Some(tx) = request.progress_sender.as_ref() {
-                        let display_paths: Vec<String> = selection_summaries
-                            .iter()
-                            .map(|(path, _)| path.clone())
-                            .collect();
-                        tx.send(AppEvent::SecurityReviewScopeResolved {
-                            paths: display_paths,
+                        let (confirm_tx, confirm_rx) = oneshot::channel();
+                        let selections_for_ui: Vec<SecurityReviewAutoScopeSelection> =
+                            selection_summaries
+                                .iter()
+                                .map(|(path, reason)| SecurityReviewAutoScopeSelection {
+                                    display_path: path.clone(),
+                                    reason: reason.clone(),
+                                })
+                                .collect();
+                        tx.send(AppEvent::SecurityReviewAutoScopeConfirm {
+                            mode: request.mode,
+                            prompt: prompt.to_string(),
+                            selections: selections_for_ui,
+                            responder: confirm_tx,
                         });
+
+                        record(
+                            "Waiting for user confirmation of auto-detected scope...".to_string(),
+                        );
+
+                        match confirm_rx.await {
+                            Ok(true) => {
+                                record("Auto scope confirmed by user.".to_string());
+                                include_paths = resolved_paths;
+                                let display_paths: Vec<String> = selection_summaries
+                                    .iter()
+                                    .map(|(path, _)| path.clone())
+                                    .collect();
+                                tx.send(AppEvent::SecurityReviewScopeResolved {
+                                    paths: display_paths,
+                                });
+                            }
+                            Ok(false) => {
+                                record(
+                                    "Auto scope selection rejected by user; cancelling review."
+                                        .to_string(),
+                                );
+                                tx.send(AppEvent::OpenSecurityReviewPathPrompt(request.mode));
+                                return Err(SecurityReviewFailure {
+                                    message:
+                                        "Security review cancelled after auto scope rejection."
+                                            .to_string(),
+                                    logs,
+                                });
+                            }
+                            Err(_) => {
+                                record(
+                                    "Auto scope confirmation interrupted; cancelling review."
+                                        .to_string(),
+                                );
+                                return Err(SecurityReviewFailure {
+                                    message:
+                                        "Auto scope confirmation interrupted; review cancelled."
+                                            .to_string(),
+                                    logs,
+                                });
+                            }
+                        }
+                    } else {
+                        include_paths = resolved_paths;
                     }
                 }
             }
@@ -2432,23 +2486,23 @@ fn build_combine_specs_prompt(project_locations: &[String], specs: &[SpecEntry])
 
 fn slugify_label(input: &str) -> String {
     let mut slug = String::new();
+    let mut needs_separator = false;
     for ch in input.chars() {
         if ch.is_ascii_alphanumeric() {
+            if needs_separator && !slug.is_empty() {
+                slug.push('_');
+            }
             slug.push(ch.to_ascii_lowercase());
-        } else if ch == '/' || ch == '\\' || ch == '-' || ch == '_' {
-            slug.push('_');
-        } else if ch.is_whitespace() {
-            slug.push('_');
+            needs_separator = false;
+        } else if matches!(ch, '/' | '\\' | '-' | '_') || ch.is_whitespace() {
+            needs_separator = !slug.is_empty();
         }
     }
-    while slug.contains("__") {
-        slug = slug.replace("__", "_");
+    if slug.is_empty() {
+        "spec".to_string()
+    } else {
+        slug.trim_matches('_').to_string()
     }
-    let mut trimmed = slug.trim_matches('_').to_string();
-    if trimmed.is_empty() {
-        trimmed = "spec".to_string();
-    }
-    trimmed
 }
 
 async fn analyze_files_individually(
