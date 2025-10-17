@@ -49,7 +49,31 @@ const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Map that holds a startup error for every MCP server that could **not** be
 /// spawned successfully.
-pub type ClientStartErrors = HashMap<String, anyhow::Error>;
+pub type ClientStartErrors = HashMap<String, ClientStartError>;
+
+/// Detailed information about why an MCP client failed to start.
+pub struct ClientStartError {
+    /// The underlying error used for logging/debugging.
+    pub source: anyhow::Error,
+    /// Optional user-facing message with concrete remediation steps.
+    pub display_message: Option<String>,
+}
+
+impl ClientStartError {
+    fn new(source: anyhow::Error) -> Self {
+        Self {
+            source,
+            display_message: None,
+        }
+    }
+
+    fn with_display_message(source: anyhow::Error, display_message: String) -> Self {
+        Self {
+            source,
+            display_message: Some(display_message),
+        }
+    }
+}
 
 fn qualify_tools(tools: Vec<ToolInfo>) -> HashMap<String, ToolInfo> {
     let mut used_names = HashSet::new();
@@ -99,6 +123,16 @@ struct ManagedClient {
 enum McpClientAdapter {
     Legacy(Arc<McpClient>),
     Rmcp(Arc<RmcpClient>),
+}
+
+#[derive(Clone)]
+enum TransportInfo {
+    Stdio,
+    StreamableHttp {
+        url: String,
+        bearer_token_env_var: Option<String>,
+        provided_bearer_token: bool,
+    },
 }
 
 impl McpClientAdapter {
@@ -203,7 +237,7 @@ impl McpConnectionManager {
                 let error = anyhow::anyhow!(
                     "invalid server name '{server_name}': must match pattern ^[a-zA-Z0-9_-]+$"
                 );
-                errors.insert(server_name, error);
+                errors.insert(server_name, ClientStartError::new(error));
                 continue;
             }
 
@@ -218,9 +252,31 @@ impl McpConnectionManager {
                 McpServerTransportConfig::StreamableHttp {
                     bearer_token_env_var,
                     ..
-                } => resolve_bearer_token(&server_name, bearer_token_env_var.as_deref()),
-                _ => Ok(None),
+                } => match resolve_bearer_token(&server_name, bearer_token_env_var.as_deref()) {
+                    Ok(token) => token,
+                    Err(error) => {
+                        errors.insert(server_name, ClientStartError::new(error));
+                        continue;
+                    }
+                },
+                _ => None,
             };
+
+            let transport_info = match &cfg.transport {
+                McpServerTransportConfig::Stdio { .. } => TransportInfo::Stdio,
+                McpServerTransportConfig::StreamableHttp {
+                    url,
+                    bearer_token_env_var,
+                    ..
+                } => TransportInfo::StreamableHttp {
+                    url: url.clone(),
+                    bearer_token_env_var: bearer_token_env_var.clone(),
+                    provided_bearer_token: resolved_bearer_token.is_some(),
+                },
+            };
+
+            let resolved_bearer_token_for_spawn = resolved_bearer_token.clone();
+            let transport_info_for_spawn = transport_info.clone();
 
             join_set.spawn(async move {
                 let McpServerConfig { transport, .. } = cfg;
@@ -263,7 +319,7 @@ impl McpConnectionManager {
                         McpClientAdapter::new_streamable_http_client(
                             server_name.clone(),
                             url,
-                            resolved_bearer_token.unwrap_or_default(),
+                            resolved_bearer_token_for_spawn,
                             params,
                             startup_timeout,
                             store_mode,
@@ -273,14 +329,17 @@ impl McpConnectionManager {
                 }
                 .map(|c| (c, startup_timeout));
 
-                ((server_name, tool_timeout), client)
+                (
+                    (server_name, tool_timeout, transport_info_for_spawn),
+                    client,
+                )
             });
         }
 
         let mut clients: HashMap<String, ManagedClient> = HashMap::with_capacity(join_set.len());
 
         while let Some(res) = join_set.join_next().await {
-            let ((server_name, tool_timeout), client_res) = match res {
+            let ((server_name, tool_timeout, transport_info), client_res) = match res {
                 Ok(result) => result,
                 Err(e) => {
                     warn!("Task panic when starting MCP server: {e:#}");
@@ -300,7 +359,8 @@ impl McpConnectionManager {
                     );
                 }
                 Err(e) => {
-                    errors.insert(server_name, e);
+                    let start_error = classify_start_error(&server_name, transport_info, e);
+                    errors.insert(server_name, start_error);
                 }
             }
         }
@@ -379,6 +439,56 @@ fn resolve_bearer_token(
             "Environment variable {env_var} for MCP server '{server_name}' contains invalid Unicode"
         )),
     }
+}
+
+fn classify_start_error(
+    server_name: &str,
+    transport: TransportInfo,
+    error: anyhow::Error,
+) -> ClientStartError {
+    match transport {
+        TransportInfo::Stdio => ClientStartError::new(error),
+        TransportInfo::StreamableHttp {
+            url,
+            bearer_token_env_var,
+            provided_bearer_token,
+        } => {
+            if is_auth_required_error(&error) {
+                let mut message = format!(
+                    "Codex could not authenticate with the `{server_name}` MCP server at {url}."
+                );
+
+                if let Some(env_var) = bearer_token_env_var {
+                    if provided_bearer_token {
+                        message.push_str(&format!(
+                            " The bearer token from `{env_var}` was rejected. Update the token value or run `codex mcp login {server_name}` to generate a new one."
+                        ));
+                    } else {
+                        message.push_str(&format!(
+                            " Set `{env_var}` with a valid bearer token or run `codex mcp login {server_name}` to complete authentication."
+                        ));
+                    }
+                } else {
+                    message.push_str(&format!(
+                        " Run `codex mcp login {server_name}` to authorize Codex or configure `bearer_token_env_var` with a valid token in your MCP server config."
+                    ));
+                }
+
+                ClientStartError::with_display_message(error, message)
+            } else {
+                ClientStartError::new(error)
+            }
+        }
+    }
+}
+
+fn is_auth_required_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("auth required")
+            || message.contains("unauthorized")
+            || message.contains("401")
+    })
 }
 
 /// Query every server for its available tools and return a single map that

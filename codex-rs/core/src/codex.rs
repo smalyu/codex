@@ -59,6 +59,7 @@ use crate::executor::Executor;
 use crate::executor::ExecutorConfig;
 use crate::executor::normalize_exec_result;
 use crate::mcp::auth::compute_auth_statuses;
+use crate::mcp_connection_manager::ClientStartError;
 use crate::mcp_connection_manager::McpConnectionManager;
 use crate::model_family::find_family_for_model;
 use crate::openai_model_info::get_model_info;
@@ -418,10 +419,16 @@ impl Session {
         // Surface individual client start-up failures to the user.
         if !failed_clients.is_empty() {
             for (server_name, err) in failed_clients {
+                let ClientStartError {
+                    source,
+                    display_message,
+                } = err;
                 let log_message =
-                    format!("MCP client for `{server_name}` failed to start: {err:#}");
+                    format!("MCP client for `{server_name}` failed to start: {source:#}");
                 error!("{log_message}");
-                let display_message = if matches!(
+                let display_message = if let Some(message) = display_message {
+                    message
+                } else if matches!(
                     auth_statuses.get(&server_name),
                     Some(McpAuthStatus::NotLoggedIn)
                 ) {
@@ -429,7 +436,7 @@ impl Session {
                         "The {server_name} MCP server is not logged in. Run `codex mcp login {server_name}` to log in."
                     )
                 } else {
-                    log_message
+                    log_message.clone()
                 };
                 post_session_configured_error_events.push(Event {
                     id: INITIAL_SUBMIT_ID.to_owned(),
