@@ -2216,7 +2216,7 @@ impl ChatWidget {
             && scope_prompt.is_none()
         {
             scope_prompt = Some(
-                "Suggest up to 20 directories most likely to contain exploitable bugs. Prioritise request parsing, input validation, authentication, authorisation, and secret handling. Skip tests, vendor bundles, docs, and generated files.".to_string(),
+                "Suggest up to 20 directories most likely to contain critical or high-risk code paths. Prioritise request parsing, input validation, authentication, authorisation, and secret handling. Skip tests, vendor bundles, docs, and generated files.".to_string(),
             );
         }
 
@@ -2322,7 +2322,7 @@ impl ChatWidget {
                     if trimmed.is_empty() {
                         let prompt = match mode {
                             SecurityReviewMode::Full => "No user scope provided. Choose the 3-8 directories that best represent the production attack surface (core services, externally exposed APIs, authz/authn flows, critical infrastructure). Skip tests, vendor archives, docs, and generated code.".to_string(),
-                            SecurityReviewMode::Bugs => "No user scope provided. Pick the smallest set of directories most likely to contain exploitable bugs (externally reachable services, request parsing, auth, secret handling). Ignore tests, vendor archives, docs, and generated code.".to_string(),
+                            SecurityReviewMode::Bugs => "No user scope provided. Pick the smallest set of directories most likely to contain critical or high-risk code paths (externally reachable services, request parsing, auth, secret handling). Ignore tests, vendor archives, docs, and generated code.".to_string(),
                         };
                         (Vec::new(), Some(prompt))
                     } else {
@@ -2487,24 +2487,25 @@ impl ChatWidget {
             ]
             .into(),
         );
-        summary_lines.push(
-            vec![
-                "  • ".into(),
-                format!("Bugs: {}", bugs_display.as_str()).into(),
-            ]
-            .into(),
-        );
-        if let Some(report_line) = match (
-            report_markdown_display.as_ref(),
-            report_html_display.as_ref(),
-        ) {
-            (Some(md), Some(html)) => Some(format!("Report: md {md}, html {html}")),
-            (Some(md), None) => Some(format!("Report: md {md}")),
-            (None, Some(html)) => Some(format!("Report: html {html}")),
-            (None, None) => None,
-        } {
-            summary_lines.push(vec!["  • ".into(), report_line.into()].into());
+        let mut artifact_lines: Vec<Line<'static>> = Vec::new();
+        if let Some(md) = report_markdown_display.as_ref() {
+            artifact_lines
+                .push(vec!["  • ".into(), format!("Report (markdown): {md}").into()].into());
         }
+        if let Some(html) = report_html_display.as_ref() {
+            artifact_lines
+                .push(vec!["  • ".into(), format!("Report (html): {html}").into()].into());
+        }
+        if artifact_lines.is_empty() {
+            artifact_lines.push(
+                vec![
+                    "  • ".into(),
+                    format!("Bugs: {}", bugs_display.as_str()).into(),
+                ]
+                .into(),
+            );
+        }
+        summary_lines.extend(artifact_lines);
         if let Some(last_log) = last_log {
             summary_lines
                 .push(vec!["  • ".into(), format!("Last update: {last_log}").dim()].into());
@@ -2535,16 +2536,6 @@ impl ChatWidget {
             report_path: result.report_path.clone(),
             report_html_path: result.report_html_path,
         });
-
-        if !output_root.as_os_str().is_empty() {
-            self.add_info_message(
-                format!(
-                    "Security review artifacts saved to {}",
-                    display_path_for(&output_root, &self.config.cwd)
-                ),
-                None,
-            );
-        }
     }
 
     pub(crate) fn on_security_review_failed(&mut self, error: SecurityReviewFailure) {
