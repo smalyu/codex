@@ -2284,12 +2284,8 @@ impl ChatWidget {
                 let (include_paths, scope_prompt_override): (Vec<String>, Option<String>) =
                     if trimmed.is_empty() {
                         let prompt = match mode {
-                            SecurityReviewMode::Full => {
-                                "Select the most security-relevant directories for a full security review.".to_string()
-                            }
-                            SecurityReviewMode::Bugs => {
-                                "Select the highest risk areas for a quick security bug sweep.".to_string()
-                            }
+                            SecurityReviewMode::Full => "No user scope provided. Choose the 3-8 directories that best represent the production attack surface (core services, externally exposed APIs, authz/authn flows, critical infrastructure). Skip tests, vendor archives, docs, and generated code.".to_string(),
+                            SecurityReviewMode::Bugs => "No user scope provided. Pick the smallest set of directories most likely to contain exploitable bugs (externally reachable services, request parsing, auth, secret handling). Ignore tests, vendor archives, docs, and generated code.".to_string(),
                         };
                         (Vec::new(), Some(prompt))
                     } else {
@@ -2496,11 +2492,11 @@ impl ChatWidget {
         }
 
         self.security_review_artifacts = Some(SecurityReviewArtifactsState {
-            repo_root: repo_path.clone(),
+            repo_root: repo_path,
             snapshot_path: result.snapshot_path.clone(),
             bugs_path: result.bugs_path.clone(),
             report_path: result.report_path.clone(),
-            report_html_path: result.report_html_path.clone(),
+            report_html_path: result.report_html_path,
         });
 
         if !output_root.as_os_str().is_empty() {
