@@ -77,10 +77,7 @@ async fn run_compact_task_inner(
     let mut truncated_count = 0usize;
     let mut trimmed_tails: Vec<Vec<ResponseItem>> = Vec::new();
 
-    let max_retries_u64 = turn_context
-        .client
-        .get_provider()
-        .stream_max_retries();
+    let max_retries_u64 = turn_context.client.get_provider().stream_max_retries();
     let max_retries = max_retries_u64 as usize;
     let mut retries: u64 = 0;
     let mut context_retries = 0usize;
