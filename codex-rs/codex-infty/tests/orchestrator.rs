@@ -97,7 +97,7 @@ async fn orchestrator_routes_between_roles_and_records_store() -> anyhow::Result
         .as_str()
         .expect("request should set instructions");
     assert!(
-        instructions.contains("Codex Infty Solver"),
+        instructions.contains("brilliant mathematician"),
         "missing solver prompt: {instructions}"
     );
     assert!(sessions.store.path().is_dir());
@@ -134,15 +134,11 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
         responses::sse(vec![
             responses::ev_response_created("solver-resp-2"),
             responses::ev_assistant_message("solver-msg-2", "Acknowledged"),
-            responses::ev_completed("solver-resp-2"),
-        ]),
-        responses::sse(vec![
-            responses::ev_response_created("solver-resp-4"),
             responses::ev_assistant_message(
                 "solver-msg-4",
                 r#"{"type":"final_delivery","prompt":null,"claim_path":null,"notes":null,"deliverable_path":"deliverable","summary":"done"}"#,
             ),
-            responses::ev_completed("solver-resp-4"),
+            responses::ev_completed("solver-resp-2"),
         ]),
         // Final verification of the deliverable
         responses::sse(vec![
@@ -152,6 +148,11 @@ async fn execute_new_run_drives_to_completion() -> anyhow::Result<()> {
                 r#"{"verdict":"pass","reasons":[],"suggestions":[]}"#,
             ),
             responses::ev_completed("verifier-resp-3"),
+        ]),
+        // Feedback turn summarizing the verification outcome back to the solver
+        responses::sse(vec![
+            responses::ev_response_created("solver-resp-5"),
+            responses::ev_completed("solver-resp-5"),
         ]),
     ];
     for body in bodies {
