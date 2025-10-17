@@ -52,6 +52,7 @@ model_reasoning_summary = "detailed"
 model_verbosity = "medium"
 model_provider = "openai"
 chatgpt_base_url = "https://api.chatgpt.com"
+sandbox_mode = "danger-full-access"
 "#,
     )
 }
@@ -111,6 +112,7 @@ async fn get_config_toml_parses_all_fields() {
                     model_verbosity: Some(Verbosity::Medium),
                     model_provider: Some("openai".into()),
                     chatgpt_base_url: Some("https://api.chatgpt.com".into()),
+                    sandbox_mode: Some(SandboxMode::DangerFullAccess),
                 },
             )]),
         },

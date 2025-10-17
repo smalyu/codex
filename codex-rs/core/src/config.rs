@@ -1026,7 +1026,8 @@ impl Config {
 
         let features = Features::from_config(&cfg, &config_profile, feature_overrides);
 
-        let sandbox_policy = cfg.derive_sandbox_policy(sandbox_mode);
+        let sandbox_policy =
+            cfg.derive_sandbox_policy(sandbox_mode.or(config_profile.sandbox_mode));
 
         let mut model_providers = built_in_model_providers();
         // Merge user-defined providers into the built-in list.
@@ -1505,6 +1506,35 @@ approve_all = true
         assert!(!config.features.enabled(Feature::ViewImageTool));
         assert!(config.include_plan_tool);
         assert!(!config.include_view_image_tool);
+
+        Ok(())
+    }
+
+    #[test]
+    fn profile_sandbox_mode_overrides_base_config() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "danger".to_string(),
+            ConfigProfile {
+                sandbox_mode: Some(SandboxMode::DangerFullAccess),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            sandbox_mode: Some(SandboxMode::ReadOnly),
+            profiles,
+            profile: Some("danger".to_string()),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(config.sandbox_policy, SandboxPolicy::DangerFullAccess);
 
         Ok(())
     }
