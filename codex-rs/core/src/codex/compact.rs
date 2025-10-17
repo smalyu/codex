@@ -77,10 +77,8 @@ async fn run_compact_task_inner(
     let mut truncated_count = 0usize;
     let mut trimmed_tails: Vec<Vec<ResponseItem>> = Vec::new();
 
-    let max_retries_u64 = turn_context.client.get_provider().stream_max_retries();
-    let max_retries = max_retries_u64 as usize;
-    let mut retries: u64 = 0;
-    let mut context_retries = 0usize;
+    let max_retries = turn_context.client.get_provider().stream_max_retries();
+    let mut retries = 0u64;
 
     let rollout_item = RolloutItem::TurnContext(TurnContextItem {
         cwd: turn_context.cwd.clone(),
@@ -126,7 +124,8 @@ async fn run_compact_task_inner(
                     if !trimmed.is_empty() {
                         truncated_count += trimmed.len();
                         trimmed_tails.push(trimmed);
-                        if context_retries >= max_retries {
+                        retries += 1;
+                        if retries >= max_retries {
                             sess.set_total_tokens_full(&sub_id, turn_context.as_ref())
                                 .await;
                             let event = Event {
@@ -138,8 +137,6 @@ async fn run_compact_task_inner(
                             sess.send_event(event).await;
                             return;
                         }
-                        context_retries += 1;
-                        retries = 0;
                         continue;
                     }
                 }
@@ -155,12 +152,12 @@ async fn run_compact_task_inner(
                 return;
             }
             Err(e) => {
-                if retries < max_retries_u64 {
+                if retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
                     sess.notify_stream_error(
                         &sub_id,
-                        format!("Re-connecting... {retries}/{max_retries_u64}"),
+                        format!("Re-connecting... {retries}/{max_retries}"),
                     )
                     .await;
                     tokio::time::sleep(delay).await;
