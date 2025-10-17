@@ -1057,6 +1057,12 @@ impl Session {
         }
     }
 
+    /// Track a freshly emitted `ResponseItem` for the active turn.
+    ///
+    /// When the model stream produces an item (e.g. a tool call) we register it
+    /// immediately so abort paths can still flush it into history even if the
+    /// matching tool future has not completed yet. The returned index lets the
+    /// caller later patch the slot when the response arrives.
     pub async fn append_processed_item(
         &self,
         sub_id: &str,
@@ -1072,6 +1078,14 @@ impl Session {
         }
     }
 
+    /// Patch a previously queued `ProcessedResponseItem` with the tool
+    /// response.
+    ///
+    /// Tool futures resolve outside of the stream loop. Once a result is
+    /// available we update the placeholder slot created by
+    /// [`append_processed_item`] so the turn state reflects the final
+    /// `ResponseInputItem`. If the turn has already ended (e.g. abort), we skip
+    /// the update—the abort handler will synthesize the appropriate output.
     pub async fn update_processed_item_response(
         &self,
         sub_id: &str,
@@ -2021,6 +2035,132 @@ async fn run_turn(
 pub(crate) struct ProcessedResponseItem {
     pub(crate) item: ResponseItem,
     pub(crate) response: Option<ResponseInputItem>,
+}
+
+struct ProcessedItemsSummary {
+    history_items: Vec<ResponseItem>,
+    responses: Vec<ResponseInputItem>,
+}
+
+fn summarize_processed_items(processed_items: Vec<ProcessedResponseItem>) -> ProcessedItemsSummary {
+    let mut summary = ProcessedItemsSummary {
+        history_items: Vec::new(),
+        responses: Vec::new(),
+    };
+
+    for processed_response_item in processed_items {
+        let ProcessedResponseItem { item, response } = processed_response_item;
+        match (&item, &response) {
+            (ResponseItem::Message { role, .. }, None) if role == "assistant" => {
+                summary.history_items.push(item.clone());
+            }
+            (
+                ResponseItem::LocalShellCall { .. },
+                Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
+            ) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(ResponseItem::FunctionCallOutput {
+                        call_id: call_id.clone(),
+                        output: output.clone(),
+                    });
+            }
+            (
+                ResponseItem::FunctionCall { .. },
+                Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
+            ) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(ResponseItem::FunctionCallOutput {
+                        call_id: call_id.clone(),
+                        output: output.clone(),
+                    });
+            }
+            (
+                ResponseItem::CustomToolCall { .. },
+                Some(ResponseInputItem::CustomToolCallOutput { call_id, output }),
+            ) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(ResponseItem::CustomToolCallOutput {
+                        call_id: call_id.clone(),
+                        output: output.clone(),
+                    });
+            }
+            (
+                ResponseItem::FunctionCall { .. },
+                Some(ResponseInputItem::McpToolCallOutput { call_id, result }),
+            ) => {
+                summary.history_items.push(item.clone());
+                let output = match result {
+                    Ok(call_tool_result) => {
+                        convert_call_tool_result_to_function_call_output_payload(call_tool_result)
+                    }
+                    Err(err) => FunctionCallOutputPayload {
+                        content: err.clone(),
+                        success: Some(false),
+                    },
+                };
+                summary
+                    .history_items
+                    .push(ResponseItem::FunctionCallOutput {
+                        call_id: call_id.clone(),
+                        output,
+                    });
+            }
+            (
+                ResponseItem::LocalShellCall {
+                    call_id: Some(call_id),
+                    ..
+                },
+                None,
+            ) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(make_aborted_function_call_output(call_id.clone()));
+            }
+            (ResponseItem::FunctionCall { call_id, .. }, None) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(make_aborted_function_call_output(call_id.clone()));
+            }
+            (ResponseItem::CustomToolCall { call_id, .. }, None) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(make_aborted_custom_tool_call_output(call_id.clone()));
+            }
+            (
+                ResponseItem::Reasoning {
+                    id,
+                    summary: reasoning_summary,
+                    content,
+                    encrypted_content,
+                },
+                None,
+            ) => {
+                summary.history_items.push(ResponseItem::Reasoning {
+                    id: id.clone(),
+                    summary: reasoning_summary.clone(),
+                    content: content.clone(),
+                    encrypted_content: encrypted_content.clone(),
+                });
+            }
+            _ => {
+                warn!("Unexpected response item: {item:?} with response: {response:?}");
+            }
+        };
+        if let Some(response) = response {
+            summary.responses.push(response);
+        }
+    }
+
+    summary
 }
 
 #[derive(Debug)]
@@ -3487,129 +3627,4 @@ mod tests {
         pretty_assertions::assert_eq!(exec_output.metadata, ResponseExecMetadata { exit_code: 0 });
         assert!(exec_output.output.contains("hi"));
     }
-}
-struct ProcessedItemsSummary {
-    history_items: Vec<ResponseItem>,
-    responses: Vec<ResponseInputItem>,
-}
-
-fn summarize_processed_items(processed_items: Vec<ProcessedResponseItem>) -> ProcessedItemsSummary {
-    let mut summary = ProcessedItemsSummary {
-        history_items: Vec::new(),
-        responses: Vec::new(),
-    };
-
-    for processed_response_item in processed_items {
-        let ProcessedResponseItem { item, response } = processed_response_item;
-        match (&item, &response) {
-            (ResponseItem::Message { role, .. }, None) if role == "assistant" => {
-                summary.history_items.push(item.clone());
-            }
-            (
-                ResponseItem::LocalShellCall { .. },
-                Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
-            ) => {
-                summary.history_items.push(item.clone());
-                summary
-                    .history_items
-                    .push(ResponseItem::FunctionCallOutput {
-                        call_id: call_id.clone(),
-                        output: output.clone(),
-                    });
-            }
-            (
-                ResponseItem::FunctionCall { .. },
-                Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
-            ) => {
-                summary.history_items.push(item.clone());
-                summary
-                    .history_items
-                    .push(ResponseItem::FunctionCallOutput {
-                        call_id: call_id.clone(),
-                        output: output.clone(),
-                    });
-            }
-            (
-                ResponseItem::CustomToolCall { .. },
-                Some(ResponseInputItem::CustomToolCallOutput { call_id, output }),
-            ) => {
-                summary.history_items.push(item.clone());
-                summary
-                    .history_items
-                    .push(ResponseItem::CustomToolCallOutput {
-                        call_id: call_id.clone(),
-                        output: output.clone(),
-                    });
-            }
-            (
-                ResponseItem::FunctionCall { .. },
-                Some(ResponseInputItem::McpToolCallOutput { call_id, result }),
-            ) => {
-                summary.history_items.push(item.clone());
-                let output = match result {
-                    Ok(call_tool_result) => {
-                        convert_call_tool_result_to_function_call_output_payload(call_tool_result)
-                    }
-                    Err(err) => FunctionCallOutputPayload {
-                        content: err.clone(),
-                        success: Some(false),
-                    },
-                };
-                summary
-                    .history_items
-                    .push(ResponseItem::FunctionCallOutput {
-                        call_id: call_id.clone(),
-                        output,
-                    });
-            }
-            (
-                ResponseItem::LocalShellCall {
-                    call_id: Some(call_id),
-                    ..
-                },
-                None,
-            ) => {
-                summary.history_items.push(item.clone());
-                summary
-                    .history_items
-                    .push(make_aborted_function_call_output(call_id.clone()));
-            }
-            (ResponseItem::FunctionCall { call_id, .. }, None) => {
-                summary.history_items.push(item.clone());
-                summary
-                    .history_items
-                    .push(make_aborted_function_call_output(call_id.clone()));
-            }
-            (ResponseItem::CustomToolCall { call_id, .. }, None) => {
-                summary.history_items.push(item.clone());
-                summary
-                    .history_items
-                    .push(make_aborted_custom_tool_call_output(call_id.clone()));
-            }
-            (
-                ResponseItem::Reasoning {
-                    id,
-                    summary: reasoning_summary,
-                    content,
-                    encrypted_content,
-                },
-                None,
-            ) => {
-                summary.history_items.push(ResponseItem::Reasoning {
-                    id: id.clone(),
-                    summary: reasoning_summary.clone(),
-                    content: content.clone(),
-                    encrypted_content: encrypted_content.clone(),
-                });
-            }
-            _ => {
-                warn!("Unexpected response item: {item:?} with response: {response:?}");
-            }
-        };
-        if let Some(response) = response {
-            summary.responses.push(response);
-        }
-    }
-
-    summary
 }

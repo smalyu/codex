@@ -168,11 +168,8 @@ async fn interrupt_tool_records_history_entries() {
                 if next.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
                     && next.get("call_id").and_then(|v| v.as_str()) == Some(call_id)
                 {
-                    let content_matches = next
-                        .get("output")
-                        .and_then(|o| o.as_str())
-                        .map(|s| s == "aborted")
-                        .unwrap_or(false);
+                    let content_matches =
+                        next.get("output").and_then(serde_json::Value::as_str) == Some("aborted");
                     if content_matches {
                         abort_seen = true;
                         break;
