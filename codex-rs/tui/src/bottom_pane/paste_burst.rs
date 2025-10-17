@@ -4,8 +4,15 @@ use std::time::Instant;
 // Heuristic thresholds for detecting paste-like input bursts.
 // Detect quickly to avoid showing typed prefix before paste is recognized
 const PASTE_BURST_MIN_CHARS: u16 = 3;
-const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
-const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(120);
+
+// Windows consoles deliver pasted characters more slowly, so use a longer
+// interval/window there to keep the entire paste (including the trailing
+// newline) inside the burst.
+const PASTE_BURST_CHAR_INTERVAL: Duration =
+    Duration::from_millis(if cfg!(windows) { 30 } else { 8 });
+
+const PASTE_ENTER_SUPPRESS_WINDOW: Duration =
+    Duration::from_millis(if cfg!(windows) { 300 } else { 120 });
 
 #[derive(Default)]
 pub(crate) struct PasteBurst {
