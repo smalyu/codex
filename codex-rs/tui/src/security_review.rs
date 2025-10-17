@@ -607,7 +607,9 @@ fn render_bug_sections(snapshots: &[BugSnapshot]) -> String {
         if base.is_empty() {
             continue;
         }
-        let mut composed = base.to_string();
+        let mut composed = String::new();
+        composed.push_str(&format!("<a id=\"bug-{}\"></a>\n", snapshot.bug.summary_id));
+        composed.push_str(base);
         if !matches!(snapshot.bug.validation.status, BugValidationStatus::Pending) {
             composed.push_str("\n\n#### Validation\n");
             let status_label = validation_status_label(&snapshot.bug.validation);
@@ -2365,6 +2367,7 @@ async fn generate_threat_model(
         logs: Vec::new(),
     })?;
     let mut sanitized_response = fix_mermaid_blocks(&response);
+    sanitized_response = sort_threat_table(&sanitized_response).unwrap_or(sanitized_response);
 
     if !threat_table_has_rows(&sanitized_response) {
         let warn = "Threat model is missing table rows; requesting correction.";
@@ -2390,6 +2393,7 @@ async fn generate_threat_model(
             logs: Vec::new(),
         })?;
         sanitized_response = fix_mermaid_blocks(&response);
+        sanitized_response = sort_threat_table(&sanitized_response).unwrap_or(sanitized_response);
 
         if !threat_table_has_rows(&sanitized_response) {
             let retry_warn =
@@ -2810,7 +2814,7 @@ async fn analyze_files_individually(
 
     Ok(BugAnalysisOutcome {
         bug_markdown,
-        bug_summary_table: make_bug_summary_table(&bug_summaries, git_link_info.as_ref()),
+        bug_summary_table: make_bug_summary_table(&bug_summaries),
         findings_count,
         bug_summaries,
         bug_details,
@@ -3483,10 +3487,7 @@ fn format_findings_summary(findings: usize, files_with_findings: usize) -> Strin
     format!("Identified {findings} {finding_word} across {files_with_findings} {file_word}.")
 }
 
-fn make_bug_summary_table(
-    bugs: &[BugSummary],
-    git_link_info: Option<&GitLinkInfo>,
-) -> Option<String> {
+fn make_bug_summary_table(bugs: &[BugSummary]) -> Option<String> {
     if bugs.is_empty() {
         return None;
     }
@@ -3501,36 +3502,32 @@ fn make_bug_summary_table(
     });
 
     let mut table = String::new();
-    table.push_str("| # | Title | Severity | Validation | Location | Impact | Recommendation |\n");
-    table.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+    table.push_str("| # | Title | Severity | Validation | Impact | Recommendation |\n");
+    table.push_str("| --- | --- | --- | --- | --- | --- |\n");
     for (display_idx, bug) in ordered.iter().enumerate() {
         let id = display_idx + 1;
-        let location = linkify_location(&bug.file, git_link_info);
-        let mut location_with_details = if let Some(blame) = bug.blame.as_ref() {
-            if location.is_empty() {
-                blame.clone()
-            } else {
-                format!("{location} ({blame})")
-            }
+        let anchor_id = bug.id;
+        let raw_title = sanitize_table_field(&bug.title);
+        let link_label = if raw_title == "-" {
+            format!("Bug {anchor_id}")
         } else {
-            location
+            raw_title.replace('[', r"\[").replace(']', r"\]")
         };
+        let mut title_cell = format!("[{link_label}](#bug-{anchor_id})");
         if let Some(reason) = bug.risk_reason.as_ref() {
             let trimmed_reason = reason.trim();
             if !trimmed_reason.is_empty() {
-                if !location_with_details.is_empty() {
-                    location_with_details.push_str(" — ");
-                }
-                location_with_details.push_str(trimmed_reason);
+                title_cell.push_str(" — ");
+                let reason_display = sanitize_table_field(trimmed_reason);
+                title_cell.push_str(&reason_display);
             }
         }
         let validation = validation_display(&bug.validation);
         table.push_str(&format!(
-            "| {id} | {} | {} | {} | {} | {} | {} |\n",
-            sanitize_table_field(&bug.title),
+            "| {id} | {} | {} | {} | {} | {} |\n",
+            title_cell,
             sanitize_table_field(&bug.severity),
             sanitize_table_field(&validation),
-            sanitize_table_field(&location_with_details),
             sanitize_table_field(&bug.impact),
             sanitize_table_field(&bug.recommendation),
         ));
@@ -3538,10 +3535,7 @@ fn make_bug_summary_table(
     Some(table)
 }
 
-fn make_bug_summary_table_from_bugs(
-    bugs: &[SecurityReviewBug],
-    git_link_info: Option<&GitLinkInfo>,
-) -> Option<String> {
+fn make_bug_summary_table_from_bugs(bugs: &[SecurityReviewBug]) -> Option<String> {
     if bugs.is_empty() {
         return None;
     }
@@ -3556,36 +3550,32 @@ fn make_bug_summary_table_from_bugs(
     });
 
     let mut table = String::new();
-    table.push_str("| # | Title | Severity | Validation | Location | Impact | Recommendation |\n");
-    table.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+    table.push_str("| # | Title | Severity | Validation | Impact | Recommendation |\n");
+    table.push_str("| --- | --- | --- | --- | --- | --- |\n");
     for (display_idx, bug) in ordered.iter().enumerate() {
         let id = display_idx + 1;
-        let location = linkify_location(&bug.file, git_link_info);
-        let mut location_with_details = if let Some(blame) = bug.blame.as_ref() {
-            if location.is_empty() {
-                blame.clone()
-            } else {
-                format!("{location} ({blame})")
-            }
+        let anchor_id = bug.summary_id;
+        let raw_title = sanitize_table_field(&bug.title);
+        let link_label = if raw_title == "-" {
+            format!("Bug {anchor_id}")
         } else {
-            location
+            raw_title.replace('[', r"\[").replace(']', r"\]")
         };
+        let mut title_cell = format!("[{link_label}](#bug-{anchor_id})");
         if let Some(reason) = bug.risk_reason.as_ref() {
             let trimmed_reason = reason.trim();
             if !trimmed_reason.is_empty() {
-                if !location_with_details.is_empty() {
-                    location_with_details.push_str(" — ");
-                }
-                location_with_details.push_str(trimmed_reason);
+                title_cell.push_str(" — ");
+                let reason_display = sanitize_table_field(trimmed_reason);
+                title_cell.push_str(&reason_display);
             }
         }
         let validation = validation_display(&bug.validation);
         table.push_str(&format!(
-            "| {id} | {} | {} | {} | {} | {} | {} |\n",
-            sanitize_table_field(&bug.title),
+            "| {id} | {} | {} | {} | {} | {} |\n",
+            title_cell,
             sanitize_table_field(&bug.severity),
             sanitize_table_field(&validation),
-            sanitize_table_field(&location_with_details),
             sanitize_table_field(&bug.impact),
             sanitize_table_field(&bug.recommendation),
         ));
@@ -3620,84 +3610,9 @@ fn validation_status_label(state: &BugValidationState) -> String {
     label
 }
 
-fn linkify_location(location: &str, git_link_info: Option<&GitLinkInfo>) -> String {
-    let trimmed = location.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    let Some(info) = git_link_info else {
-        return trimmed.to_string();
-    };
-
-    let colon_re = Regex::new(r"(?P<p>[^\s#]+\.[A-Za-z0-9_]+):(?P<a>\d+)(?:-(?P<b>\d+))?")
-        .unwrap_or_else(|_| Regex::new(r"$^").unwrap());
-    let normalized = colon_re
-        .replace_all(trimmed, |caps: &regex::Captures<'_>| {
-            let path = caps.name("p").map(|m| m.as_str()).unwrap_or_default();
-            let start = caps.name("a").map(|m| m.as_str()).unwrap_or_default();
-            let fragment = if let Some(end) = caps.name("b").map(|m| m.as_str()) {
-                format!("L{start}-L{end}")
-            } else {
-                format!("L{start}")
-            };
-            format!("{path}#{fragment}")
-        })
-        .into_owned();
-
-    let segments: Vec<&str> = normalized
-        .split(',')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .collect();
-    if segments.is_empty() {
-        return trimmed.to_string();
-    }
-
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut outputs: Vec<String> = Vec::new();
-    let mut has_link = false;
-
-    for segment in segments {
-        if segment.starts_with("http://") || segment.starts_with("https://") {
-            let value = segment.to_string();
-            if seen.insert(value.clone()) {
-                outputs.push(value);
-            }
-            continue;
-        }
-
-        let pairs = parse_location_item(segment, info);
-        let filtered = filter_location_pairs(pairs);
-
-        if filtered.is_empty() {
-            let value = segment.to_string();
-            if seen.insert(value.clone()) {
-                outputs.push(value);
-            }
-            continue;
-        }
-
-        for (rel_path, fragment_opt) in filtered {
-            let mut fragment = fragment_opt.unwrap_or_default();
-            if !fragment.is_empty() && !fragment.starts_with('#') {
-                fragment.insert(0, '#');
-            }
-            let link_text = format!("{rel_path}{fragment}");
-            let url = format!("{}{}{}", info.github_prefix, rel_path, fragment);
-            let link = format!("[{link_text}]({url})");
-            if seen.insert(link.clone()) {
-                outputs.push(link);
-                has_link = true;
-            }
-        }
-    }
-
-    if has_link {
-        outputs.join(", ")
-    } else {
-        trimmed.to_string()
-    }
+#[allow(dead_code)]
+fn linkify_location(location: &str, _git_link_info: Option<&GitLinkInfo>) -> String {
+    location.trim().to_string()
 }
 
 fn parse_location_item(item: &str, git_link_info: &GitLinkInfo) -> Vec<(String, Option<String>)> {
@@ -4743,6 +4658,72 @@ fn threat_table_has_rows(markdown: &str) -> bool {
     false
 }
 
+fn sort_threat_table(markdown: &str) -> Option<String> {
+    let lines: Vec<&str> = markdown.split('\n').collect();
+    let mut output: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+        if trimmed.starts_with('|') && trimmed.to_ascii_lowercase().contains("threat id") {
+            let header_cells: Vec<String> = trimmed
+                .trim_matches('|')
+                .split('|')
+                .map(|cell| cell.trim().to_string())
+                .collect();
+            let priority_idx = header_cells
+                .iter()
+                .position(|cell| cell.eq_ignore_ascii_case("priority"));
+            if priority_idx.is_none() {
+                output.push(line.to_string());
+                i += 1;
+                continue;
+            }
+            let priority_idx = priority_idx.unwrap();
+            output.push(line.to_string());
+            i += 1;
+            if i < lines.len() {
+                output.push(lines[i].to_string());
+                i += 1;
+            }
+            let mut rows: Vec<(usize, String, u8)> = Vec::new();
+            while i < lines.len() {
+                let row_line = lines[i];
+                let row_trim = row_line.trim();
+                if row_trim.is_empty() || !row_trim.starts_with('|') {
+                    break;
+                }
+                let priority_score = row_trim
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .nth(priority_idx)
+                    .map(|value| match value.to_ascii_lowercase().as_str() {
+                        "high" => 0,
+                        "medium" => 1,
+                        "low" => 2,
+                        _ => 3,
+                    })
+                    .unwrap_or(3);
+                rows.push((rows.len(), row_line.to_string(), priority_score));
+                i += 1;
+            }
+            rows.sort_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)));
+            for (_, row, _) in rows {
+                output.push(row);
+            }
+            while i < lines.len() {
+                output.push(lines[i].to_string());
+                i += 1;
+            }
+            return Some(output.join("\n"));
+        }
+        output.push(line.to_string());
+        i += 1;
+    }
+    None
+}
+
 fn build_bugs_user_prompt(
     repository_summary: &str,
     spec_markdown: Option<&str>,
@@ -4956,11 +4937,11 @@ fn summarize_process_output(success: bool, stdout: &str, stderr: &str) -> String
 
 fn build_bugs_markdown(
     snapshot: &SecurityReviewSnapshot,
-    git_link_info: Option<&GitLinkInfo>,
+    _git_link_info: Option<&GitLinkInfo>,
 ) -> String {
     let bugs = snapshot_bugs(snapshot);
     let mut sections: Vec<String> = Vec::new();
-    if let Some(table) = make_bug_summary_table_from_bugs(&bugs, git_link_info) {
+    if let Some(table) = make_bug_summary_table_from_bugs(&bugs) {
         sections.push(table);
     }
     let details = render_bug_sections(&snapshot.bugs);
