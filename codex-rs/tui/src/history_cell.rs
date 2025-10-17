@@ -833,18 +833,19 @@ impl HistoryCell for McpToolCallCell {
         }
 
         let mut detail_lines: Vec<Line<'static>> = Vec::new();
+        let detail_wrap_width = (width as usize).saturating_sub(4).max(1);
 
         if let Some(result) = &self.result {
             match result {
                 Ok(mcp_types::CallToolResult { content, .. }) => {
                     if !content.is_empty() {
                         for block in content {
-                            let text = Self::render_content_block(block, width as usize);
+                            let text = Self::render_content_block(block, detail_wrap_width);
                             for segment in text.split('\n') {
                                 let line = Line::from(segment.to_string().dim());
                                 let wrapped = word_wrap_line(
                                     &line,
-                                    RtOptions::new((width as usize).saturating_sub(4))
+                                    RtOptions::new(detail_wrap_width)
                                         .initial_indent("".into())
                                         .subsequent_indent("    ".into()),
                                 );
@@ -857,7 +858,7 @@ impl HistoryCell for McpToolCallCell {
                     let err_line = Line::from(format!("Error: {err}").dim());
                     let wrapped = word_wrap_line(
                         &err_line,
-                        RtOptions::new((width as usize).saturating_sub(4))
+                        RtOptions::new(detail_wrap_width)
                             .initial_indent("".into())
                             .subsequent_indent("    ".into()),
                     );

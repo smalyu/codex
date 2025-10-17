@@ -412,6 +412,11 @@ impl ExecCell {
                     include_prefix: false,
                 },
             );
+            let display_limit = if call.is_user_shell_command {
+                USER_SHELL_TOOL_CALL_MAX_LINES
+            } else {
+                layout.output_max_lines
+            };
 
             if raw_output.lines.is_empty() {
                 lines.extend(prefix_lines(
@@ -422,7 +427,7 @@ impl ExecCell {
             } else {
                 let trimmed_output = Self::truncate_lines_middle(
                     &raw_output.lines,
-                    layout.output_max_lines,
+                    display_limit,
                     raw_output.omitted,
                 );
 
