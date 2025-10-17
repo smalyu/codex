@@ -78,8 +78,8 @@ async fn run_compact_task_inner(
     let mut trimmed_tails: Vec<Vec<ResponseItem>> = Vec::new();
 
     let max_retries = turn_context.client.get_provider().stream_max_retries();
-    let mut context_retries = 0u64;
-    let mut stream_retries = 0u64;
+    let mut context_retries = 0;
+    let mut stream_retries = 0;
 
     let rollout_item = RolloutItem::TurnContext(TurnContextItem {
         cwd: turn_context.cwd.clone(),
