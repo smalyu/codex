@@ -41,7 +41,7 @@ mod tests {
                 .base_instructions
                 .as_ref()
                 .unwrap()
-                .contains("Codex Infty Solver")
+                .contains("You are a brilliant mathematician")
         );
 
         let home = TempDir::new().unwrap();
@@ -53,7 +53,7 @@ mod tests {
                 .base_instructions
                 .as_ref()
                 .unwrap()
-                .contains("Codex Infty Director")
+                .contains("You are the **Director**")
         );
 
         let home = TempDir::new().unwrap();
@@ -65,7 +65,7 @@ mod tests {
                 .base_instructions
                 .as_ref()
                 .unwrap()
-                .contains("Codex Infty Verifier")
+                .contains("You are the **Verifier**")
         );
     }
 
