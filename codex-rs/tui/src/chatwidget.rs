@@ -77,6 +77,7 @@ use crate::bottom_pane::SecurityReviewScopeConfirmView;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
+use crate::bottom_pane::StatusSnapshot;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::clipboard_paste::paste_image_to_temp_png;
@@ -127,10 +128,13 @@ use codex_git_tooling::GhostCommit;
 use codex_git_tooling::GitToolingError;
 use codex_git_tooling::create_ghost_commit;
 use codex_git_tooling::restore_ghost_commit;
+use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use strum::IntoEnumIterator;
 
 const MAX_TRACKED_GHOST_COMMITS: usize = 20;
+const MAX_STATUS_THINKING_LINES: usize = 3;
+const MAX_STATUS_TOOL_CALLS: usize = 4;
 
 // Track information about an in-flight exec command.
 struct RunningCommand {
@@ -258,6 +262,9 @@ pub(crate) struct ChatWidget {
     full_reasoning_buffer: String,
     // Current status header shown in the status indicator.
     current_status_header: String,
+    status_progress: Option<f32>,
+    status_thinking_lines: Vec<String>,
+    status_tool_calls: Vec<(String, String)>,
     // Previous status header to restore after a transient stream retry.
     retry_status_header: Option<String>,
     conversation_id: Option<ConversationId>,
@@ -371,7 +378,88 @@ impl ChatWidget {
             return;
         }
         self.current_status_header = header.clone();
-        self.bottom_pane.update_status_header(header);
+        if self.security_review_context.is_some() {
+            self.bottom_pane.update_status_header(header);
+        }
+    }
+
+    fn clear_status_tracking(&mut self) {
+        self.status_progress = None;
+        self.status_thinking_lines.clear();
+        self.status_tool_calls.clear();
+    }
+
+    fn push_status_snapshot(&mut self) {
+        if self.security_review_context.is_some() {
+            return;
+        }
+
+        let tool_calls: Vec<String> = if self.status_tool_calls.len() <= MAX_STATUS_TOOL_CALLS {
+            self.status_tool_calls
+                .iter()
+                .map(|(_, label)| label.clone())
+                .collect()
+        } else {
+            self.status_tool_calls[self.status_tool_calls.len() - MAX_STATUS_TOOL_CALLS..]
+                .iter()
+                .map(|(_, label)| label.clone())
+                .collect()
+        };
+
+        let snapshot = StatusSnapshot {
+            header: self.current_status_header.clone(),
+            progress: self.status_progress,
+            thinking: self.status_thinking_lines.clone(),
+            tool_calls,
+        };
+        self.bottom_pane.update_status_snapshot(snapshot);
+    }
+
+    fn update_thinking_lines_from_reasoning(&mut self) {
+        if self.security_review_context.is_some() {
+            return;
+        }
+
+        let mut lines: Vec<String> = self
+            .reasoning_buffer
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| truncate_text(line, 160))
+            .collect();
+
+        if lines.len() > MAX_STATUS_THINKING_LINES {
+            let start = lines.len() - MAX_STATUS_THINKING_LINES;
+            lines = lines.split_off(start);
+        }
+
+        self.status_thinking_lines = lines;
+    }
+
+    fn add_tool_call(&mut self, key: String, label: String) {
+        if self.security_review_context.is_some() {
+            return;
+        }
+        self.status_tool_calls
+            .retain(|(existing_key, _)| existing_key != &key);
+        self.status_tool_calls.push((key, label));
+        self.push_status_snapshot();
+    }
+
+    fn remove_tool_call(&mut self, key: &str) {
+        if self.security_review_context.is_some() {
+            return;
+        }
+        let original_len = self.status_tool_calls.len();
+        self.status_tool_calls
+            .retain(|(existing_key, _)| existing_key != key);
+        if self.status_tool_calls.len() != original_len {
+            self.push_status_snapshot();
+        }
+    }
+
+    fn format_exec_command(command: &[String]) -> String {
+        shlex::try_join(command.iter().map(String::as_str)).unwrap_or_else(|_| command.join(" "))
     }
 
     // --- Small event handlers ---
@@ -420,13 +508,13 @@ impl ChatWidget {
         // current reasoning block and extract the first bold element
         // (between **/**) as the chunk header. Show this header as status.
         self.reasoning_buffer.push_str(&delta);
+        self.update_thinking_lines_from_reasoning();
 
         if let Some(header) = extract_first_bold(&self.reasoning_buffer) {
             // Update the shimmer header to the extracted reasoning chunk header.
             self.set_status_header(header);
-        } else {
-            // Fallback while we don't yet have a bold header: leave existing header as-is.
         }
+        self.push_status_snapshot();
         self.request_redraw();
     }
 
@@ -458,15 +546,19 @@ impl ChatWidget {
         self.bottom_pane.clear_ctrl_c_quit_hint();
         self.bottom_pane.set_task_running(true);
         self.retry_status_header = None;
+        self.clear_status_tracking();
         self.set_status_header(String::from("Working"));
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
+        self.push_status_snapshot();
         self.request_redraw();
     }
 
     fn on_task_complete(&mut self, last_agent_message: Option<String>) {
         // If a stream is currently active, finalize it.
         self.flush_answer_stream_with_separator();
+        self.clear_status_tracking();
+        self.push_status_snapshot();
         // Mark task stopped and request redraw now that all content is in history.
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
@@ -583,6 +675,26 @@ impl ChatWidget {
     }
 
     fn on_plan_update(&mut self, update: UpdatePlanArgs) {
+        if self.security_review_context.is_none() {
+            if update.plan.is_empty() {
+                self.status_progress = None;
+            } else {
+                let total = update.plan.len() as f32;
+                let completed = update
+                    .plan
+                    .iter()
+                    .filter(|item| matches!(item.status, StepStatus::Completed))
+                    .count() as f32;
+                let in_progress = update
+                    .plan
+                    .iter()
+                    .filter(|item| matches!(item.status, StepStatus::InProgress))
+                    .count() as f32;
+                let progress = ((completed + in_progress * 0.5) / total).clamp(0.0, 1.0);
+                self.status_progress = Some(progress);
+            }
+            self.push_status_snapshot();
+        }
         self.add_to_history(history_cell::new_plan_update(update));
     }
 
@@ -656,12 +768,15 @@ impl ChatWidget {
         self.defer_or_handle(|q| q.push_mcp_end(ev), |s| s.handle_mcp_end_now(ev2));
     }
 
-    fn on_web_search_begin(&mut self, _ev: WebSearchBeginEvent) {
+    fn on_web_search_begin(&mut self, ev: WebSearchBeginEvent) {
         self.flush_answer_stream_with_separator();
+        let key = format!("web:{}", ev.call_id.as_str());
+        self.add_tool_call(key, "Searching web".to_string());
     }
 
     fn on_web_search_end(&mut self, ev: WebSearchEndEvent) {
         self.flush_answer_stream_with_separator();
+        self.remove_tool_call(&format!("web:{}", ev.call_id.as_str()));
         self.add_to_history(history_cell::new_web_search_call(format!(
             "Searched: {}",
             ev.query
@@ -698,6 +813,7 @@ impl ChatWidget {
             self.retry_status_header = Some(self.current_status_header.clone());
         }
         self.set_status_header(message);
+        self.push_status_snapshot();
     }
 
     /// Periodic tick to commit at most one queued line to history with a small delay,
@@ -774,6 +890,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_exec_end_now(&mut self, ev: ExecCommandEndEvent) {
+        self.remove_tool_call(&format!("exec:{}", ev.call_id.as_str()));
         let running = self.running_commands.remove(&ev.call_id);
         let (command, parsed) = match running {
             Some(rc) => (rc.command, rc.parsed_cmd),
@@ -864,6 +981,11 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
         // Ensure the status indicator is visible while the command runs.
+        let command_display = Self::format_exec_command(&ev.command);
+        let command_display = truncate_text(&command_display, 120);
+        let label = format!("Running {command_display}");
+        let key = format!("exec:{}", ev.call_id.as_str());
+        self.add_tool_call(key, label);
         self.running_commands.insert(
             ev.call_id.clone(),
             RunningCommand {
@@ -896,6 +1018,13 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_mcp_begin_now(&mut self, ev: McpToolCallBeginEvent) {
+        let label_text = {
+            let invocation = &ev.invocation;
+            format!("Calling {}::{}", invocation.server, invocation.tool)
+        };
+        let label_text = truncate_text(&label_text, 120);
+        let key = format!("mcp:{}", ev.call_id.as_str());
+        self.add_tool_call(key, label_text);
         self.flush_answer_stream_with_separator();
         self.flush_active_cell();
         self.active_cell = Some(Box::new(history_cell::new_active_mcp_tool_call(
@@ -913,6 +1042,7 @@ impl ChatWidget {
             duration,
             result,
         } = ev;
+        self.remove_tool_call(&format!("mcp:{}", call_id.as_str()));
 
         let extra_cell = match self
             .active_cell
@@ -1003,6 +1133,9 @@ impl ChatWidget {
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
             current_status_header: String::from("Working"),
+            status_progress: None,
+            status_thinking_lines: Vec::new(),
+            status_tool_calls: Vec::new(),
             retry_status_header: None,
             conversation_id: None,
             queued_user_messages: VecDeque::new(),
@@ -1071,6 +1204,9 @@ impl ChatWidget {
             reasoning_buffer: String::new(),
             full_reasoning_buffer: String::new(),
             current_status_header: String::from("Working"),
+            status_progress: None,
+            status_thinking_lines: Vec::new(),
+            status_tool_calls: Vec::new(),
             retry_status_header: None,
             conversation_id: None,
             queued_user_messages: VecDeque::new(),
@@ -2420,7 +2556,7 @@ impl ChatWidget {
         self.security_review_task = None;
 
         let context = self.security_review_context.take();
-        let (mode, scope_paths, output_root, repo_path, model, provider, started_at, last_log) =
+        let (mode, scope_paths, _output_root, repo_path, model, provider, started_at, last_log) =
             if let Some(ctx) = context {
                 (
                     ctx.mode,

@@ -47,6 +47,7 @@ pub(crate) use chat_composer::InputResult;
 use codex_protocol::custom_prompts::CustomPrompt;
 
 use crate::status_indicator_widget::StatusIndicatorWidget;
+pub(crate) use crate::status_indicator_widget::StatusSnapshot;
 pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
 
@@ -285,6 +286,14 @@ impl BottomPane {
         if let Some(status) = self.status.as_mut() {
             status.update_header(header);
             self.request_redraw();
+        }
+    }
+
+    pub(crate) fn update_status_snapshot(&mut self, snapshot: StatusSnapshot) {
+        if let Some(status) = self.status.as_mut() {
+            status.update_snapshot(snapshot);
+        } else {
+            self.update_status_header(snapshot.header);
         }
     }
 

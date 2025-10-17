@@ -20,9 +20,23 @@ use crate::key_hint;
 use crate::shimmer::shimmer_spans;
 use crate::tui::FrameRequester;
 
+#[derive(Debug, Clone)]
+pub(crate) struct StatusSnapshot {
+    pub(crate) header: String,
+    pub(crate) progress: Option<f32>,
+    pub(crate) thinking: Vec<String>,
+    pub(crate) tool_calls: Vec<String>,
+}
+
 pub(crate) struct StatusIndicatorWidget {
     /// Animated header text (defaults to "Working").
     header: String,
+    /// Percentage progress to display, if available.
+    progress: Option<f32>,
+    /// Recent reasoning lines emitted by the model.
+    thinking_lines: Vec<String>,
+    /// Labels of in-flight tool calls.
+    tool_calls: Vec<String>,
     /// Queued user messages to display under the status line.
     queued_messages: Vec<String>,
 
@@ -54,6 +68,9 @@ impl StatusIndicatorWidget {
     pub(crate) fn new(app_event_tx: AppEventSender, frame_requester: FrameRequester) -> Self {
         Self {
             header: String::from("Working"),
+            progress: None,
+            thinking_lines: Vec::new(),
+            tool_calls: Vec::new(),
             queued_messages: Vec::new(),
             elapsed_running: Duration::ZERO,
             last_resume_at: Instant::now(),
@@ -65,12 +82,14 @@ impl StatusIndicatorWidget {
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
-        // Status line + optional blank line + wrapped queued messages (up to 3 lines per message)
-        // + optional ellipsis line per truncated message + 1 spacer line
+        // Status line + optional thinking/tool call lines + optional blank line + wrapped queued messages
+        // (up to 3 lines per message) + optional ellipsis per truncated message + keybind + spacer line
         let inner_width = width.max(1) as usize;
         let mut total: u16 = 1; // status line
+        total = total.saturating_add(self.thinking_lines.len() as u16);
+        total = total.saturating_add(self.tool_calls.len() as u16);
         if !self.queued_messages.is_empty() {
-            total = total.saturating_add(1); // blank line between status and queued messages
+            total = total.saturating_add(1); // blank line between supplemental and queued messages
         }
         let text_width = inner_width.saturating_sub(3); // account for " ↳ " prefix
         if text_width > 0 {
@@ -106,6 +125,14 @@ impl StatusIndicatorWidget {
     #[cfg(test)]
     pub(crate) fn header(&self) -> &str {
         &self.header
+    }
+
+    pub(crate) fn update_snapshot(&mut self, snapshot: StatusSnapshot) {
+        self.update_header(snapshot.header);
+        self.progress = snapshot.progress;
+        self.thinking_lines = snapshot.thinking;
+        self.tool_calls = snapshot.tool_calls;
+        self.frame_requester.schedule_frame();
     }
 
     /// Replace the queued messages displayed beneath the header.
@@ -181,10 +208,21 @@ impl WidgetRef for StatusIndicatorWidget {
             key_hint::plain(KeyCode::Esc).into(),
             " to interrupt)".dim(),
         ]);
+        if let Some(progress) = self.progress {
+            let pct = (progress.clamp(0.0, 1.0) * 100.0).round();
+            spans.push(" ".into());
+            spans.push(format!("{pct:.0}%").dim());
+        }
 
         // Build lines: status, then queued messages, then spacer.
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(spans));
+        for thinking in &self.thinking_lines {
+            lines.push(vec![" ↺ ".magenta(), thinking.clone().magenta()].into());
+        }
+        for call in &self.tool_calls {
+            lines.push(vec![" ↳ ".cyan(), call.clone().cyan()].into());
+        }
         if !self.queued_messages.is_empty() {
             lines.push(Line::from(""));
         }

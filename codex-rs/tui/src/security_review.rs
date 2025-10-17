@@ -2953,7 +2953,7 @@ async fn generate_threat_model(
     )
     .await
     .map_err(|err| {
-        let mut failure_logs = vec![
+        let failure_logs = vec![
             "Threat model provider returned a response that could not be parsed.".to_string(),
             format!("Model error: {err}"),
             "Double-check API credentials and network availability for the security review process.".to_string(),
@@ -2991,7 +2991,7 @@ async fn generate_threat_model(
         )
         .await
         .map_err(|err| {
-            let mut failure_logs = vec![
+            let failure_logs = vec![
                 "Threat model retry still failed to decode the provider response.".to_string(),
                 format!("Model error: {err}"),
                 "Verify the provider is returning JSON (no HTML/proxy pages) and that credentials are correct.".to_string(),
