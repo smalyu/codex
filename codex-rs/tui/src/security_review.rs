@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use crate::app_event::AppEvent;
-use crate::app_event::SecurityReviewAutoScopeSelection;
 use crate::app_event::SecurityReviewCommandState;
 use crate::app_event_sender::AppEventSender;
 use crate::diff_render::display_path_for;
@@ -45,7 +44,6 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::fs as tokio_fs;
 use tokio::process::Command;
-use tokio::sync::oneshot;
 use tokio::task::spawn_blocking;
 use url::Url;
 
