@@ -71,7 +71,7 @@ const COMMAND_PREVIEW_MAX_GRAPHEMES: usize = 96;
 const AUTO_SCOPE_MODEL: &str = "gpt-5-codex";
 const SPEC_GENERATION_MODEL: &str = "gpt-5-codex";
 const BUG_RERANK_SYSTEM_PROMPT: &str = "You are a senior application security engineer triaging review findings. Reassess customer-facing risk using the supplied repository context and previously generated specs. Only respond with JSON Lines.";
-const BUG_RERANK_CHUNK_SIZE: usize = 4;
+const BUG_RERANK_CHUNK_SIZE: usize = 1;
 const BUG_RERANK_MAX_CONCURRENCY: usize = 32;
 const BUG_RERANK_CONTEXT_MAX_CHARS: usize = 2000;
 const BUG_RERANK_PROMPT_TEMPLATE: &str = r#"
@@ -84,14 +84,17 @@ Spec excerpt (trimmed; pull in concrete details or note if unavailable):
 Examples:
 - External unauthenticated remote code execution on a production API ⇒ risk_score 95, severity "High", reason "unauth RCE takeover".
 - Stored XSS on user dashboards that leaks session tokens ⇒ risk_score 72, severity "High", reason "persistent session theft".
-- Missing rate limit on an internal admin tool behind SSO ⇒ risk_score 30, severity "Low", reason "internal-only behind SSO".
-- Static analysis false positive in dead code ⇒ risk_score 10, severity "Informational", reason "dead code".
+- Originally escalated CSRF on an internal admin tool behind SSO ⇒ risk_score 28, severity "Low", reason "internal-only with SSO".
+- Header injection in a deprecated endpoint with response sanitization ⇒ risk_score 18, severity "Informational", reason "sanitized legacy endpoint".
+- Static analysis high alert that only touches dead code ⇒ risk_score 10, severity "Informational", reason "dead code path".
 
 Instructions:
 - Output severity **only** from ["High","Medium","Low","Informational"]. Map "critical"/"p0" to "High".
 - Produce `risk_score` between 0-100 (higher means greater customer impact) and use the full range for comparability.
-- Anchor decisions in the repository summary, spec excerpt, blame metadata, and locations above. If you still lack context, state the follow-up you’d run (e.g., repo_search, git blame) in the reason.
-- Down-rank issues when strong mitigations (internal-only, dead code, unused feature) materially reduce customer risk. Upgrade when blast radius or exploitability was understated.
+- Review the repository summary, spec excerpt, blame metadata, and file locations before requesting anything new; reuse existing specs or context attachments when possible.
+- If you still lack certainty, request concrete follow-up (e.g., repo_search, read_file, git blame) in the reason and cite the spec section you need.
+- Down-rank issues when mitigations or limited blast radius materially reduce customer risk, even if the initial triage labeled them "High".
+- Upgrade issues when exploitability or exposure was understated, or when multiple components amplify the blast radius.
 - Respond with one JSON object per finding, **in the same order**, formatted exactly as:
   {{"id": <number>, "risk_score": <0-100>, "severity": "<High|Medium|Low|Informational>", "reason": "<≤12 words>"}}
 
