@@ -1125,6 +1125,33 @@ pub(crate) async fn run_security_review(
         bugs_markdown = format!("{table}\n\n{bugs_markdown}");
     }
     bugs_markdown = fix_mermaid_blocks(&bugs_markdown);
+    if !bugs_markdown.trim().is_empty() {
+        record("Polishing bug markdown formatting.".to_string());
+        let fix_prompt = build_fix_markdown_prompt(&bugs_markdown, None);
+        let polished_response = match call_model(
+            &client,
+            &request.provider,
+            &request.auth,
+            MARKDOWN_FIX_MODEL,
+            MARKDOWN_FIX_SYSTEM_PROMPT,
+            &fix_prompt,
+            metrics.clone(),
+            0.0,
+        )
+        .await
+        {
+            Ok(text) => text,
+            Err(err) => {
+                let message = format!("Failed to polish bug markdown: {err}");
+                record(message.clone());
+                return Err(SecurityReviewFailure {
+                    message,
+                    logs: logs.clone(),
+                });
+            }
+        };
+        bugs_markdown = fix_mermaid_blocks(&polished_response);
+    }
 
     let mut report_sections_prefix: Vec<String> = Vec::new();
     if matches!(request.mode, SecurityReviewMode::Full) {
@@ -1148,7 +1175,7 @@ pub(crate) async fn run_security_review(
     } else {
         Some(format!("# Security Findings\n\n{}", bugs_markdown.trim()))
     };
-    let report_markdown = match request.mode {
+    let mut report_markdown = match request.mode {
         SecurityReviewMode::Full => {
             let mut sections = report_sections_prefix.clone();
             if let Some(section) = findings_section.clone() {
@@ -1175,6 +1202,34 @@ pub(crate) async fn run_security_review(
             }
         }
     };
+
+    if let Some(current) = report_markdown.clone() {
+        record("Polishing final report markdown formatting.".to_string());
+        let fix_prompt = build_fix_markdown_prompt(&current, None);
+        let polished_response = match call_model(
+            &client,
+            &request.provider,
+            &request.auth,
+            MARKDOWN_FIX_MODEL,
+            MARKDOWN_FIX_SYSTEM_PROMPT,
+            &fix_prompt,
+            metrics.clone(),
+            0.0,
+        )
+        .await
+        {
+            Ok(text) => text,
+            Err(err) => {
+                let message = format!("Failed to polish final security report: {err}");
+                record(message.clone());
+                return Err(SecurityReviewFailure {
+                    message,
+                    logs: logs.clone(),
+                });
+            }
+        };
+        report_markdown = Some(fix_mermaid_blocks(&polished_response));
+    }
 
     let snapshot = SecurityReviewSnapshot {
         generated_at: OffsetDateTime::now_utc(),
@@ -2403,7 +2458,7 @@ async fn combine_spec_markdown(
         SPEC_GENERATION_MODEL,
         SPEC_COMBINE_SYSTEM_PROMPT,
         &prompt,
-        metrics,
+        metrics.clone(),
         0.1,
     )
     .await
@@ -2418,7 +2473,38 @@ async fn combine_spec_markdown(
     };
     let sanitized = fix_mermaid_blocks(&response);
 
-    if let Err(e) = tokio_fs::write(combined_path, sanitized.as_bytes()).await {
+    let polish_message = "Polishing combined specification markdown formatting.".to_string();
+    if let Some(tx) = progress_sender.as_ref() {
+        tx.send(AppEvent::SecurityReviewLog(polish_message.clone()));
+    }
+    logs.push(polish_message);
+
+    let fix_prompt = build_fix_markdown_prompt(&sanitized, Some(SPEC_COMBINED_MARKDOWN_TEMPLATE));
+    let polished_response = match call_model(
+        client,
+        provider,
+        auth,
+        MARKDOWN_FIX_MODEL,
+        MARKDOWN_FIX_SYSTEM_PROMPT,
+        &fix_prompt,
+        metrics.clone(),
+        0.0,
+    )
+    .await
+    {
+        Ok(text) => text,
+        Err(err) => {
+            let message = format!("Failed to polish combined specification markdown: {err}");
+            if let Some(tx) = progress_sender.as_ref() {
+                tx.send(AppEvent::SecurityReviewLog(message.clone()));
+            }
+            logs.push(message.clone());
+            return Err(SecurityReviewFailure { message, logs });
+        }
+    };
+    let polished = fix_mermaid_blocks(&polished_response);
+
+    if let Err(e) = tokio_fs::write(combined_path, polished.as_bytes()).await {
         return Err(SecurityReviewFailure {
             message: format!(
                 "Failed to write combined specification to {}: {e}",
@@ -2437,7 +2523,7 @@ async fn combine_spec_markdown(
     }
     logs.push(done_message);
 
-    Ok((sanitized, logs))
+    Ok((polished, logs))
 }
 
 fn build_spec_prompt_text(
@@ -2504,6 +2590,31 @@ fn slugify_label(input: &str) -> String {
     } else {
         slug.trim_matches('_').to_string()
     }
+}
+
+fn build_fix_markdown_prompt(original_content: &str, template_hint: Option<&str>) -> String {
+    let mut prompt = String::from(
+        "Read the report below and fix the formatting issues. Write the corrected version as the output.\n\
+Make sure it looks professional and polished, but still concise and to the point.\n\n\
+Some common issues to fix:\n\
+- Unicode bullet points: •\n\
+- Extra backticks around code blocks (``` markers)\n\
+- Mermaid diagrams: nodes with unescaped characters like () or []\n\
+- Incorrect number continuation (e.g. 1. 1. 1.)\n",
+    );
+    if let Some(template) = template_hint {
+        prompt
+            .push_str("\nWhen fixing, ensure the output conforms to this template:\n<template>\n");
+        prompt.push_str(template);
+        prompt.push_str("\n</template>\n");
+    }
+    prompt.push_str("\nOriginal Report:\n<original_report>\n");
+    prompt.push_str(original_content);
+    prompt.push_str(
+        "\n</original_report>\n\n# Output\n- A valid markdown report\n\n# Important:\n- Do not add emojis, or any filler text in the output.\n- Do not add AI summary or thinking process in the output (usually at the beginning or end of the response)\n- Do not remove, rewrite, or replace any image/GIF/video embeds. If the input contains media embeds (e.g., ![alt](path) or <img> or <video>), preserve them exactly as-is, including their paths and alt text.\n- Do not insert any placeholder or disclaimer text about media not being included or omitted. If the media path looks local or absolute, keep it; do not change or comment on it.\n- Do not remove any existing formatting, like bold/italic/underline/code/etc.\n",
+    );
+    prompt.push_str(MARKDOWN_OUTPUT_GUARD);
+    prompt
 }
 
 async fn analyze_files_individually(
@@ -3080,58 +3191,70 @@ async fn run_content_search(
         return SearchResult::NoMatches;
     }
 
-    metrics.record_shell_call();
+    let mut current_mode = mode;
+    let mut allow_regex_fallback = true;
 
-    let mut command = Command::new("rg");
-    command
-        .arg("--max-count")
-        .arg("20")
-        .arg("--with-filename")
-        .arg("--color")
-        .arg("never")
-        .arg("--line-number");
+    loop {
+        metrics.record_shell_call();
 
-    if matches!(mode, SearchMode::Literal) {
-        command.arg("--fixed-strings");
-    }
+        let mut command = Command::new("rg");
+        command
+            .arg("--max-count")
+            .arg("20")
+            .arg("--with-filename")
+            .arg("--color")
+            .arg("never")
+            .arg("--line-number");
 
-    if pattern.contains('\n') {
-        command.arg("--multiline");
-        command.arg("--multiline-dotall");
-    }
-
-    command.arg(pattern).current_dir(repo_root);
-
-    let output = match command.output().await {
-        Ok(output) => output,
-        Err(err) => {
-            return SearchResult::Error(format!("failed to run rg: {err}"));
+        if matches!(current_mode, SearchMode::Literal) {
+            command.arg("--fixed-strings");
         }
-    };
 
-    match output.status.code() {
-        Some(0) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if text.is_empty() {
-                return SearchResult::NoMatches;
+        if pattern.contains('\n') {
+            command.arg("--multiline");
+            command.arg("--multiline-dotall");
+        }
+
+        command.arg(pattern).current_dir(repo_root);
+
+        let output = match command.output().await {
+            Ok(output) => output,
+            Err(err) => {
+                return SearchResult::Error(format!("failed to run rg: {err}"));
             }
-            if text.len() > MAX_SEARCH_OUTPUT_CHARS {
-                let mut boundary = MAX_SEARCH_OUTPUT_CHARS;
-                while boundary > 0 && !text.is_char_boundary(boundary) {
-                    boundary -= 1;
+        };
+
+        match output.status.code() {
+            Some(0) => {
+                let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if text.is_empty() {
+                    return SearchResult::NoMatches;
                 }
-                text.truncate(boundary);
-                text.push_str("\n... (truncated)");
+                if text.len() > MAX_SEARCH_OUTPUT_CHARS {
+                    let mut boundary = MAX_SEARCH_OUTPUT_CHARS;
+                    while boundary > 0 && !text.is_char_boundary(boundary) {
+                        boundary -= 1;
+                    }
+                    text.truncate(boundary);
+                    text.push_str("\n... (truncated)");
+                }
+                return SearchResult::Matches(text);
             }
-            SearchResult::Matches(text)
-        }
-        Some(1) => SearchResult::NoMatches,
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if stderr.is_empty() {
-                SearchResult::Error("rg returned an error".to_string())
-            } else {
-                SearchResult::Error(format!("rg error: {stderr}"))
+            Some(1) => return SearchResult::NoMatches,
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    return SearchResult::Error("rg returned an error".to_string());
+                }
+                if allow_regex_fallback
+                    && matches!(current_mode, SearchMode::Regex)
+                    && is_regex_parse_error(&stderr)
+                {
+                    current_mode = SearchMode::Literal;
+                    allow_regex_fallback = false;
+                    continue;
+                }
+                return SearchResult::Error(format!("rg error: {stderr}"));
             }
         }
     }
@@ -3147,68 +3270,85 @@ async fn run_file_search(
         return SearchResult::NoMatches;
     }
 
-    let mut command = Command::new("rg");
-    metrics.record_shell_call();
-    command
-        .arg("--files-with-matches")
-        .arg("--no-messages")
-        .arg("--sortr=modified");
+    let mut current_mode = mode;
+    let mut allow_regex_fallback = true;
 
-    if matches!(mode, SearchMode::Literal) {
-        command.arg("--fixed-strings");
-    }
+    loop {
+        let mut command = Command::new("rg");
+        metrics.record_shell_call();
+        command
+            .arg("--files-with-matches")
+            .arg("--no-messages")
+            .arg("--sortr=modified");
 
-    if pattern.contains('\n') {
-        command.arg("--multiline");
-        command.arg("--multiline-dotall");
-    }
-
-    command.arg(pattern).current_dir(repo_root);
-
-    let output = match command.output().await {
-        Ok(output) => output,
-        Err(err) => {
-            return SearchResult::Error(format!("failed to run rg: {err}"));
+        if matches!(current_mode, SearchMode::Literal) {
+            command.arg("--fixed-strings");
         }
-    };
 
-    match output.status.code() {
-        Some(0) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut lines = Vec::new();
-            let mut total = 0usize;
-            for line in stdout.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
+        if pattern.contains('\n') {
+            command.arg("--multiline");
+            command.arg("--multiline-dotall");
+        }
+
+        command.arg(pattern).current_dir(repo_root);
+
+        let output = match command.output().await {
+            Ok(output) => output,
+            Err(err) => {
+                return SearchResult::Error(format!("failed to run rg: {err}"));
+            }
+        };
+
+        match output.status.code() {
+            Some(0) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut lines = Vec::new();
+                let mut total = 0usize;
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    total += 1;
+                    if lines.len() < MAX_FILE_SEARCH_RESULTS {
+                        lines.push(format!("- {trimmed}"));
+                    }
+                }
+                if lines.is_empty() {
+                    return SearchResult::NoMatches;
+                }
+                let mut text = lines.join("\n");
+                if text.len() > MAX_SEARCH_OUTPUT_CHARS {
+                    text.truncate(MAX_SEARCH_OUTPUT_CHARS);
+                    text.push_str("\n... (truncated)");
+                } else if total > MAX_FILE_SEARCH_RESULTS {
+                    text.push_str("\n... (truncated)");
+                }
+                return SearchResult::Matches(text);
+            }
+            Some(1) => return SearchResult::NoMatches,
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                if stderr.is_empty() {
+                    return SearchResult::Error("rg returned an error".to_string());
+                }
+                if allow_regex_fallback
+                    && matches!(current_mode, SearchMode::Regex)
+                    && is_regex_parse_error(&stderr)
+                {
+                    current_mode = SearchMode::Literal;
+                    allow_regex_fallback = false;
                     continue;
                 }
-                total += 1;
-                if lines.len() < MAX_FILE_SEARCH_RESULTS {
-                    lines.push(format!("- {trimmed}"));
-                }
-            }
-            if lines.is_empty() {
-                return SearchResult::NoMatches;
-            }
-            let mut text = lines.join("\n");
-            if text.len() > MAX_SEARCH_OUTPUT_CHARS {
-                text.truncate(MAX_SEARCH_OUTPUT_CHARS);
-                text.push_str("\n... (truncated)");
-            } else if total > MAX_FILE_SEARCH_RESULTS {
-                text.push_str("\n... (truncated)");
-            }
-            SearchResult::Matches(text)
-        }
-        Some(1) => SearchResult::NoMatches,
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if stderr.is_empty() {
-                SearchResult::Error("rg returned an error".to_string())
-            } else {
-                SearchResult::Error(format!("rg error: {stderr}"))
+                return SearchResult::Error(format!("rg error: {stderr}"));
             }
         }
     }
+}
+
+fn is_regex_parse_error(stderr: &str) -> bool {
+    let lowered = stderr.to_ascii_lowercase();
+    lowered.contains("regex parse error") || lowered.contains("error parsing regex")
 }
 
 fn extract_bug_summaries(
@@ -5408,6 +5548,9 @@ const SPEC_COMBINE_SYSTEM_PROMPT: &str = "You are consolidating multiple specifi
 
 const SPEC_PROMPT_TEMPLATE: &str = "You have access to the source code inside the following locations:\n{project_locations}\n\nFocus on {target_label}.\nGenerate a security-focused project specification. Parallelize discovery when enumerating files and avoid spending time on tests, vendored dependencies, or build artefacts. Follow the template exactly and return only markdown.\n\nTemplate:\n{spec_template}\n";
 
+const MARKDOWN_OUTPUT_GUARD: &str = "\n# Output Guard (strict)\n    - Output only the final markdown content requested.\n    - Do not include goal, analysis, planning, chain-of-thought, or step lists.\n    - Do not echo prompt sections like \"Task\", \"Steps\", \"Output\", or \"Important\".\n    - Do not include any XML/angle-bracket blocks (e.g., <...> inputs) in the output.\n    - Do not wrap the entire response in code fences; use code fences only for code snippets.\n    - Do not include apologies, disclaimers, or references to being an AI model.\n";
+const MARKDOWN_FIX_MODEL: &str = "gpt-5-codex";
+const MARKDOWN_FIX_SYSTEM_PROMPT: &str = "You are a meticulous technical editor. Polish markdown formatting while preserving the original security analysis content. Focus on fixing numbering, bullet spacing, code fences, and diagram syntax without adding or removing information.";
 const SPEC_MARKDOWN_TEMPLATE: &str = "# Project Specification\n- Location: {target_label}\n- Prepared by: {model_name}\n- Date: {date}\n- In-scope paths:\n```\n{project_locations}\n```\n\n## Overview\nSummarize the product or service, primary users, and the business problem it solves. Highlight the most security relevant entry points.\n\n## Architecture Summary\nDescribe the high-level system architecture, major services, data stores, and external integrations. Include a concise mermaid flowchart when it improves clarity.\n\n## Components\nList 5-8 major components. For each, note the role, responsibilities, key dependencies, and security-critical behavior.\n\n## Business Flows\nDocument up to 5 important flows (CRUD, external integrations, workflow orchestration). For each flow capture triggers, main steps, data touched, and security notes. Include a short mermaid sequence diagram if helpful.\n\n## Authentication\nExplain how principals authenticate, token lifecycles, libraries used, and how secrets are managed.\n\n## Authorization\nDescribe the authorization model, enforcement points, privileged roles, and escalation paths.\n\n## Data Classification\nIdentify sensitive data types handled by the project and where they are stored or transmitted.\n\n## Infrastructure and Deployment\nSummarize infrastructure-as-code, runtime platforms, and configuration or secret handling that affects security posture.\n";
 
 const SPEC_COMBINE_PROMPT_TEMPLATE: &str = "You previously generated specification drafts for the following code locations:\n{project_locations}\n\nDraft content:\n{spec_drafts}\n\nTask: merge these drafts into one comprehensive specification that describes the entire project. Remove duplication, keep terminology consistent, and ensure the final document reads as a single report. Follow the template exactly and return only markdown.\n\nTemplate:\n{combined_template}\n";
