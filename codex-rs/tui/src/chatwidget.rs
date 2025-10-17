@@ -2137,6 +2137,7 @@ impl ChatWidget {
             return;
         }
 
+        let mut scope_prompt = scope_prompt;
         let mut resolved_paths: Vec<PathBuf> = Vec::new();
         let mut display_paths: Vec<String> = Vec::new();
 
@@ -2173,6 +2174,18 @@ impl ChatWidget {
                 );
                 return;
             }
+        }
+
+        if resolved_paths.is_empty() && scope_prompt.is_none() {
+            let default_prompt = match mode {
+                SecurityReviewMode::Full => {
+                    "Select the most security-relevant directories for a full security review."
+                }
+                SecurityReviewMode::Bugs => {
+                    "Select the highest risk areas for a quick security bug sweep."
+                }
+            };
+            scope_prompt = Some(default_prompt.to_string());
         }
 
         let mut context_paths = display_paths.clone();
