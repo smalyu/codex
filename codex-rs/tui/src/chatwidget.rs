@@ -308,6 +308,25 @@ fn create_initial_user_message(text: String, image_paths: Vec<PathBuf>) -> Optio
     }
 }
 
+fn annotate_scope_prompt(prompt: &str) -> String {
+    let abbreviations: Vec<&str> = prompt
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| {
+            let len = token.chars().count();
+            len >= 2 && token.chars().all(|c| c.is_ascii_uppercase())
+        })
+        .collect();
+
+    if abbreviations.is_empty() {
+        return prompt.to_string();
+    }
+
+    let abbreviations_list = abbreviations.join(", ");
+    format!(
+        "{prompt}\n\nAbbreviations detected: {abbreviations_list}. If you can infer their meaning from the repository context, state your assumption; otherwise highlight that clarification is needed."
+    )
+}
+
 struct SecurityReviewContext {
     mode: SecurityReviewMode,
     include_paths: Vec<String>,
@@ -2249,6 +2268,10 @@ impl ChatWidget {
             last_log: None,
         });
 
+        let annotated_scope_prompt = scope_prompt
+            .as_ref()
+            .map(|prompt| annotate_scope_prompt(prompt.as_str()));
+
         let request = SecurityReviewRequest {
             repo_path,
             include_paths: resolved_paths,
@@ -2260,7 +2283,7 @@ impl ChatWidget {
             provider: self.config.model_provider.clone(),
             auth: self.auth_manager.auth(),
             progress_sender: Some(self.app_event_tx.clone()),
-            auto_scope_prompt: scope_prompt,
+            auto_scope_prompt: annotated_scope_prompt,
         };
 
         let tx = self.app_event_tx.clone();
