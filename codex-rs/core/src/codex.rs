@@ -1057,6 +1057,66 @@ impl Session {
         }
     }
 
+    pub async fn append_processed_item(
+        &self,
+        sub_id: &str,
+        item: ProcessedResponseItem,
+    ) -> Option<usize> {
+        let mut active = self.active_turn.lock().await;
+        if let Some(at) = active.as_mut() {
+            let mut ts = at.turn_state.lock().await;
+            Some(ts.push_processed_item(item))
+        } else {
+            trace!(sub_id, "dropping processed item; turn not active");
+            None
+        }
+    }
+
+    pub async fn update_processed_item_response(
+        &self,
+        sub_id: &str,
+        index: usize,
+        response: Option<ResponseInputItem>,
+    ) {
+        let mut active = self.active_turn.lock().await;
+        if let Some(at) = active.as_mut() {
+            let mut ts = at.turn_state.lock().await;
+            ts.set_processed_item_response(index, response);
+        } else {
+            trace!(
+                sub_id,
+                index, "dropping processed item update; turn not active"
+            );
+        }
+    }
+
+    pub async fn take_processed_items(&self, _sub_id: &str) -> Vec<ProcessedResponseItem> {
+        let mut active = self.active_turn.lock().await;
+        match active.as_mut() {
+            Some(at) => {
+                let mut ts = at.turn_state.lock().await;
+                ts.take_processed_items()
+            }
+            None => Vec::with_capacity(0),
+        }
+    }
+
+    pub(crate) async fn process_pending_items_after_abort(
+        &self,
+        processed_items: Vec<ProcessedResponseItem>,
+        is_review_mode: bool,
+    ) {
+        if processed_items.is_empty() {
+            return;
+        }
+        let ProcessedItemsSummary { history_items, .. } =
+            summarize_processed_items(processed_items);
+        if history_items.is_empty() || is_review_mode {
+            return;
+        }
+        self.record_conversation_items(&history_items).await;
+    }
+
     pub async fn call_tool(
         &self,
         server: &str,
@@ -1753,128 +1813,20 @@ pub(crate) async fn run_task(
                 let token_limit_reached = total_usage_tokens
                     .map(|tokens| (tokens as i64) >= limit)
                     .unwrap_or(false);
-                let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
-                let mut responses = Vec::<ResponseInputItem>::new();
-                for processed_response_item in processed_items {
-                    let ProcessedResponseItem { item, response } = processed_response_item;
-                    match (&item, &response) {
-                        (ResponseItem::Message { role, .. }, None) if role == "assistant" => {
-                            // If the model returned a message, we need to record it.
-                            items_to_record_in_conversation_history.push(item);
-                        }
-                        (
-                            ResponseItem::LocalShellCall { .. },
-                            Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
-                        ) => {
-                            items_to_record_in_conversation_history.push(item);
-                            items_to_record_in_conversation_history.push(
-                                ResponseItem::FunctionCallOutput {
-                                    call_id: call_id.clone(),
-                                    output: output.clone(),
-                                },
-                            );
-                        }
-                        (
-                            ResponseItem::FunctionCall { .. },
-                            Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
-                        ) => {
-                            items_to_record_in_conversation_history.push(item);
-                            items_to_record_in_conversation_history.push(
-                                ResponseItem::FunctionCallOutput {
-                                    call_id: call_id.clone(),
-                                    output: output.clone(),
-                                },
-                            );
-                        }
-                        (
-                            ResponseItem::CustomToolCall { .. },
-                            Some(ResponseInputItem::CustomToolCallOutput { call_id, output }),
-                        ) => {
-                            items_to_record_in_conversation_history.push(item);
-                            items_to_record_in_conversation_history.push(
-                                ResponseItem::CustomToolCallOutput {
-                                    call_id: call_id.clone(),
-                                    output: output.clone(),
-                                },
-                            );
-                        }
-                        (
-                            ResponseItem::FunctionCall { .. },
-                            Some(ResponseInputItem::McpToolCallOutput { call_id, result }),
-                        ) => {
-                            items_to_record_in_conversation_history.push(item);
-                            let output = match result {
-                                Ok(call_tool_result) => {
-                                    convert_call_tool_result_to_function_call_output_payload(
-                                        call_tool_result,
-                                    )
-                                }
-                                Err(err) => FunctionCallOutputPayload {
-                                    content: err.clone(),
-                                    success: Some(false),
-                                },
-                            };
-                            items_to_record_in_conversation_history.push(
-                                ResponseItem::FunctionCallOutput {
-                                    call_id: call_id.clone(),
-                                    output,
-                                },
-                            );
-                        }
-                        (
-                            ResponseItem::LocalShellCall {
-                                call_id: Some(call_id),
-                                ..
-                            },
-                            None,
-                        ) => {
-                            items_to_record_in_conversation_history.push(item.clone());
-                            items_to_record_in_conversation_history
-                                .push(make_aborted_function_call_output(call_id.clone()));
-                        }
-                        (ResponseItem::FunctionCall { call_id, .. }, None) => {
-                            items_to_record_in_conversation_history.push(item.clone());
-                            items_to_record_in_conversation_history
-                                .push(make_aborted_function_call_output(call_id.clone()));
-                        }
-                        (ResponseItem::CustomToolCall { call_id, .. }, None) => {
-                            items_to_record_in_conversation_history.push(item.clone());
-                            items_to_record_in_conversation_history
-                                .push(make_aborted_custom_tool_call_output(call_id.clone()));
-                        }
-                        (
-                            ResponseItem::Reasoning {
-                                id,
-                                summary,
-                                content,
-                                encrypted_content,
-                            },
-                            None,
-                        ) => {
-                            items_to_record_in_conversation_history.push(ResponseItem::Reasoning {
-                                id: id.clone(),
-                                summary: summary.clone(),
-                                content: content.clone(),
-                                encrypted_content: encrypted_content.clone(),
-                            });
-                        }
-                        _ => {
-                            warn!("Unexpected response item: {item:?} with response: {response:?}");
-                        }
-                    };
-                    if let Some(response) = response {
-                        responses.push(response);
-                    }
-                }
+                let ProcessedItemsSummary {
+                    history_items,
+                    responses,
+                } = summarize_processed_items(processed_items);
 
-                // Only attempt to take the lock if there is something to record.
-                if !items_to_record_in_conversation_history.is_empty() {
+                // Clear the pending buffer before any awaited work so abort paths cannot replay
+                // already-recorded items.
+                let _ = sess.take_processed_items(&sub_id).await;
+
+                if !history_items.is_empty() {
                     if is_review_mode {
-                        review_thread_history
-                            .extend(items_to_record_in_conversation_history.clone());
+                        review_thread_history.extend(history_items.clone());
                     } else {
-                        sess.record_conversation_items(&items_to_record_in_conversation_history)
-                            .await;
+                        sess.record_conversation_items(&history_items).await;
                     }
                 }
 
@@ -1903,9 +1855,7 @@ pub(crate) async fn run_task(
                 auto_compact_recently_attempted = false;
 
                 if responses.is_empty() {
-                    last_agent_message = get_last_assistant_message_from_turn(
-                        &items_to_record_in_conversation_history,
-                    );
+                    last_agent_message = get_last_assistant_message_from_turn(&history_items);
                     sess.notifier()
                         .notify(&UserNotification::AgentTurnComplete {
                             thread_id: sess.conversation_id.to_string(),
@@ -2067,7 +2017,7 @@ async fn run_turn(
 /// events map to a `ResponseItem`. A `ResponseItem` may need to be
 /// "handled" such that it produces a `ResponseInputItem` that needs to be
 /// sent back to the model on the next turn.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ProcessedResponseItem {
     pub(crate) item: ResponseItem,
     pub(crate) response: Option<ResponseInputItem>,
@@ -2183,10 +2133,6 @@ async fn try_run_turn(
             }
         };
 
-        let add_completed = &mut |response_item: ProcessedResponseItem| {
-            output.push_back(future::ready(Ok(response_item)).boxed());
-        };
-
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
@@ -2196,13 +2142,40 @@ async fn try_run_turn(
                         tracing::info!("ToolCall: {} {}", call.tool_name, payload_preview);
 
                         let response = tool_runtime.handle_tool_call(call);
+                        let placeholder_index = sess
+                            .append_processed_item(
+                                sub_id,
+                                ProcessedResponseItem {
+                                    item: item.clone(),
+                                    response: None,
+                                },
+                            )
+                            .await;
 
+                        let sess_for_store = Arc::clone(&sess);
+                        let sub_id_for_store = sub_id.to_string();
                         output.push_back(
                             async move {
-                                Ok(ProcessedResponseItem {
+                                let response_item = response.await?;
+                                if let Some(index) = placeholder_index {
+                                    sess_for_store
+                                        .update_processed_item_response(
+                                            &sub_id_for_store,
+                                            index,
+                                            Some(response_item.clone()),
+                                        )
+                                        .await;
+                                }
+                                let processed = ProcessedResponseItem {
                                     item,
-                                    response: Some(response.await?),
-                                })
+                                    response: Some(response_item),
+                                };
+                                if placeholder_index.is_none() {
+                                    let _ = sess_for_store
+                                        .append_processed_item(&sub_id_for_store, processed.clone())
+                                        .await;
+                                }
+                                Ok(processed)
                             }
                             .boxed(),
                         );
@@ -2215,7 +2188,9 @@ async fn try_run_turn(
                             item.clone(),
                         )
                         .await?;
-                        add_completed(ProcessedResponseItem { item, response });
+                        let processed = ProcessedResponseItem { item, response };
+                        let _ = sess.append_processed_item(sub_id, processed.clone()).await;
+                        output.push_back(future::ready(Ok(processed)).boxed());
                     }
                     Err(FunctionCallError::MissingLocalShellCallId) => {
                         let msg = "LocalShellCall without call_id or id";
@@ -2232,10 +2207,12 @@ async fn try_run_turn(
                                 success: None,
                             },
                         };
-                        add_completed(ProcessedResponseItem {
+                        let processed = ProcessedResponseItem {
                             item,
                             response: Some(response),
-                        });
+                        };
+                        let _ = sess.append_processed_item(sub_id, processed.clone()).await;
+                        output.push_back(future::ready(Ok(processed)).boxed());
                     }
                     Err(FunctionCallError::RespondToModel(message)) => {
                         let response = ResponseInputItem::FunctionCallOutput {
@@ -2245,10 +2222,12 @@ async fn try_run_turn(
                                 success: None,
                             },
                         };
-                        add_completed(ProcessedResponseItem {
+                        let processed = ProcessedResponseItem {
                             item,
                             response: Some(response),
-                        });
+                        };
+                        let _ = sess.append_processed_item(sub_id, processed.clone()).await;
+                        output.push_back(future::ready(Ok(processed)).boxed());
                     }
                     Err(FunctionCallError::Fatal(message)) => {
                         return Err(CodexErr::Fatal(message));
@@ -2530,6 +2509,9 @@ mod tests {
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_app_server_protocol::AuthMode;
     use codex_protocol::models::ContentItem;
+    use codex_protocol::models::LocalShellAction;
+    use codex_protocol::models::LocalShellExecAction;
+    use codex_protocol::models::LocalShellStatus;
     use codex_protocol::models::ResponseItem;
 
     use mcp_types::ContentBlock;
@@ -3049,6 +3031,219 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn abort_regular_task_records_pending_tool_history() {
+        let (sess, tc, rx) = make_session_and_context_with_rx();
+        let sub_id = "sub-regular-history".to_string();
+        let input = vec![InputItem::Text {
+            text: "pending tool".to_string(),
+        }];
+        sess.spawn_task(
+            Arc::clone(&tc),
+            sub_id.clone(),
+            input,
+            NeverEndingTask(TaskKind::Regular),
+        )
+        .await;
+
+        let call_id = "call-regular".to_string();
+        sess.append_processed_item(
+            &sub_id,
+            ProcessedResponseItem {
+                item: ResponseItem::LocalShellCall {
+                    id: Some("local-regular".to_string()),
+                    call_id: Some(call_id.clone()),
+                    status: LocalShellStatus::InProgress,
+                    action: LocalShellAction::Exec(LocalShellExecAction {
+                        command: vec!["curl".to_string(), "https://example.com".to_string()],
+                        timeout_ms: Some(1_000),
+                        working_directory: None,
+                        env: None,
+                        user: None,
+                    }),
+                },
+                response: None,
+            },
+        )
+        .await;
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+
+        let evt = rx.recv().await.expect("event");
+        match evt.msg {
+            EventMsg::TurnAborted(e) => assert_eq!(TurnAbortReason::Interrupted, e.reason),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+
+        let history = sess.history_snapshot().await;
+        let call_index = history.iter().position(|item| {
+            matches!(
+                item,
+                ResponseItem::LocalShellCall {
+                    call_id: Some(id),
+                    ..
+                } if id == &call_id
+            )
+        });
+        let output_index = history.iter().position(|item| {
+            matches!(
+                item,
+                ResponseItem::FunctionCallOutput { call_id: id, output }
+                    if id == &call_id
+                        && output.content == "aborted"
+                        && output.success == Some(false)
+            )
+        });
+
+        assert!(call_index.is_some(), "local shell call not recorded");
+        assert!(output_index.is_some(), "aborted output not recorded");
+        assert!(
+            call_index.unwrap() < output_index.unwrap(),
+            "output should follow tool call"
+        );
+    }
+
+    #[tokio::test]
+    async fn abort_review_task_ignores_pending_tool_history() {
+        let (sess, tc, rx) = make_session_and_context_with_rx();
+        let sub_id = "sub-review-history".to_string();
+        let input = vec![InputItem::Text {
+            text: "pending review tool".to_string(),
+        }];
+        sess.spawn_task(
+            Arc::clone(&tc),
+            sub_id.clone(),
+            input,
+            NeverEndingTask(TaskKind::Review),
+        )
+        .await;
+
+        sess.append_processed_item(
+            &sub_id,
+            ProcessedResponseItem {
+                item: ResponseItem::LocalShellCall {
+                    id: Some("local-review".to_string()),
+                    call_id: Some("call-review".to_string()),
+                    status: LocalShellStatus::InProgress,
+                    action: LocalShellAction::Exec(LocalShellExecAction {
+                        command: vec!["curl".to_string(), "https://example.com".to_string()],
+                        timeout_ms: Some(1_000),
+                        working_directory: None,
+                        env: None,
+                        user: None,
+                    }),
+                },
+                response: None,
+            },
+        )
+        .await;
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+
+        let first = rx.recv().await.expect("first event");
+        match first.msg {
+            EventMsg::ExitedReviewMode(ev) => assert!(ev.review_output.is_none()),
+            other => panic!("unexpected first event: {other:?}"),
+        }
+        let second = rx.recv().await.expect("second event");
+        match second.msg {
+            EventMsg::TurnAborted(e) => assert_eq!(TurnAbortReason::Interrupted, e.reason),
+            other => panic!("unexpected second event: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+
+        let history = sess.history_snapshot().await;
+        assert!(
+            !history
+                .iter()
+                .any(|item| matches!(item, ResponseItem::LocalShellCall { .. })),
+            "review mode should not record pending tool call in main history"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_pending_items_after_abort_records_aborted_tool_calls() {
+        let (session, _) = make_session_and_context();
+        let call_id = "call-123".to_string();
+        let processed_items = vec![ProcessedResponseItem {
+            item: ResponseItem::LocalShellCall {
+                id: Some("local-1".to_string()),
+                call_id: Some(call_id.clone()),
+                status: LocalShellStatus::InProgress,
+                action: LocalShellAction::Exec(LocalShellExecAction {
+                    command: vec!["curl".to_string(), "https://example.com".to_string()],
+                    timeout_ms: Some(1_000),
+                    working_directory: None,
+                    env: None,
+                    user: None,
+                }),
+            },
+            response: None,
+        }];
+
+        session
+            .process_pending_items_after_abort(processed_items, false)
+            .await;
+
+        let history = session.history_snapshot().await;
+        let call_index = history.iter().position(|item| {
+            matches!(
+                item,
+                ResponseItem::LocalShellCall {
+                    call_id: Some(id),
+                    ..
+                } if id == &call_id
+            )
+        });
+        let output_index = history.iter().position(|item| {
+            matches!(
+                item,
+                ResponseItem::FunctionCallOutput { call_id: id, output }
+                    if id == &call_id
+                        && output.content == "aborted"
+                        && output.success == Some(false)
+            )
+        });
+
+        assert!(call_index.is_some(), "local shell call not recorded");
+        assert!(output_index.is_some(), "aborted output not recorded");
+        assert!(
+            call_index.unwrap() < output_index.unwrap(),
+            "output should follow tool call"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_pending_items_after_abort_skips_review_mode_history() {
+        let (session, _) = make_session_and_context();
+        let processed_items = vec![ProcessedResponseItem {
+            item: ResponseItem::LocalShellCall {
+                id: Some("review-1".to_string()),
+                call_id: Some("call-456".to_string()),
+                status: LocalShellStatus::InProgress,
+                action: LocalShellAction::Exec(LocalShellExecAction {
+                    command: vec!["echo".to_string()],
+                    timeout_ms: Some(1_000),
+                    working_directory: None,
+                    env: None,
+                    user: None,
+                }),
+            },
+            response: None,
+        }];
+
+        session
+            .process_pending_items_after_abort(processed_items, true)
+            .await;
+
+        let history = session.history_snapshot().await;
+        assert!(
+            history.is_empty(),
+            "no history should be recorded in review mode"
+        );
+    }
+
+    #[tokio::test]
     async fn fatal_tool_error_stops_turn_and_reports_error() {
         let (session, turn_context, _rx) = make_session_and_context_with_rx();
         let router = ToolRouter::from_config(
@@ -3292,4 +3487,129 @@ mod tests {
         pretty_assertions::assert_eq!(exec_output.metadata, ResponseExecMetadata { exit_code: 0 });
         assert!(exec_output.output.contains("hi"));
     }
+}
+struct ProcessedItemsSummary {
+    history_items: Vec<ResponseItem>,
+    responses: Vec<ResponseInputItem>,
+}
+
+fn summarize_processed_items(processed_items: Vec<ProcessedResponseItem>) -> ProcessedItemsSummary {
+    let mut summary = ProcessedItemsSummary {
+        history_items: Vec::new(),
+        responses: Vec::new(),
+    };
+
+    for processed_response_item in processed_items {
+        let ProcessedResponseItem { item, response } = processed_response_item;
+        match (&item, &response) {
+            (ResponseItem::Message { role, .. }, None) if role == "assistant" => {
+                summary.history_items.push(item.clone());
+            }
+            (
+                ResponseItem::LocalShellCall { .. },
+                Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
+            ) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(ResponseItem::FunctionCallOutput {
+                        call_id: call_id.clone(),
+                        output: output.clone(),
+                    });
+            }
+            (
+                ResponseItem::FunctionCall { .. },
+                Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
+            ) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(ResponseItem::FunctionCallOutput {
+                        call_id: call_id.clone(),
+                        output: output.clone(),
+                    });
+            }
+            (
+                ResponseItem::CustomToolCall { .. },
+                Some(ResponseInputItem::CustomToolCallOutput { call_id, output }),
+            ) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(ResponseItem::CustomToolCallOutput {
+                        call_id: call_id.clone(),
+                        output: output.clone(),
+                    });
+            }
+            (
+                ResponseItem::FunctionCall { .. },
+                Some(ResponseInputItem::McpToolCallOutput { call_id, result }),
+            ) => {
+                summary.history_items.push(item.clone());
+                let output = match result {
+                    Ok(call_tool_result) => {
+                        convert_call_tool_result_to_function_call_output_payload(call_tool_result)
+                    }
+                    Err(err) => FunctionCallOutputPayload {
+                        content: err.clone(),
+                        success: Some(false),
+                    },
+                };
+                summary
+                    .history_items
+                    .push(ResponseItem::FunctionCallOutput {
+                        call_id: call_id.clone(),
+                        output,
+                    });
+            }
+            (
+                ResponseItem::LocalShellCall {
+                    call_id: Some(call_id),
+                    ..
+                },
+                None,
+            ) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(make_aborted_function_call_output(call_id.clone()));
+            }
+            (ResponseItem::FunctionCall { call_id, .. }, None) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(make_aborted_function_call_output(call_id.clone()));
+            }
+            (ResponseItem::CustomToolCall { call_id, .. }, None) => {
+                summary.history_items.push(item.clone());
+                summary
+                    .history_items
+                    .push(make_aborted_custom_tool_call_output(call_id.clone()));
+            }
+            (
+                ResponseItem::Reasoning {
+                    id,
+                    summary: reasoning_summary,
+                    content,
+                    encrypted_content,
+                },
+                None,
+            ) => {
+                summary.history_items.push(ResponseItem::Reasoning {
+                    id: id.clone(),
+                    summary: reasoning_summary.clone(),
+                    content: content.clone(),
+                    encrypted_content: encrypted_content.clone(),
+                });
+            }
+            _ => {
+                warn!("Unexpected response item: {item:?} with response: {response:?}");
+            }
+        };
+        if let Some(response) = response {
+            summary.responses.push(response);
+        }
+    }
+
+    summary
 }
