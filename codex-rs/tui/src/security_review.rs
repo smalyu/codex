@@ -2146,7 +2146,7 @@ fn parse_keyword_response(raw: &str) -> Vec<String> {
     for line in trimmed.lines() {
         let stripped = line
             .trim()
-            .trim_start_matches(|c: char| c == '-' || c == '*' || c == '•')
+            .trim_start_matches(['-', '*', '•'])
             .trim();
         if stripped.is_empty() || stripped.eq_ignore_ascii_case("none") {
             continue;
@@ -2155,7 +2155,7 @@ fn parse_keyword_response(raw: &str) -> Vec<String> {
             extract_keywords_from_value(&value, &mut collected);
             continue;
         }
-        for fragment in stripped.split(|c| matches!(c, ',' | ';' | '/')) {
+        for fragment in stripped.split([',', ';', '/']) {
             let fragment_trimmed = fragment.trim();
             if !fragment_trimmed.is_empty() {
                 collected.push(fragment_trimmed.to_string());
@@ -2231,14 +2231,13 @@ async fn expand_auto_scope_keywords(
     let mut keywords: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for candidate in raw_candidates {
-        if let Some((display, key)) = normalize_keyword_candidate(&candidate) {
-            if seen.insert(key) {
+        if let Some((display, key)) = normalize_keyword_candidate(&candidate)
+            && seen.insert(key) {
                 keywords.push(display);
                 if keywords.len() >= AUTO_SCOPE_MAX_KEYWORDS {
                     break;
                 }
             }
-        }
     }
     Ok(keywords)
 }
@@ -3374,6 +3373,25 @@ async fn analyze_files_individually(
         }
     }
 
+    if !bug_summaries.is_empty() {
+        let mut replacements: HashMap<usize, String> = HashMap::new();
+        for summary in bug_summaries.iter_mut() {
+            if let Some(updated) =
+                rewrite_bug_markdown_severity(summary.markdown.as_str(), summary.severity.as_str())
+            {
+                summary.markdown = updated.clone();
+                replacements.insert(summary.id, updated);
+            }
+        }
+        if !replacements.is_empty() {
+            for detail in bug_details.iter_mut() {
+                if let Some(markdown) = replacements.get(&detail.summary_id) {
+                    detail.original_markdown = markdown.clone();
+                }
+            }
+        }
+    }
+
     let original_summary_count = bug_summaries.len();
     let mut retained_ids: HashSet<usize> = HashSet::new();
     bug_summaries.retain(|summary| {
@@ -4099,6 +4117,27 @@ fn format_findings_summary(findings: usize, files_with_findings: usize) -> Strin
         "files"
     };
     format!("Identified {findings} {finding_word} across {files_with_findings} {file_word}.")
+}
+
+fn rewrite_bug_markdown_severity(markdown: &str, severity: &str) -> Option<String> {
+    let mut changed = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("- **Severity:**") {
+            let indent_len = line.len().saturating_sub(trimmed.len());
+            let indent = &line[..indent_len];
+            lines.push(format!("{indent}- **Severity:** {severity}"));
+            changed = true;
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    if !changed {
+        None
+    } else {
+        Some(lines.join("\n").trim().to_string())
+    }
 }
 
 fn make_bug_summary_table(bugs: &[BugSummary]) -> Option<String> {
