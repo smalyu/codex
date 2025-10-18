@@ -12,6 +12,8 @@ use crate::text_formatting::truncate_text;
 use codex_core::CodexAuth;
 use codex_core::ModelProviderInfo;
 use codex_core::WireApi;
+use codex_core::config::GPT_5_CODEX_MEDIUM_MODEL;
+use codex_core::default_retry_backoff;
 use codex_core::git_info::collect_git_info;
 use codex_core::git_info::get_git_repo_root;
 use futures::stream::FuturesUnordered;
@@ -26,10 +28,8 @@ use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::fmt::Write;
 use std::fs;
 use std::future::Future;
@@ -48,6 +48,7 @@ use tokio::fs as tokio_fs;
 use tokio::process::Command;
 use tokio::sync::oneshot;
 use tokio::task::spawn_blocking;
+use tokio::time::sleep;
 use url::Url;
 
 const VALIDATION_SUMMARY_GRAPHEMES: usize = 96;
@@ -69,6 +70,7 @@ const MAX_FILE_SEARCH_RESULTS: usize = 40;
 const MAX_FILE_ANALYSIS_ATTEMPTS: usize = 2;
 const COMMAND_PREVIEW_MAX_LINES: usize = 2;
 const COMMAND_PREVIEW_MAX_GRAPHEMES: usize = 96;
+const MODEL_REASONING_LOG_MAX_GRAPHEMES: usize = 240;
 const AUTO_SCOPE_MODEL: &str = "gpt-5-codex";
 const SPEC_GENERATION_MODEL: &str = "gpt-5-codex";
 const BUG_RERANK_SYSTEM_PROMPT: &str = "You are a senior application security engineer triaging review findings. Reassess customer-facing risk using the supplied repository context and previously generated specs. Only respond with JSON Lines.";
@@ -118,11 +120,10 @@ Respond with a newline-separated list containing only the directory paths chosen
 "#;
 const AUTO_SCOPE_SYSTEM_PROMPT: &str = "You are an application security engineer helping select the minimal set of directories that should be examined for a security review. Only respond with JSON lines that follow the requested schema.";
 const AUTO_SCOPE_PROMPT_TEMPLATE: &str = r#"
-You are assisting with an application security review. Given the repository locations and a natural-language request, identify the minimal set of directories that should be in scope.
+You are assisting with an application security review. Identify the minimal set of directories that should be in scope.
 
-<locations>
-{locations}
-</locations>
+# Repository overview
+{repo_overview}
 
 # Request
 <intent>{user_query}</intent>
@@ -130,8 +131,15 @@ You are assisting with an application security review. Given the repository loca
 # Request keywords
 {keywords}
 
-# Keyword directory hints
-{keyword_matches}
+# Conversation history
+{conversation}
+
+# Available tools
+- SEARCH: respond with `SEARCH: <pattern>` to run ripgrep against file contents (prefix with `regex:` to use regular expressions).
+- SEARCH_FILES: respond with `SEARCH_FILES: <pattern>` to search for file or directory paths containing the pattern (prefix with `regex:` to treat the pattern as a regular expression).
+- READ: respond with `READ: <relative path>#L<start>-L<end>` to inspect source code (omit the range to read roughly {read_window} lines starting at the top of the file).
+
+Issue at most one tool command per message and wait for the tool output before continuing. When you have gathered enough information, respond only with JSON Lines as described below.
 
 # Selection rules
 - Prefer code that serves production traffic, handles external input, or configures deployed infrastructure.
@@ -144,13 +152,10 @@ Return JSON Lines: each line must be a single JSON object with keys {"path", "in
 "#;
 const AUTO_SCOPE_JSON_GUARD: &str =
     "Respond only with JSON Lines as described. Do not include markdown fences, prose, or lists.";
-const AUTO_SCOPE_MAX_DIR_DEPTH: usize = 3;
-const AUTO_SCOPE_MAX_DIRS: usize = 64;
-const AUTO_SCOPE_MAX_LANGUAGES: usize = 4;
-const AUTO_SCOPE_MAX_MARKERS: usize = 4;
-const AUTO_SCOPE_CHILD_PREVIEW: usize = 4;
+const AUTO_SCOPE_MAX_PATHS: usize = 20;
 const AUTO_SCOPE_MAX_KEYWORDS: usize = 6;
-const AUTO_SCOPE_KEYWORD_MATCH_LIMIT: usize = 5;
+const AUTO_SCOPE_MAX_AGENT_STEPS: usize = 10;
+const AUTO_SCOPE_DEFAULT_READ_WINDOW: usize = 120;
 const AUTO_SCOPE_KEYWORD_STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "that", "this", "from", "into", "when", "where", "which", "while",
     "using", "use", "need", "please", "should", "scope", "scoped", "bug", "bugs", "review",
@@ -221,6 +226,15 @@ pub(crate) enum SecurityReviewMode {
     #[default]
     Full,
     Bugs,
+}
+
+fn normalize_reasoning(reasoning: String) -> Option<String> {
+    let trimmed = reasoning.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 impl SecurityReviewMode {
@@ -362,54 +376,357 @@ struct SpecGenerationOutcome {
     logs: Vec<String>,
 }
 
-struct AutoScopeCandidate {
-    display_path: String,
-    depth: usize,
-    languages: Vec<String>,
-    markers: Vec<String>,
-    child_preview: Vec<String>,
-    child_count: usize,
-}
-
-impl AutoScopeCandidate {
-    fn summary(&self) -> Option<String> {
-        let mut parts: Vec<String> = Vec::new();
-
-        if !self.languages.is_empty() {
-            let languages_summary = self.languages.join(", ");
-            parts.push(format!("languages: {languages_summary}"));
-        }
-
-        if !self.markers.is_empty() {
-            let marker_summary = self.markers.join(", ");
-            parts.push(format!("markers: {marker_summary}"));
-        }
-
-        if !self.child_preview.is_empty() {
-            let preview = self.child_preview.join(", ");
-            if self.child_count > self.child_preview.len() {
-                let remaining = self.child_count - self.child_preview.len();
-                parts.push(format!("subs: {preview} (+{remaining} more)"));
-            } else {
-                parts.push(format!("subs: {preview}"));
-            }
-        } else if self.child_count > 0 {
-            let child_count = self.child_count;
-            parts.push(format!("subs: {child_count} dirs"));
-        }
-
-        if parts.is_empty() {
-            None
-        } else {
-            Some(parts.join("; "))
-        }
-    }
-}
-
 struct AutoScopeSelection {
     abs_path: PathBuf,
     display_path: String,
     reason: Option<String>,
+}
+
+fn truncate_auto_scope_selections(
+    selections: &mut Vec<AutoScopeSelection>,
+    logs: &mut Vec<String>,
+) {
+    if selections.len() > AUTO_SCOPE_MAX_PATHS {
+        selections.truncate(AUTO_SCOPE_MAX_PATHS);
+        logs.push(format!(
+            "Auto scope limited to the first {AUTO_SCOPE_MAX_PATHS} directories returned by the model."
+        ));
+    }
+}
+
+fn summarize_top_level(repo_root: &Path) -> String {
+    let mut directories: Vec<String> = Vec::new();
+    let mut files: Vec<String> = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(repo_root) {
+        for entry_result in entries.flatten().take(64) {
+            let name = entry_result.file_name().to_string_lossy().into_owned();
+            match entry_result.file_type() {
+                Ok(ft) if ft.is_dir() => {
+                    if is_auto_scope_excluded_dir(&name) {
+                        continue;
+                    }
+                    directories.push(format!("{name}/"));
+                }
+                Ok(ft) if ft.is_file() => files.push(name),
+                _ => {}
+            }
+        }
+    }
+
+    directories.sort();
+    files.sort();
+
+    let mut summary = Vec::new();
+    if directories.is_empty() && files.is_empty() {
+        summary.push("No top-level entries detected.".to_string());
+    } else {
+        if !directories.is_empty() {
+            summary.push(format!("Directories: {}", directories.join(", ")));
+        }
+        if !files.is_empty() {
+            summary.push(format!("Files: {}", files.join(", ")));
+        }
+    }
+
+    summary.join("\n")
+}
+
+enum AutoScopeToolCommand {
+    SearchContent {
+        pattern: String,
+        mode: SearchMode,
+    },
+    SearchFiles {
+        pattern: String,
+        mode: SearchMode,
+    },
+    ReadFile {
+        path: PathBuf,
+        start: Option<usize>,
+        end: Option<usize>,
+    },
+}
+
+fn extract_auto_scope_commands(response: &str) -> Vec<AutoScopeToolCommand> {
+    let mut commands = Vec::new();
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("SEARCH_FILES:") {
+            let (mode, term) = parse_search_term(rest.trim_matches('`'));
+            if !term.is_empty() {
+                commands.push(AutoScopeToolCommand::SearchFiles {
+                    pattern: term.to_string(),
+                    mode,
+                });
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("SEARCH:") {
+            let (mode, term) = parse_search_term(rest.trim_matches('`'));
+            if !term.is_empty() {
+                commands.push(AutoScopeToolCommand::SearchContent {
+                    pattern: term.to_string(),
+                    mode,
+                });
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("READ:") {
+            let spec = rest.trim();
+            if spec.is_empty() {
+                continue;
+            }
+            let (path_part, range_part) = spec.split_once('#').unwrap_or((spec, ""));
+            let relative = Path::new(path_part.trim()).to_path_buf();
+            if relative.as_os_str().is_empty() || relative.is_absolute() {
+                continue;
+            }
+
+            let mut start = None;
+            let mut end = None;
+            if let Some(range) = range_part.strip_prefix('L') {
+                let mut parts = range.split('-');
+                if let Some(start_str) = parts.next() {
+                    if let Ok(value) = start_str.trim().parse::<usize>() {
+                        if value > 0 {
+                            start = Some(value);
+                        }
+                    }
+                }
+                if let Some(end_str) = parts.next() {
+                    let clean_end = end_str.trim().trim_start_matches('L');
+                    if let Ok(value) = clean_end.parse::<usize>() {
+                        if value > 0 {
+                            end = Some(value);
+                        }
+                    }
+                }
+            }
+
+            commands.push(AutoScopeToolCommand::ReadFile {
+                path: relative,
+                start,
+                end,
+            });
+        }
+    }
+    commands
+}
+
+async fn run_path_search(
+    repo_root: &Path,
+    pattern: &str,
+    mode: SearchMode,
+    metrics: &Arc<ReviewMetrics>,
+) -> SearchResult {
+    if pattern.is_empty() {
+        return SearchResult::NoMatches;
+    }
+
+    metrics.record_shell_call();
+
+    let output = Command::new("find")
+        .arg(".")
+        .arg("-maxdepth")
+        .arg("12")
+        .arg("-print")
+        .current_dir(repo_root)
+        .output()
+        .await;
+
+    let output = match output {
+        Ok(output) => output,
+        Err(err) => {
+            return SearchResult::Error(format!("failed to run find: {err}"));
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return SearchResult::Error(format!("find exited with {}: {}", output.status, stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut matches: HashSet<String> = HashSet::new();
+
+    let matcher = match mode {
+        SearchMode::Literal => None,
+        SearchMode::Regex => match Regex::new(pattern) {
+            Ok(re) => Some(re),
+            Err(err) => return SearchResult::Error(format!("invalid regex `{pattern}`: {err}")),
+        },
+    };
+
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed == "." {
+            continue;
+        }
+        let relative = trimmed.trim_start_matches("./");
+        let matches_pattern = match (&matcher, mode) {
+            (Some(re), SearchMode::Regex) => re.is_match(relative),
+            (_, SearchMode::Literal) => relative.contains(pattern),
+            _ => false,
+        };
+        if matches_pattern {
+            matches.insert(relative.to_string());
+            let mut current = Path::new(relative);
+            while let Some(parent) = current.parent() {
+                if parent.as_os_str().is_empty() {
+                    break;
+                }
+                if let Some(component) = current.file_name().and_then(|s| s.to_str()) {
+                    let matched = match (&matcher, mode) {
+                        (Some(re), SearchMode::Regex) => re.is_match(component),
+                        (_, SearchMode::Literal) => component.contains(pattern),
+                        _ => false,
+                    };
+                    if matched {
+                        matches.insert(parent.to_string_lossy().to_string());
+                    }
+                }
+                current = parent;
+            }
+            if matches.len() >= 400 {
+                break;
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        SearchResult::NoMatches
+    } else {
+        let mut ordered: Vec<String> = matches.into_iter().collect();
+        ordered.sort();
+        SearchResult::Matches(ordered.join("\n"))
+    }
+}
+
+async fn execute_auto_scope_search_content(
+    repo_root: &Path,
+    pattern: &str,
+    mode: SearchMode,
+    metrics: &Arc<ReviewMetrics>,
+) -> (String, String) {
+    match run_content_search(repo_root, pattern, mode, metrics).await {
+        SearchResult::Matches(output) => (
+            format!("Auto scope content search `{pattern}` returned results."),
+            output,
+        ),
+        SearchResult::NoMatches => (
+            format!("Auto scope content search `{pattern}` returned no matches."),
+            "No matches found.".to_string(),
+        ),
+        SearchResult::Error(err) => (
+            format!("Auto scope content search `{pattern}` failed: {err}"),
+            format!("Search error: {err}"),
+        ),
+    }
+}
+
+async fn execute_auto_scope_search_files(
+    repo_root: &Path,
+    pattern: &str,
+    mode: SearchMode,
+    metrics: &Arc<ReviewMetrics>,
+) -> (String, String) {
+    match run_path_search(repo_root, pattern, mode, metrics).await {
+        SearchResult::Matches(output) => (
+            format!("Auto scope path search `{pattern}` returned results."),
+            output,
+        ),
+        SearchResult::NoMatches => (
+            format!("Auto scope path search `{pattern}` returned no matches."),
+            "No matches found.".to_string(),
+        ),
+        SearchResult::Error(err) => (
+            format!("Auto scope path search `{pattern}` failed: {err}"),
+            format!("Search error: {err}"),
+        ),
+    }
+}
+
+async fn execute_auto_scope_read(
+    repo_root: &Path,
+    command_path: &Path,
+    start: Option<usize>,
+    end: Option<usize>,
+) -> Result<String, String> {
+    let absolute = repo_root.join(command_path);
+    let canonical = absolute
+        .canonicalize()
+        .map_err(|err| format!("Failed to resolve path {}: {err}", command_path.display()))?;
+    if !canonical.starts_with(repo_root) {
+        return Err(format!(
+            "Path {} escapes the repository root.",
+            command_path.display()
+        ));
+    }
+    if !canonical.is_file() {
+        return Err(format!(
+            "Path {} is not a regular file.",
+            command_path.display()
+        ));
+    }
+
+    let content = tokio_fs::read_to_string(&canonical)
+        .await
+        .map_err(|err| format!("Failed to read {}: {err}", command_path.display()))?;
+
+    let relative = display_path_for(&canonical, repo_root);
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return Ok(format!("{relative} is empty."));
+    }
+
+    let total_lines = lines.len();
+    let start_line = start.unwrap_or(1).max(1).min(total_lines);
+    let end_line = end
+        .unwrap_or(start_line.saturating_add(AUTO_SCOPE_DEFAULT_READ_WINDOW))
+        .max(start_line)
+        .min(total_lines);
+
+    let slice = &lines[start_line - 1..end_line];
+    let mut formatted = format!("{relative} (L{start_line}-L{end_line}):\n");
+    for (idx, line) in slice.iter().enumerate() {
+        let line_number = start_line + idx;
+        formatted.push_str(&format!("{line_number:>6}: {line}\n"));
+        if formatted.len() > 8000 {
+            formatted.push_str("... (truncated)\n");
+            break;
+        }
+    }
+    Ok(formatted.trim_end().to_string())
+}
+
+fn build_auto_scope_prompt(
+    repo_overview: &str,
+    user_query: &str,
+    keywords: &[String],
+    conversation: &str,
+) -> String {
+    let keywords_section = if keywords.is_empty() {
+        "None".to_string()
+    } else {
+        keywords
+            .iter()
+            .map(|keyword| format!("- {keyword}"))
+            .collect::<Vec<String>>()
+            .join("\n")
+    };
+    let conversation_section = if conversation.trim().is_empty() {
+        "No prior exchanges.".to_string()
+    } else {
+        conversation.to_string()
+    };
+    let base = AUTO_SCOPE_PROMPT_TEMPLATE
+        .replace("{repo_overview}", repo_overview)
+        .replace("{user_query}", user_query.trim())
+        .replace("{keywords}", &keywords_section)
+        .replace("{conversation}", &conversation_section)
+        .replace("{read_window}", &AUTO_SCOPE_DEFAULT_READ_WINDOW.to_string());
+    format!("{base}\n{AUTO_SCOPE_JSON_GUARD}")
 }
 
 struct ThreatModelOutcome {
@@ -1174,7 +1491,7 @@ pub(crate) async fn run_security_review(
         )
         .await
         {
-            Ok(text) => text,
+            Ok(output) => output.text,
             Err(err) => {
                 let message = format!("Failed to polish bug markdown: {err}");
                 record(message.clone());
@@ -1252,7 +1569,7 @@ pub(crate) async fn run_security_review(
         )
         .await
         {
-            Ok(text) => text,
+            Ok(output) => output.text,
             Err(err) => {
                 let message = format!("Failed to polish final security report: {err}");
                 record(message.clone());
@@ -1622,7 +1939,7 @@ async fn triage_chunk(
     .await;
 
     let text = match response {
-        Ok(text) => text,
+        Ok(output) => output.text,
         Err(err) => {
             let message = format!("File triage failed: {err}");
             if let Some(tx) = progress_sender.as_ref() {
@@ -1910,176 +2227,6 @@ fn is_auto_scope_marker(name: &str) -> bool {
         .any(|marker| marker.eq_ignore_ascii_case(name))
 }
 
-fn collect_auto_scope_candidates(repo_root: &Path) -> Vec<AutoScopeCandidate> {
-    let canonical_root = repo_root
-        .canonicalize()
-        .unwrap_or_else(|_| repo_root.to_path_buf());
-    let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::from([(canonical_root.clone(), 0_usize)]);
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    seen.insert(canonical_root.clone());
-
-    let mut root_candidate: Option<AutoScopeCandidate> = None;
-    let mut candidates: Vec<AutoScopeCandidate> = Vec::new();
-
-    while let Some((dir, depth)) = queue.pop_front() {
-        let mut child_dirs: Vec<PathBuf> = Vec::new();
-        let mut child_names: Vec<String> = Vec::new();
-        let mut markers: BTreeSet<String> = BTreeSet::new();
-        let mut languages: BTreeSet<String> = BTreeSet::new();
-
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry_result in entries {
-                let Ok(entry) = entry_result else {
-                    continue;
-                };
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
-                if file_type.is_symlink() {
-                    continue;
-                }
-                let path = entry.path();
-                let name_os = entry.file_name();
-                let name = name_os.to_string_lossy().into_owned();
-                if file_type.is_dir() {
-                    if is_auto_scope_excluded_dir(&name) {
-                        continue;
-                    }
-                    child_dirs.push(path.clone());
-                    child_names.push(name);
-                } else if file_type.is_file() {
-                    if markers.len() < AUTO_SCOPE_MAX_MARKERS && is_auto_scope_marker(&name) {
-                        markers.insert(name.clone());
-                    }
-                    if languages.len() < AUTO_SCOPE_MAX_LANGUAGES
-                        && let Some(lang) = determine_language(&path)
-                    {
-                        languages.insert(lang.to_string());
-                    }
-                }
-            }
-        }
-
-        let child_count = child_dirs.len();
-
-        child_names.sort();
-        if child_names.len() > AUTO_SCOPE_CHILD_PREVIEW {
-            child_names.truncate(AUTO_SCOPE_CHILD_PREVIEW);
-        }
-
-        let candidate = AutoScopeCandidate {
-            display_path: display_path_for(&dir, &canonical_root),
-            depth,
-            languages: languages.into_iter().collect(),
-            markers: markers.into_iter().collect(),
-            child_preview: child_names,
-            child_count,
-        };
-
-        if depth == 0 {
-            root_candidate = Some(candidate);
-        } else {
-            candidates.push(candidate);
-            if candidates.len() >= AUTO_SCOPE_MAX_DIRS {
-                break;
-            }
-        }
-
-        if depth >= AUTO_SCOPE_MAX_DIR_DEPTH {
-            continue;
-        }
-
-        child_dirs.sort();
-        for child in child_dirs {
-            let canonical_child = match child.canonicalize() {
-                Ok(path) => path,
-                Err(_) => continue,
-            };
-            if !canonical_child.starts_with(&canonical_root) {
-                continue;
-            }
-            if seen.insert(canonical_child.clone()) {
-                queue.push_back((canonical_child, depth + 1));
-            }
-        }
-    }
-
-    let mut ordered: Vec<AutoScopeCandidate> = Vec::new();
-    if let Some(root) = root_candidate {
-        ordered.push(root);
-    } else {
-        ordered.push(AutoScopeCandidate {
-            display_path: display_path_for(repo_root, repo_root),
-            depth: 0,
-            languages: Vec::new(),
-            markers: Vec::new(),
-            child_preview: Vec::new(),
-            child_count: 0,
-        });
-    }
-    ordered.extend(candidates);
-    ordered
-}
-
-fn build_auto_scope_prompt(
-    repo_root: &Path,
-    candidates: &[AutoScopeCandidate],
-    user_query: &str,
-    keywords: &[String],
-    keyword_matches: &[(String, Vec<String>)],
-) -> String {
-    let mut lines: Vec<String> = Vec::new();
-    if candidates.is_empty() {
-        lines.push(display_path_for(repo_root, repo_root));
-    } else {
-        for candidate in candidates {
-            let indent = "  ".repeat(candidate.depth);
-            let mut label = format!("{indent}{}", candidate.display_path);
-            if let Some(summary) = candidate.summary() {
-                label.push_str(" — ");
-                label.push_str(&summary);
-            }
-            lines.push(label);
-        }
-    }
-
-    let merged_locations = if lines.is_empty() {
-        display_path_for(repo_root, repo_root)
-    } else {
-        lines.join("\n")
-    };
-    let keywords_section = if keywords.is_empty() {
-        "None".to_string()
-    } else {
-        keywords
-            .iter()
-            .map(|keyword| format!("- {keyword}"))
-            .collect::<Vec<String>>()
-            .join("\n")
-    };
-    let keyword_matches_section = if keyword_matches.is_empty() {
-        "No directory matches were found automatically.".to_string()
-    } else {
-        keyword_matches
-            .iter()
-            .map(|(keyword, dirs)| {
-                if dirs.is_empty() {
-                    format!("- {keyword}: no matches")
-                } else {
-                    format!("- {keyword}: {}", dirs.join(", "))
-                }
-            })
-            .collect::<Vec<String>>()
-            .join("\n")
-    };
-    let base = AUTO_SCOPE_PROMPT_TEMPLATE
-        .replace("{locations}", &merged_locations)
-        .replace("{user_query}", user_query.trim())
-        .replace("{keywords}", &keywords_section)
-        .replace("{keyword_matches}", &keyword_matches_section);
-    format!("{base}\n{AUTO_SCOPE_JSON_GUARD}")
-}
-
 fn normalize_keyword_candidate(candidate: &str) -> Option<(String, String)> {
     let trimmed = candidate
         .trim()
@@ -2144,10 +2291,7 @@ fn parse_keyword_response(raw: &str) -> Vec<String> {
 
     let mut collected: Vec<String> = Vec::new();
     for line in trimmed.lines() {
-        let stripped = line
-            .trim()
-            .trim_start_matches(['-', '*', '•'])
-            .trim();
+        let stripped = line.trim().trim_start_matches(['-', '*', '•']).trim();
         if stripped.is_empty() || stripped.eq_ignore_ascii_case("none") {
             continue;
         }
@@ -2227,113 +2371,20 @@ async fn expand_auto_scope_keywords(
     .await
     .map_err(|err| format!("keyword expansion model call failed: {err}"))?;
 
-    let raw_candidates = parse_keyword_response(&response);
+    let raw_candidates = parse_keyword_response(&response.text);
     let mut keywords: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for candidate in raw_candidates {
         if let Some((display, key)) = normalize_keyword_candidate(&candidate)
-            && seen.insert(key) {
-                keywords.push(display);
-                if keywords.len() >= AUTO_SCOPE_MAX_KEYWORDS {
-                    break;
-                }
-            }
-    }
-    Ok(keywords)
-}
-
-fn parse_search_output_paths(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.ends_with("(truncated)") {
-                return None;
-            }
-            let without_prefix = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-            let cleaned = without_prefix.trim();
-            if cleaned.is_empty() {
-                None
-            } else {
-                Some(cleaned.to_string())
-            }
-        })
-        .collect()
-}
-
-async fn collect_keyword_directory_matches(
-    repo_root: &Path,
-    keywords: &[String],
-    metrics: Arc<ReviewMetrics>,
-) -> (Vec<(String, Vec<String>)>, Vec<String>) {
-    if keywords.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-    let mut results: Vec<(String, Vec<String>)> = Vec::new();
-    let mut logs: Vec<String> = Vec::new();
-
-    for keyword in keywords {
-        let search_result = run_file_search(repo_root, keyword, SearchMode::Regex, &metrics).await;
-        match search_result {
-            SearchResult::Matches(output) => {
-                let mut directories: Vec<String> = Vec::new();
-                let mut seen_dirs: HashSet<String> = HashSet::new();
-                for path in parse_search_output_paths(&output) {
-                    let absolute = repo_root.join(&path);
-                    let canonical = absolute.canonicalize().unwrap_or(absolute.clone());
-                    if !canonical.starts_with(repo_root) {
-                        continue;
-                    }
-                    let directory = if canonical.is_dir() {
-                        canonical
-                    } else {
-                        canonical
-                            .parent()
-                            .map(Path::to_path_buf)
-                            .unwrap_or_else(|| repo_root.to_path_buf())
-                    };
-                    if !directory.starts_with(repo_root) {
-                        continue;
-                    }
-                    let display = display_path_for(&directory, repo_root);
-                    if display == "." {
-                        continue;
-                    }
-                    if seen_dirs.insert(display.clone()) {
-                        directories.push(display);
-                        if directories.len() >= AUTO_SCOPE_KEYWORD_MATCH_LIMIT {
-                            break;
-                        }
-                    }
-                }
-                if directories.is_empty() {
-                    logs.push(format!(
-                        "Auto scope keyword `{keyword}` matched files but no directories were recorded."
-                    ));
-                } else {
-                    logs.push(format!(
-                        "Auto scope keyword `{keyword}` matched directories: {}",
-                        directories.join(", ")
-                    ));
-                }
-                results.push((keyword.clone(), directories));
-            }
-            SearchResult::NoMatches => {
-                logs.push(format!(
-                    "Auto scope keyword `{keyword}` produced no matches."
-                ));
-                results.push((keyword.clone(), Vec::new()));
-            }
-            SearchResult::Error(err) => {
-                logs.push(format!(
-                    "Auto scope keyword search for `{keyword}` failed: {err}"
-                ));
-                results.push((keyword.clone(), Vec::new()));
+            && seen.insert(key)
+        {
+            keywords.push(display);
+            if keywords.len() >= AUTO_SCOPE_MAX_KEYWORDS {
+                break;
             }
         }
     }
-
-    (results, logs)
+    Ok(keywords)
 }
 
 #[derive(Debug, Clone)]
@@ -2528,7 +2579,6 @@ async fn auto_detect_scope(
     metrics: Arc<ReviewMetrics>,
 ) -> Result<(Vec<AutoScopeSelection>, Vec<String>), SecurityReviewFailure> {
     let mut logs: Vec<String> = Vec::new();
-    let candidates = collect_auto_scope_candidates(repo_root);
 
     let mut keywords =
         match expand_auto_scope_keywords(client, provider, auth, user_query, metrics.clone()).await
@@ -2569,82 +2619,165 @@ async fn auto_detect_scope(
         }
     }
 
-    let (keyword_matches, keyword_logs) =
-        collect_keyword_directory_matches(repo_root, &keywords, metrics.clone()).await;
-    logs.extend(keyword_logs);
+    let repo_overview = summarize_top_level(repo_root);
+    let mut conversation: Vec<String> = Vec::new();
+    let mut tool_rounds = 0usize;
 
-    let prompt = build_auto_scope_prompt(
-        repo_root,
-        &candidates,
-        user_query,
-        &keywords,
-        &keyword_matches,
-    );
-    let response = match call_model(
-        client,
-        provider,
-        auth,
-        model,
-        AUTO_SCOPE_SYSTEM_PROMPT,
-        &prompt,
-        metrics,
-        0.0,
-    )
-    .await
-    {
-        Ok(text) => text,
-        Err(err) => {
-            logs.push(format!("Auto scope model request failed: {err}"));
+    loop {
+        if tool_rounds >= AUTO_SCOPE_MAX_AGENT_STEPS {
             return Err(SecurityReviewFailure {
-                message: format!("Failed to auto-detect scope: {err}"),
+                message: format!(
+                    "Auto scope exceeded the maximum number ({AUTO_SCOPE_MAX_AGENT_STEPS}) of tool interactions."
+                ),
                 logs,
             });
         }
-    };
 
-    let parse_result = parse_auto_scope_response(&response);
-    match parse_result {
-        AutoScopeParseResult::All => {
-            let canonical = repo_root
-                .canonicalize()
-                .unwrap_or_else(|_| repo_root.to_path_buf());
-            logs.push("Auto scope model requested the entire repository.".to_string());
-            Ok((
-                vec![AutoScopeSelection {
-                    display_path: display_path_for(&canonical, repo_root),
-                    abs_path: canonical,
-                    reason: Some("LLM requested full repository".to_string()),
-                }],
-                logs,
-            ))
-        }
-        AutoScopeParseResult::Selections(raw_selections) => {
-            let mut seen: HashSet<PathBuf> = HashSet::new();
-            let mut selections: Vec<AutoScopeSelection> = Vec::new();
-
-            for raw in raw_selections {
-                let mut candidate = PathBuf::from(&raw.path);
-                if !candidate.is_absolute() {
-                    candidate = repo_root.join(&candidate);
-                }
-                let canonical = match candidate.canonicalize() {
-                    Ok(path) => path,
-                    Err(_) => continue,
-                };
-                if !canonical.starts_with(repo_root) || !canonical.is_dir() {
-                    continue;
-                }
-                if !seen.insert(canonical.clone()) {
-                    continue;
-                }
-                selections.push(AutoScopeSelection {
-                    display_path: display_path_for(&canonical, repo_root),
-                    abs_path: canonical,
-                    reason: raw.reason,
+        let conversation_text = conversation.join("\n\n");
+        let prompt =
+            build_auto_scope_prompt(&repo_overview, user_query, &keywords, &conversation_text);
+        let response = match call_model(
+            client,
+            provider,
+            auth,
+            model,
+            AUTO_SCOPE_SYSTEM_PROMPT,
+            &prompt,
+            metrics.clone(),
+            0.0,
+        )
+        .await
+        {
+            Ok(output) => output.text,
+            Err(err) => {
+                logs.push(format!("Auto scope model request failed: {err}"));
+                return Err(SecurityReviewFailure {
+                    message: format!("Failed to auto-detect scope: {err}"),
+                    logs,
                 });
             }
+        };
 
-            Ok((selections, logs))
+        let assistant_reply = response.trim();
+        if assistant_reply.is_empty() {
+            return Err(SecurityReviewFailure {
+                message: "Auto scope model returned an empty response.".to_string(),
+                logs,
+            });
+        }
+        conversation.push(format!("Assistant:\n{assistant_reply}"));
+
+        let commands = extract_auto_scope_commands(assistant_reply);
+        if !commands.is_empty() {
+            tool_rounds += 1;
+            for command in commands {
+                match command {
+                    AutoScopeToolCommand::SearchContent { pattern, mode } => {
+                        let (log_line, output) =
+                            execute_auto_scope_search_content(repo_root, &pattern, mode, &metrics)
+                                .await;
+                        logs.push(log_line);
+                        conversation.push(format!("Tool SEARCH `{pattern}`:\n{output}"));
+                    }
+                    AutoScopeToolCommand::SearchFiles { pattern, mode } => {
+                        let (log_line, output) =
+                            execute_auto_scope_search_files(repo_root, &pattern, mode, &metrics)
+                                .await;
+                        logs.push(log_line);
+                        conversation.push(format!("Tool SEARCH_FILES `{pattern}`:\n{output}"));
+                    }
+                    AutoScopeToolCommand::ReadFile { path, start, end } => {
+                        match execute_auto_scope_read(repo_root, &path, start, end).await {
+                            Ok(output) => {
+                                logs.push(format!(
+                                    "Auto scope read `{}` returned content.",
+                                    path.display()
+                                ));
+                                conversation.push(format!(
+                                    "Tool READ `{}`:\n{}",
+                                    path.display(),
+                                    output
+                                ));
+                            }
+                            Err(err) => {
+                                logs.push(err.clone());
+                                conversation.push(format!(
+                                    "Tool READ `{}` error: {}",
+                                    path.display(),
+                                    err
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        let parse_result = parse_auto_scope_response(assistant_reply);
+        match parse_result {
+            AutoScopeParseResult::All => {
+                let canonical = repo_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| repo_root.to_path_buf());
+                logs.push("Auto scope model requested the entire repository.".to_string());
+                return Ok((
+                    vec![AutoScopeSelection {
+                        display_path: display_path_for(&canonical, repo_root),
+                        abs_path: canonical,
+                        reason: Some("LLM requested full repository".to_string()),
+                    }],
+                    logs,
+                ));
+            }
+            AutoScopeParseResult::Selections(raw_selections) => {
+                if raw_selections.is_empty() {
+                    logs.push(
+                        "Auto scope model returned no included directories in the final response."
+                            .to_string(),
+                    );
+                    return Err(SecurityReviewFailure {
+                        message: "Auto scope returned no directories.".to_string(),
+                        logs,
+                    });
+                }
+
+                let mut seen: HashSet<PathBuf> = HashSet::new();
+                let mut selections: Vec<AutoScopeSelection> = Vec::new();
+
+                for raw in raw_selections {
+                    let mut candidate = PathBuf::from(&raw.path);
+                    if !candidate.is_absolute() {
+                        candidate = repo_root.join(&candidate);
+                    }
+                    let canonical = match candidate.canonicalize() {
+                        Ok(path) => path,
+                        Err(_) => continue,
+                    };
+                    if !canonical.starts_with(repo_root) || !canonical.is_dir() {
+                        continue;
+                    }
+                    if !seen.insert(canonical.clone()) {
+                        continue;
+                    }
+                    selections.push(AutoScopeSelection {
+                        display_path: display_path_for(&canonical, repo_root),
+                        abs_path: canonical,
+                        reason: raw.reason,
+                    });
+                }
+
+                if selections.is_empty() {
+                    return Err(SecurityReviewFailure {
+                        message: "Auto scope returned no directories.".to_string(),
+                        logs,
+                    });
+                }
+
+                truncate_auto_scope_selections(&mut selections, &mut logs);
+
+                return Ok((selections, logs));
+            }
         }
     }
 }
@@ -2764,7 +2897,7 @@ Return ALL to keep every directory.",
     })?;
 
     let mut selected_indices: Vec<usize> = Vec::new();
-    for raw_line in response.lines() {
+    for raw_line in response.text.lines() {
         let trimmed = raw_line.trim().trim_matches('`');
         if trimmed.is_empty() {
             continue;
@@ -2875,7 +3008,7 @@ async fn generate_spec_for_location(
         message: format!("Specification generation failed for {location_label}: {err}"),
         logs: Vec::new(),
     })?;
-    let sanitized = fix_mermaid_blocks(&response);
+    let sanitized = fix_mermaid_blocks(&response.text);
 
     let slug = slugify_label(&location_label);
     let file_path = raw_dir.join(format!("{slug}.md"));
@@ -2940,7 +3073,7 @@ async fn generate_threat_model(
     logs.push(start_message);
 
     let prompt = build_threat_model_prompt(repository_summary, spec);
-    let mut response = call_model(
+    let response_output = call_model(
         client,
         provider,
         auth,
@@ -2967,7 +3100,8 @@ async fn generate_threat_model(
             logs: failure_logs,
         }
     })?;
-    let mut sanitized_response = fix_mermaid_blocks(&response);
+    let mut response_text = response_output.text;
+    let mut sanitized_response = fix_mermaid_blocks(&response_text);
     sanitized_response = sort_threat_table(&sanitized_response).unwrap_or(sanitized_response);
 
     if !threat_table_has_rows(&sanitized_response) {
@@ -2978,7 +3112,7 @@ async fn generate_threat_model(
         logs.push(warn.to_string());
 
         let retry_prompt = build_threat_model_retry_prompt(&prompt, &sanitized_response);
-        response = call_model(
+        let response_output = call_model(
             client,
             provider,
             auth,
@@ -3005,7 +3139,8 @@ async fn generate_threat_model(
                 logs: failure_logs,
             }
         })?;
-        sanitized_response = fix_mermaid_blocks(&response);
+        response_text = response_output.text;
+        sanitized_response = fix_mermaid_blocks(&response_text);
         sanitized_response = sort_threat_table(&sanitized_response).unwrap_or(sanitized_response);
 
         if !threat_table_has_rows(&sanitized_response) {
@@ -3080,7 +3215,7 @@ async fn combine_spec_markdown(
     )
     .await
     {
-        Ok(text) => text,
+        Ok(output) => output.text,
         Err(err) => {
             return Err(SecurityReviewFailure {
                 message: format!("Failed to combine specifications: {err}"),
@@ -3109,7 +3244,7 @@ async fn combine_spec_markdown(
     )
     .await
     {
-        Ok(text) => text,
+        Ok(output) => output.text,
         Err(err) => {
             let message = format!("Failed to polish combined specification markdown: {err}");
             if let Some(tx) = progress_sender.as_ref() {
@@ -3472,6 +3607,7 @@ async fn analyze_single_file(
 ) -> Result<FileBugResult, SecurityReviewFailure> {
     let mut logs = Vec::new();
     let path_display = snippet.relative_path.display().to_string();
+    let search_root_display = repo_root.display().to_string();
     let file_size = human_readable_bytes(snippet.bytes);
     let prefix = format!("{}/{}", index + 1, total_files);
     let mut prompt_adjustment_logs: HashSet<String> = HashSet::new();
@@ -3549,8 +3685,8 @@ async fn analyze_single_file(
             )
             .await;
 
-            let text = match response {
-                Ok(text) => text,
+            let call_output = match response {
+                Ok(output) => output,
                 Err(err) => {
                     let attempt_number = analysis_attempt + 1;
                     let message = format!(
@@ -3585,6 +3721,22 @@ async fn analyze_single_file(
                 }
             };
 
+            if let Some(reasoning) = call_output.reasoning.as_ref() {
+                for line in reasoning
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                {
+                    let truncated = truncate_text(line, MODEL_REASONING_LOG_MAX_GRAPHEMES);
+                    let reasoning_message = format!("Model reasoning: {truncated}");
+                    if let Some(tx) = progress_sender.as_ref() {
+                        tx.send(AppEvent::SecurityReviewLog(reasoning_message.clone()));
+                    }
+                    logs.push(reasoning_message);
+                }
+            }
+
+            let text = call_output.text;
             let (cleaned_text, requested_terms) = parse_search_requests(&text);
             let trimmed = cleaned_text.trim();
 
@@ -3645,8 +3797,9 @@ async fn analyze_single_file(
                     SearchRequest::Content { term, mode } => {
                         let display_term = summarize_search_term(&term, 80);
                         let mode_label = mode.as_str();
-                        let log_message =
-                            format!("Search `{display_term}` in content ({mode_label})");
+                        let log_message = format!(
+                            "Search `{display_term}` in content ({mode_label}) — path {search_root_display}"
+                        );
                         if let Some(tx) = progress_sender.as_ref() {
                             tx.send(AppEvent::SecurityReviewLog(log_message.clone()));
                         }
@@ -3676,7 +3829,9 @@ async fn analyze_single_file(
                                 ));
                             }
                             SearchResult::NoMatches => {
-                                let miss = format!("No content matches found for `{display_term}`");
+                                let miss = format!(
+                                    "No content matches found for `{display_term}` — path {search_root_display}"
+                                );
                                 if let Some(tx) = progress_sender.as_ref() {
                                     tx.send(AppEvent::SecurityReviewLog(miss.clone()));
                                 }
@@ -3684,7 +3839,7 @@ async fn analyze_single_file(
                             }
                             SearchResult::Error(err) => {
                                 let error_message = format!(
-                                    "Ripgrep content search for `{display_term}` failed: {err}"
+                                    "Ripgrep content search for `{display_term}` failed: {err} — path {search_root_display}"
                                 );
                                 if let Some(tx) = progress_sender.as_ref() {
                                     tx.send(AppEvent::SecurityReviewLog(error_message.clone()));
@@ -3729,8 +3884,9 @@ async fn analyze_single_file(
                     SearchRequest::Files { term, mode } => {
                         let display_term = summarize_search_term(&term, 80);
                         let mode_label = mode.as_str();
-                        let log_message =
-                            format!("Search files for `{display_term}` ({mode_label})");
+                        let log_message = format!(
+                            "Search files for `{display_term}` ({mode_label}) — path {search_root_display}"
+                        );
                         if let Some(tx) = progress_sender.as_ref() {
                             tx.send(AppEvent::SecurityReviewLog(log_message.clone()));
                         }
@@ -3759,7 +3915,9 @@ async fn analyze_single_file(
                                 ));
                             }
                             SearchResult::NoMatches => {
-                                let miss = format!("No files matched pattern `{display_term}`");
+                                let miss = format!(
+                                    "No files matched pattern `{display_term}` — path {search_root_display}"
+                                );
                                 if let Some(tx) = progress_sender.as_ref() {
                                     tx.send(AppEvent::SecurityReviewLog(miss.clone()));
                                 }
@@ -3767,7 +3925,7 @@ async fn analyze_single_file(
                             }
                             SearchResult::Error(err) => {
                                 let error_message = format!(
-                                    "Ripgrep file search for `{display_term}` failed: {err}"
+                                    "Ripgrep file search for `{display_term}` failed: {err} — path {search_root_display}"
                                 );
                                 if let Some(tx) = progress_sender.as_ref() {
                                     tx.send(AppEvent::SecurityReviewLog(error_message.clone()));
@@ -4545,7 +4703,7 @@ async fn rerank_bugs_by_risk(
     for result in chunk_results {
         match result {
             Ok(output) => {
-                for raw_line in output.lines() {
+                for raw_line in output.text.lines() {
                     let line = raw_line.trim();
                     if line.is_empty() {
                         continue;
@@ -5384,7 +5542,7 @@ fn build_bugs_user_prompt(
 ) -> BugPromptData {
     let repository_section = format!("# Repository context\n{repository_summary}\n");
     let code_and_task = format!(
-        "\n# Code excerpts\n{code_context}\n\n# Task\nEvaluate the project for concrete, exploitable security vulnerabilities. Prefer precise, production-relevant issues to theoretical concerns.\n\nFollow these rules:\n- Read the code and provided context to understand intended behavior before judging safety.\n- Trace attacker-controlled inputs through the call graph to the ultimate sink. Highlight any sanitization or missing validation along the way.\n- Ignore unit tests, example scripts, or tooling unless they ship to production in this repo.\n- Only report real vulnerabilities that an attacker can trigger with meaningful impact. If none are found, respond with exactly `no bugs found` (no additional text).\n- Quote code snippets and locations using GitHub-style ranges (e.g. `src/service.rs#L10-L24`). Include git blame details when you have them: `<short-sha> <author> <YYYY-MM-DD> L<start>-L<end>`.\n- Keep all output in markdown and avoid generic disclaimers.\n- If you need more repository context, request it explicitly:\n  - Emit `SEARCH: <pattern>` to run ripgrep across the repository and append matching snippets (patterns are literal by default; prefix with `regex:` to use a regular expression).\n  - Emit `SEARCH_FILES: <pattern>` to list files whose contents match, mirroring the `grep_files` tool's behavior.\n  Only three unique search requests per file will be honored.\n\n# Output format\nFor each vulnerability, emit a markdown block:\n\n### <short title>\n- **File & Lines:** `<relative path>#Lstart-Lend`\n- **Severity:** <high|medium|low|ignore>\n- **Impact:** <concise impact analysis>\n- **Likelihood:** <likelihood analysis>\n- **Description:** Detailed narrative with annotated code references explaining the bug.\n- **Snippet:** Fenced code block (specify language) showing only the relevant lines with inline comments or numbered markers that you reference in the description.\n- **Dataflow:** Describe sources, propagation, sanitization, and sinks using relative paths and `L<start>-L<end>` ranges.\n- **PoC:** Concrete steps or payload to reproduce (or `n/a` if infeasible).\n- **Recommendation:** Actionable remediation guidance.\n- **Verification Type:** JSON array subset of [\"network_api\", \"crash_poc\", \"web_browser\"].\n- TAXONOMY: {{\"vuln_class\": \"...\", \"cwe_ids\": [...], \"owasp_categories\": [...], \"vuln_tag\": \"...\"}}\n\nEnsure severity selections are justified by the described impact and likelihood."
+        "\n# Code excerpts\n{code_context}\n\n# Task\nEvaluate the project for concrete, exploitable security vulnerabilities. Prefer precise, production-relevant issues to theoretical concerns.\n\nFollow these rules:\n- Read this file in full and review the provided context to understand intended behavior before judging safety.\n- Use the search commands below to inspect additional in-scope files when tracing data flows or confirming a hypothesis; cite the relevant variables, functions, and any validation or sanitization steps you discover.\n- Trace attacker-controlled inputs through the call graph to the ultimate sink. Highlight any sanitization or missing validation along the way.\n- Ignore unit tests, example scripts, or tooling unless they ship to production in this repo.\n- Only report real vulnerabilities that an attacker can trigger with meaningful impact. If none are found, respond with exactly `no bugs found` (no additional text).\n- Quote code snippets and locations using GitHub-style ranges (e.g. `src/service.rs#L10-L24`). Include git blame details when you have them: `<short-sha> <author> <YYYY-MM-DD> L<start>-L<end>`.\n- Keep all output in markdown and avoid generic disclaimers.\n- If you need more repository context, request it explicitly while staying within the provided scope:\n  - Emit `SEARCH: <pattern>` to run ripgrep across the repository and append matching snippets (patterns are literal by default; prefix with `regex:` to use a regular expression).\n  - Emit `SEARCH_FILES: <pattern>` to list files whose contents match, mirroring the `grep_files` tool's behavior.\n\n# Output format\nFor each vulnerability, emit a markdown block:\n\n### <short title>\n- **File & Lines:** `<relative path>#Lstart-Lend`\n- **Severity:** <high|medium|low|ignore>\n- **Impact:** <concise impact analysis>\n- **Likelihood:** <likelihood analysis>\n- **Description:** Detailed narrative with annotated code references explaining the bug.\n- **Snippet:** Fenced code block (specify language) showing only the relevant lines with inline comments or numbered markers that you reference in the description.\n- **Dataflow:** Describe sources, propagation, sanitization, and sinks using relative paths and `L<start>-L<end>` ranges.\n- **PoC:** Concrete steps or payload to reproduce (or `n/a` if infeasible).\n- **Recommendation:** Actionable remediation guidance.\n- **Verification Type:** JSON array subset of [\"network_api\", \"crash_poc\", \"web_browser\"].\n- TAXONOMY: {{\"vuln_class\": \"...\", \"cwe_ids\": [...], \"owasp_categories\": [...], \"vuln_tag\": \"...\"}}\n\nEnsure severity selections are justified by the described impact and likelihood."
     );
     let base_len = repository_section.len() + code_and_task.len();
     let mut prompt =
@@ -5891,6 +6049,12 @@ pub(crate) async fn verify_bugs(
     Ok(BugVerificationOutcome { bugs, logs })
 }
 
+#[derive(Debug, Clone)]
+struct ModelCallOutput {
+    text: String,
+    reasoning: Option<String>,
+}
+
 async fn call_model(
     client: &Client,
     provider: &ModelProviderInfo,
@@ -5900,8 +6064,55 @@ async fn call_model(
     user_prompt: &str,
     metrics: Arc<ReviewMetrics>,
     temperature: f32,
-) -> Result<String, String> {
-    metrics.record_model_call();
+) -> Result<ModelCallOutput, String> {
+    let max_attempts = provider.request_max_retries();
+    let mut attempt_errors: Vec<String> = Vec::new();
+
+    for attempt in 0..=max_attempts {
+        metrics.record_model_call();
+
+        match call_model_attempt(
+            client,
+            provider,
+            auth,
+            model,
+            system_prompt,
+            user_prompt,
+            temperature,
+        )
+        .await
+        {
+            Ok(output) => return Ok(output),
+            Err(err) => {
+                let sanitized = sanitize_model_error(&err);
+                attempt_errors.push(format!("attempt {}: {}", attempt + 1, sanitized));
+
+                if attempt == max_attempts {
+                    let attempt_count = attempt + 1;
+                    let plural = if attempt_count == 1 { "" } else { "s" };
+                    let joined = attempt_errors.join("\n- ");
+                    return Err(format!(
+                        "Model request for {model} failed after {attempt_count} attempt{plural}. Details:\n- {joined}"
+                    ));
+                }
+
+                sleep(default_retry_backoff(attempt + 1)).await;
+            }
+        }
+    }
+
+    unreachable!("call_model attempts should always return");
+}
+
+async fn call_model_attempt(
+    client: &Client,
+    provider: &ModelProviderInfo,
+    auth: &Option<CodexAuth>,
+    model: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    temperature: f32,
+) -> Result<ModelCallOutput, String> {
     match provider.wire_api {
         WireApi::Responses => {
             let builder = provider
@@ -6009,8 +6220,18 @@ async fn call_model(
     }
 }
 
-fn parse_responses_stream_output(body: &str) -> Result<String, String> {
+fn sanitize_model_error(error: &str) -> String {
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        return "unknown error".to_string();
+    }
+
+    trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn parse_responses_stream_output(body: &str) -> Result<ModelCallOutput, String> {
     let mut combined = String::new();
+    let mut reasoning = String::new();
     let mut fallback: Option<serde_json::Value> = None;
     let mut failed_error: Option<String> = None;
     let mut last_parse_error: Option<String> = None;
@@ -6029,6 +6250,7 @@ fn parse_responses_stream_output(body: &str) -> Result<String, String> {
             handle_responses_event(
                 &data_buffer,
                 &mut combined,
+                &mut reasoning,
                 &mut fallback,
                 &mut failed_error,
                 &mut last_parse_error,
@@ -6041,6 +6263,7 @@ fn parse_responses_stream_output(body: &str) -> Result<String, String> {
         handle_responses_event(
             &data_buffer,
             &mut combined,
+            &mut reasoning,
             &mut fallback,
             &mut failed_error,
             &mut last_parse_error,
@@ -6052,7 +6275,10 @@ fn parse_responses_stream_output(body: &str) -> Result<String, String> {
     }
 
     if !combined.trim().is_empty() {
-        return Ok(combined.trim().to_string());
+        return Ok(ModelCallOutput {
+            text: combined.trim().to_string(),
+            reasoning: normalize_reasoning(reasoning),
+        });
     }
 
     if let Some(value) = fallback {
@@ -6069,6 +6295,7 @@ fn parse_responses_stream_output(body: &str) -> Result<String, String> {
 fn handle_responses_event(
     data: &str,
     combined: &mut String,
+    reasoning: &mut String,
     fallback: &mut Option<serde_json::Value>,
     failed_error: &mut Option<String>,
     last_parse_error: &mut Option<String>,
@@ -6088,6 +6315,30 @@ fn handle_responses_event(
                 "response.output_text.delta" => {
                     if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
                         combined.push_str(delta);
+                    }
+                }
+                "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                    if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                        reasoning.push_str(delta);
+                    } else if let Some(delta_obj) = event.get("delta").and_then(|v| v.as_object()) {
+                        if let Some(text) = delta_obj
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .filter(|t| !t.is_empty())
+                        {
+                            reasoning.push_str(text);
+                        }
+                        if let Some(content) = delta_obj.get("content").and_then(|v| v.as_array()) {
+                            for block in content {
+                                if let Some(text) = block
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|t| !t.is_empty())
+                                {
+                                    reasoning.push_str(text);
+                                }
+                            }
+                        }
                     }
                 }
                 "response.completed" => {
@@ -6124,9 +6375,10 @@ fn handle_responses_event(
     }
 }
 
-fn parse_responses_output(value: serde_json::Value) -> Result<String, String> {
+fn parse_responses_output(value: serde_json::Value) -> Result<ModelCallOutput, String> {
     if let Some(array) = value.get("output").and_then(|v| v.as_array()) {
         let mut combined = String::new();
+        let mut reasoning = String::new();
         for item in array {
             match item.get("type").and_then(|t| t.as_str()) {
                 Some("output_text") | Some("text") => {
@@ -6143,6 +6395,11 @@ fn parse_responses_output(value: serde_json::Value) -> Result<String, String> {
                                         combined.push_str(text);
                                     }
                                 }
+                                Some("reasoning") => {
+                                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                        reasoning.push_str(text);
+                                    }
+                                }
                                 _ => {}
                             };
                         }
@@ -6152,7 +6409,11 @@ fn parse_responses_output(value: serde_json::Value) -> Result<String, String> {
             }
         }
         if !combined.trim().is_empty() {
-            return Ok(combined.trim().to_string());
+            return Ok(ModelCallOutput {
+                text: combined.trim().to_string(),
+                reasoning: normalize_reasoning(reasoning)
+                    .or_else(|| extract_reasoning_from_value(&value)),
+            });
         }
     }
 
@@ -6163,14 +6424,85 @@ fn parse_responses_output(value: serde_json::Value) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join("\n");
         if !merged.trim().is_empty() {
-            return Ok(merged.trim().to_string());
+            return Ok(ModelCallOutput {
+                text: merged.trim().to_string(),
+                reasoning: extract_reasoning_from_value(&value),
+            });
+        }
+    }
+
+    if let Some(reasoning) = extract_reasoning_from_value(&value) {
+        if let Some(text) = value
+            .get("text")
+            .and_then(|t| t.as_str())
+            .or_else(|| value.get("output").and_then(|v| v.as_str()))
+        {
+            if !text.trim().is_empty() {
+                return Ok(ModelCallOutput {
+                    text: text.trim().to_string(),
+                    reasoning: Some(reasoning),
+                });
+            }
         }
     }
 
     Err("Unable to parse response output".to_string())
 }
 
-fn parse_chat_output(value: serde_json::Value) -> Result<String, String> {
+fn extract_reasoning_from_value(value: &serde_json::Value) -> Option<String> {
+    fn dfs(node: &serde_json::Value, buffer: &mut String, in_reason_context: bool) {
+        match node {
+            Value::String(text) => {
+                if in_reason_context {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        if !buffer.is_empty() && !buffer.ends_with(' ') {
+                            buffer.push(' ');
+                        }
+                        buffer.push_str(trimmed);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    dfs(item, buffer, in_reason_context);
+                }
+            }
+            Value::Object(map) => {
+                let mut reason_context = in_reason_context;
+                if let Some(obj_type) = map
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_ascii_lowercase())
+                {
+                    if obj_type.contains("reasoning") {
+                        reason_context = true;
+                    }
+                }
+                for (key, val) in map {
+                    let key_lower = key.to_ascii_lowercase();
+                    let key_is_reason = key_lower.contains("reasoning")
+                        || key_lower == "reasoning_text"
+                        || key_lower == "reasoning_summary"
+                        || key_lower == "reasoning_content"
+                        || (reason_context
+                            && matches!(
+                                key_lower.as_str(),
+                                "text" | "content" | "delta" | "message" | "parts"
+                            ));
+                    dfs(val, buffer, reason_context || key_is_reason);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut buffer = String::new();
+    dfs(value, &mut buffer, false);
+    normalize_reasoning(buffer)
+}
+
+fn parse_chat_output(value: serde_json::Value) -> Result<ModelCallOutput, String> {
     if let Some(choice) = value
         .get("choices")
         .and_then(|c| c.as_array())
@@ -6180,16 +6512,36 @@ fn parse_chat_output(value: serde_json::Value) -> Result<String, String> {
     {
         if let Some(text) = content.as_str() {
             if !text.trim().is_empty() {
-                return Ok(text.trim().to_string());
+                return Ok(ModelCallOutput {
+                    text: text.trim().to_string(),
+                    reasoning: message
+                        .get("reasoning")
+                        .and_then(|r| r.as_str())
+                        .map(|s| s.trim().to_string())
+                        .and_then(normalize_reasoning)
+                        .or_else(|| extract_reasoning_from_value(&value)),
+                });
             }
         } else if let Some(array) = content.as_array() {
-            let merged = array
-                .iter()
-                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !merged.trim().is_empty() {
-                return Ok(merged.trim().to_string());
+            let mut combined = String::new();
+            let mut reasoning = String::new();
+            for item in array {
+                if let Some(part_text) = item.get("text").and_then(|t| t.as_str()) {
+                    combined.push_str(part_text);
+                    if !combined.ends_with('\n') {
+                        combined.push('\n');
+                    }
+                }
+                if let Some(reason_text) = item.get("reasoning").and_then(|r| r.as_str()) {
+                    reasoning.push_str(reason_text);
+                }
+            }
+            if !combined.trim().is_empty() {
+                return Ok(ModelCallOutput {
+                    text: combined.trim().to_string(),
+                    reasoning: normalize_reasoning(reasoning)
+                        .or_else(|| extract_reasoning_from_value(&value)),
+                });
             }
         }
     }
@@ -6214,7 +6566,7 @@ const SPEC_COMBINE_SYSTEM_PROMPT: &str = "You are consolidating multiple specifi
 const SPEC_PROMPT_TEMPLATE: &str = "You have access to the source code inside the following locations:\n{project_locations}\n\nFocus on {target_label}.\nGenerate a security-focused project specification. Parallelize discovery when enumerating files and avoid spending time on tests, vendored dependencies, or build artefacts. Follow the template exactly and return only markdown.\n\nTemplate:\n{spec_template}\n";
 
 const MARKDOWN_OUTPUT_GUARD: &str = "\n# Output Guard (strict)\n    - Output only the final markdown content requested.\n    - Do not include goal, analysis, planning, chain-of-thought, or step lists.\n    - Do not echo prompt sections like \"Task\", \"Steps\", \"Output\", or \"Important\".\n    - Do not include any XML/angle-bracket blocks (e.g., <...> inputs) in the output.\n    - Do not wrap the entire response in code fences; use code fences only for code snippets.\n    - Do not include apologies, disclaimers, or references to being an AI model.\n";
-const MARKDOWN_FIX_MODEL: &str = "gpt-5-codex";
+const MARKDOWN_FIX_MODEL: &str = GPT_5_CODEX_MEDIUM_MODEL;
 const MARKDOWN_FIX_SYSTEM_PROMPT: &str = "You are a meticulous technical editor. Polish markdown formatting while preserving the original security analysis content. Focus on fixing numbering, bullet spacing, code fences, and diagram syntax without adding or removing information.";
 const SPEC_MARKDOWN_TEMPLATE: &str = "# Project Specification\n- Location: {target_label}\n- Prepared by: {model_name}\n- Date: {date}\n- In-scope paths:\n```\n{project_locations}\n```\n\n## Overview\nSummarize the product or service, primary users, and the business problem it solves. Highlight the most security relevant entry points.\n\n## Architecture Summary\nDescribe the high-level system architecture, major services, data stores, and external integrations. Include a concise mermaid flowchart when it improves clarity.\n\n## Components\nList 5-8 major components. For each, note the role, responsibilities, key dependencies, and security-critical behavior.\n\n## Business Flows\nDocument up to 5 important flows (CRUD, external integrations, workflow orchestration). For each flow capture triggers, main steps, data touched, and security notes. Include a short mermaid sequence diagram if helpful.\n\n## Authentication\nExplain how principals authenticate, token lifecycles, libraries used, and how secrets are managed.\n\n## Authorization\nDescribe the authorization model, enforcement points, privileged roles, and escalation paths.\n\n## Data Classification\nIdentify sensitive data types handled by the project and where they are stored or transmitted.\n\n## Infrastructure and Deployment\nSummarize infrastructure-as-code, runtime platforms, and configuration or secret handling that affects security posture.\n";
 
