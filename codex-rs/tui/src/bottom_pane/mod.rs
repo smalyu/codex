@@ -274,6 +274,11 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    pub(crate) fn set_placeholder_text(&mut self, text: String) {
+        self.composer.set_placeholder_text(text);
+        self.request_redraw();
+    }
+
     /// Get the current composer text (for tests and programmatic checks).
     pub(crate) fn composer_text(&self) -> String {
         self.composer.current_text()

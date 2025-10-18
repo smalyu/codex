@@ -92,10 +92,12 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PlainHistoryCell;
 use crate::markdown::append_markdown;
+use crate::security_review::SECURITY_REVIEW_FOLLOW_UP_MARKER;
 use crate::security_review::SecurityReviewFailure;
 use crate::security_review::SecurityReviewMode;
 use crate::security_review::SecurityReviewRequest;
 use crate::security_review::SecurityReviewResult;
+use crate::security_review::build_follow_up_user_prompt;
 use crate::security_review::run_security_review;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
@@ -269,6 +271,7 @@ pub(crate) struct ChatWidget {
     retry_status_header: Option<String>,
     conversation_id: Option<ConversationId>,
     frame_requester: FrameRequester,
+    default_placeholder: String,
     // Whether to include the initial welcome banner on session configured
     show_welcome_banner: bool,
     // When resuming an existing session (selected via resume picker), avoid an
@@ -289,6 +292,7 @@ pub(crate) struct ChatWidget {
     security_review_task: Option<JoinHandle<()>>,
     security_review_context: Option<SecurityReviewContext>,
     security_review_artifacts: Option<SecurityReviewArtifactsState>,
+    security_review_follow_up: Option<SecurityReviewFollowUpState>,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
 }
@@ -343,6 +347,14 @@ struct SecurityReviewContext {
     provider_name: String,
     started_at: Instant,
     last_log: Option<String>,
+}
+
+struct SecurityReviewFollowUpState {
+    repo_root: PathBuf,
+    scope_paths: Vec<String>,
+    mode: SecurityReviewMode,
+    follow_up_path: PathBuf,
+    follow_up_label: String,
 }
 
 #[allow(dead_code)]
@@ -1101,6 +1113,7 @@ impl ChatWidget {
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
+        let default_placeholder = placeholder.clone();
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), conversation_manager);
 
         Self {
@@ -1149,6 +1162,8 @@ impl ChatWidget {
             security_review_task: None,
             security_review_context: None,
             security_review_artifacts: None,
+            security_review_follow_up: None,
+            default_placeholder,
             last_rendered_width: std::cell::Cell::new(None),
         }
     }
@@ -1170,6 +1185,7 @@ impl ChatWidget {
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
+        let default_placeholder = placeholder.clone();
 
         let codex_op_tx =
             spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
@@ -1220,6 +1236,8 @@ impl ChatWidget {
             security_review_task: None,
             security_review_context: None,
             security_review_artifacts: None,
+            security_review_follow_up: None,
+            default_placeholder,
             last_rendered_width: std::cell::Cell::new(None),
         }
     }
@@ -1479,7 +1497,10 @@ impl ChatWidget {
         let mut items: Vec<InputItem> = Vec::new();
 
         if !text.is_empty() {
-            items.push(InputItem::Text { text: text.clone() });
+            let outbound = self
+                .security_review_follow_up_prompt(&text)
+                .unwrap_or_else(|| text.clone());
+            items.push(InputItem::Text { text: outbound });
         }
 
         for path in image_paths {
@@ -2054,6 +2075,32 @@ impl ChatWidget {
         self.config.model = model.to_string();
     }
 
+    fn clear_security_review_follow_up(&mut self) {
+        if self.security_review_follow_up.take().is_some() {
+            self.bottom_pane
+                .set_placeholder_text(self.default_placeholder.clone());
+        }
+    }
+
+    fn security_review_follow_up_prompt(&self, text: &str) -> Option<String> {
+        let state = self.security_review_follow_up.as_ref()?;
+        if text.starts_with(SECURITY_REVIEW_FOLLOW_UP_MARKER) {
+            return None;
+        }
+        let question = text.trim();
+        if question.is_empty() {
+            return None;
+        }
+        Some(build_follow_up_user_prompt(
+            state.mode,
+            &state.scope_paths,
+            state.follow_up_path.as_path(),
+            &state.repo_root,
+            state.follow_up_label.as_str(),
+            question,
+        ))
+    }
+
     pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
         self.add_to_history(history_cell::new_info_event(message, hint));
         self.request_redraw();
@@ -2101,7 +2148,7 @@ impl ChatWidget {
             self.bottom_pane
                 .update_status_header(String::from("Working"));
             self.security_review_context = None;
-            self.security_review_artifacts = None;
+            self.clear_security_review_follow_up();
             self.add_info_message("Security review cancelled.".to_string(), None);
             return true;
         }
@@ -2297,7 +2344,7 @@ impl ChatWidget {
             return;
         }
 
-        self.security_review_artifacts = None;
+        self.clear_security_review_follow_up();
 
         let repo_path = self.config.cwd.clone();
         if !repo_path.exists() {
@@ -2666,11 +2713,43 @@ impl ChatWidget {
         }
 
         self.security_review_artifacts = Some(SecurityReviewArtifactsState {
-            repo_root: repo_path,
+            repo_root: repo_path.clone(),
             snapshot_path: result.snapshot_path.clone(),
             bugs_path: result.bugs_path.clone(),
             report_path: result.report_path.clone(),
-            report_html_path: result.report_html_path,
+            report_html_path: result.report_html_path.clone(),
+        });
+
+        let follow_up_path = match mode {
+            SecurityReviewMode::Full => result
+                .report_path
+                .clone()
+                .or_else(|| result.report_html_path.clone())
+                .unwrap_or_else(|| result.bugs_path.clone()),
+            SecurityReviewMode::Bugs => result.bugs_path.clone(),
+        };
+        let has_report = result.report_path.is_some() || result.report_html_path.is_some();
+        let follow_up_label = if mode == SecurityReviewMode::Full && has_report {
+            "Report".to_string()
+        } else {
+            "Bugs".to_string()
+        };
+        let follow_up_display = display_path_for(&follow_up_path, &repo_path);
+        self.add_info_message(
+            format!(
+                "Security review follow-up ready — questions will include context from {follow_up_label} ({follow_up_display})."
+            ),
+            None,
+        );
+        self.bottom_pane
+            .set_placeholder_text("Ask a security review follow-up question".to_string());
+
+        self.security_review_follow_up = Some(SecurityReviewFollowUpState {
+            repo_root: repo_path,
+            scope_paths,
+            mode,
+            follow_up_path,
+            follow_up_label,
         });
     }
 
@@ -2680,6 +2759,7 @@ impl ChatWidget {
             .update_status_header(String::from("Working"));
         self.security_review_task = None;
         self.security_review_context = None;
+        self.clear_security_review_follow_up();
 
         self.add_error_message(format!("Security review failed: {}", error.message));
 

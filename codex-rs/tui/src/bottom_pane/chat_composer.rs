@@ -1504,6 +1504,10 @@ impl ChatComposer {
         self.is_task_running = running;
     }
 
+    pub(crate) fn set_placeholder_text(&mut self, placeholder: String) {
+        self.placeholder_text = placeholder;
+    }
+
     pub(crate) fn set_context_window_percent(&mut self, percent: Option<u8>) {
         if self.context_window_percent != percent {
             self.context_window_percent = percent;
