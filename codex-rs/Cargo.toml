@@ -29,6 +29,7 @@ members = [
     "protocol-ts",
     "rmcp-client",
     "responses-api-proxy",
+    "stdio-to-uds",
     "otel",
     "tui",
     "git-apply",
@@ -73,6 +74,7 @@ codex-protocol = { path = "protocol" }
 codex-protocol-ts = { path = "protocol-ts" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }
 codex-rmcp-client = { path = "rmcp-client" }
+codex-stdio-to-uds = { path = "stdio-to-uds" }
 codex-tui = { path = "tui" }
 codex-utils-json-to-toml = { path = "utils/json-to-toml" }
 codex-utils-readiness = { path = "utils/readiness" }
