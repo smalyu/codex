@@ -7,6 +7,7 @@ use std::time::Duration;
 use super::backends::ExecutionMode;
 use super::backends::backend_for_mode;
 use super::cache::ApprovalCache;
+use crate::codex::CODEX_SESSION_ID_ENV_VAR;
 use crate::codex::Session;
 use crate::error::CodexErr;
 use crate::error::SandboxErr;
@@ -109,6 +110,11 @@ impl Executor {
         request.params = backend
             .prepare(request.params, &request.mode, &config)
             .map_err(ExecError::from)?;
+
+        request.params.env.insert(
+            CODEX_SESSION_ID_ENV_VAR.to_string(),
+            session.conversation_id().to_string(),
+        );
 
         // Step 3: Decide sandbox placement, prompting for approval when needed.
         let sandbox_decision = select_sandbox(
