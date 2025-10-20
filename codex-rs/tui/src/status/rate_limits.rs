@@ -3,6 +3,8 @@ use crate::chatwidget::get_limits_duration;
 use super::helpers::format_reset_timestamp;
 use chrono::DateTime;
 use chrono::Local;
+use chrono::TimeZone;
+use chrono::Utc;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_core::protocol::RateLimitWindow;
 
@@ -34,8 +36,7 @@ impl RateLimitWindowDisplay {
     fn from_window(window: &RateLimitWindow, captured_at: DateTime<Local>) -> Self {
         let resets_at = window
             .resets_at
-            .as_deref()
-            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .and_then(|value| Utc.timestamp_opt(value, 0).single())
             .map(|dt| dt.with_timezone(&Local))
             .map(|dt| format_reset_timestamp(dt, captured_at));
 

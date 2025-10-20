@@ -53,6 +53,7 @@ use crate::state::TaskKind;
 use crate::token_data::PlanType;
 use crate::util::backoff;
 use chrono::DateTime;
+use chrono::TimeZone;
 use chrono::Utc;
 use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::config_types::ReasoningEffort as ReasoningEffortConfig;
@@ -74,6 +75,19 @@ struct Error {
     // Optional fields available on "usage_limit_reached" and "usage_not_included" errors
     plan_type: Option<PlanType>,
     resets_at: Option<String>,
+}
+
+fn parse_reset_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
+    value.and_then(|raw| {
+        raw.parse::<i64>()
+            .ok()
+            .and_then(|secs| Utc.timestamp_opt(secs, 0).single())
+            .or_else(|| {
+                DateTime::parse_from_rfc3339(raw)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .ok()
+            })
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -421,11 +435,7 @@ impl ModelClient {
                             let plan_type = error
                                 .plan_type
                                 .or_else(|| auth.as_ref().and_then(CodexAuth::get_plan_type));
-                            let resets_at = error
-                                .resets_at
-                                .as_deref()
-                                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                                .map(|dt| dt.with_timezone(&Utc));
+                            let resets_at = parse_reset_timestamp(error.resets_at.as_deref());
                             let codex_err = CodexErr::UsageLimitReached(UsageLimitReachedError {
                                 plan_type,
                                 resets_at,
@@ -637,7 +647,13 @@ fn parse_rate_limit_window(
         let resets_at = parse_header_str(headers, resets_header)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(std::string::ToString::to_string);
+            .and_then(|value| {
+                value.parse::<i64>().ok().or_else(|| {
+                    DateTime::parse_from_rfc3339(value)
+                        .map(|dt| dt.timestamp())
+                        .ok()
+                })
+            });
 
         let has_data = used_percent != 0.0
             || window_minutes.is_some_and(|minutes| minutes != 0)
@@ -1428,6 +1444,10 @@ mod tests {
         let resp: ErrorResponse = serde_json::from_str(json).expect("should deserialize schema");
 
         assert_matches!(resp.error.plan_type, Some(PlanType::Known(KnownPlan::Pro)));
+        assert_eq!(
+            resp.error.resets_at.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
 
         let plan_json = serde_json::to_string(&resp.error.plan_type).expect("serialize plan_type");
         assert_eq!(plan_json, "\"pro\"");
@@ -1441,8 +1461,13 @@ mod tests {
         let resp: ErrorResponse = serde_json::from_str(json).expect("should deserialize schema");
 
         assert_matches!(resp.error.plan_type, Some(PlanType::Unknown(ref s)) if s == "vip");
+        assert_eq!(
+            resp.error.resets_at.as_deref(),
+            Some("2024-01-01T00:01:00Z")
+        );
 
         let plan_json = serde_json::to_string(&resp.error.plan_type).expect("serialize plan_type");
         assert_eq!(plan_json, "\"vip\"");
     }
+
 }
