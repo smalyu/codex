@@ -8,7 +8,7 @@ In 2021, OpenAI released Codex, an AI system designed to generate code from natu
 
 ### Which models are supported?
 
-We recommend using Codex with GPT-5 Codex, our best coding model. The default reasoning level is medium, and you can upgrade to high for complex tasks with the `/model` command.
+We recommend using Codex with GPT-5 Codex, our best coding model. Reasoning effort is unset by default, so the provider applies its own default; set `/reasoning high` when you need extra depth.
 
 You can also use older models by using API-based auth and launching codex with the `--model` flag.
 
@@ -22,7 +22,7 @@ Yes. [`codex exec`](./exec.md) runs Codex in non-interactive mode with streaming
 
 ### How do I stop Codex from editing my files?
 
-By default, Codex can modify files in your current working directory (Auto mode). To prevent edits, run `codex` in read-only mode with the CLI flag `--sandbox read-only`. Alternatively, you can change the approval level mid-conversation with `/approvals`.
+Codex starts in read-only sandbox mode with `AskForApproval::OnRequest`, so it asks before modifying your workspace. To allow automatic writes, launch with `--sandbox workspace-write` or change approvals mid-conversation with `/approvals`.
 
 ### How do I connect Codex to MCP servers?
 
