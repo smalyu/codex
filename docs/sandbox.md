@@ -1,6 +1,6 @@
 ## Sandbox & approvals
 
-What Codex is allowed to do is governed by a combination of **sandbox modes** (what Codex is allowed to do without supervision) and **approval policies** (when you must confirm an action).  This page explains the options, how they interact, and how the sandbox behaves on each platform.
+What Codex is allowed to do is governed by a combination of **sandbox modes** (what Codex is allowed to do without supervision) and **approval policies** (when you must confirm an action). This page explains the options, how they interact, and how the sandbox behaves on each platform.
 
 ### Approval policies
 
