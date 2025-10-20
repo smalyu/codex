@@ -60,6 +60,7 @@ mod pager_overlay;
 pub mod public_widgets;
 mod render;
 mod resume_picker;
+mod security_prompts;
 mod security_report_viewer;
 mod security_review;
 mod session_log;

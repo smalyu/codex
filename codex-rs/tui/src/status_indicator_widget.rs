@@ -86,8 +86,8 @@ impl StatusIndicatorWidget {
         // (up to 3 lines per message) + optional ellipsis per truncated message + keybind + spacer line
         let inner_width = width.max(1) as usize;
         let mut total: u16 = 1; // status line
-        total = total.saturating_add(self.thinking_lines.len() as u16);
-        total = total.saturating_add(self.tool_calls.len() as u16);
+        total = total.saturating_add(self.thinking_lines.len().saturating_sub(1) as u16);
+        total = total.saturating_add(self.tool_calls.len().saturating_sub(1) as u16);
         if !self.queued_messages.is_empty() {
             total = total.saturating_add(1); // blank line between supplemental and queued messages
         }
@@ -198,30 +198,53 @@ impl WidgetRef for StatusIndicatorWidget {
         let pretty_elapsed = fmt_elapsed_compact(elapsed_duration.as_secs());
 
         // Plain rendering: no borders or padding so the live cell is visually indistinguishable from terminal scrollback.
-        let mut spans = Vec::with_capacity(5);
+        let latest_thinking = self.thinking_lines.last().map(String::as_str);
+        let latest_tool_call = self.tool_calls.last().map(String::as_str);
+
+        let mut spans = Vec::with_capacity(9);
         spans.push(spinner(Some(self.last_resume_at)));
         spans.push(" ".into());
         spans.extend(shimmer_spans(&self.header));
+        if let Some(progress) = self.progress {
+            let pct = (progress.clamp(0.0, 1.0) * 100.0).round();
+            spans.push(" ".into());
+            spans.push(format!("{pct:.0}%").dim());
+        }
+        if let Some(thinking) = latest_thinking {
+            spans.push(" - ".into());
+            spans.push(thinking.to_string().magenta());
+        }
+        if let Some(tool) = latest_tool_call {
+            spans.push(" - ".into());
+            spans.push(tool.to_string().cyan());
+        }
         spans.extend(vec![
             " ".into(),
             format!("({pretty_elapsed} • ").dim(),
             key_hint::plain(KeyCode::Esc).into(),
             " to interrupt)".dim(),
         ]);
-        if let Some(progress) = self.progress {
-            let pct = (progress.clamp(0.0, 1.0) * 100.0).round();
-            spans.push(" ".into());
-            spans.push(format!("{pct:.0}%").dim());
-        }
 
         // Build lines: status, then queued messages, then spacer.
         let mut lines: Vec<Line<'static>> = Vec::new();
         lines.push(Line::from(spans));
-        for thinking in &self.thinking_lines {
-            lines.push(vec![" ↺ ".magenta(), thinking.clone().magenta()].into());
+        let extra_thinking = self
+            .thinking_lines
+            .len()
+            .saturating_sub(usize::from(latest_thinking.is_some()));
+        if extra_thinking > 0 {
+            for thinking in self.thinking_lines.iter().take(extra_thinking) {
+                lines.push(vec![" ↺ ".magenta(), thinking.clone().magenta()].into());
+            }
         }
-        for call in &self.tool_calls {
-            lines.push(vec![" ↳ ".cyan(), call.clone().cyan()].into());
+        let extra_tool_calls = self
+            .tool_calls
+            .len()
+            .saturating_sub(usize::from(latest_tool_call.is_some()));
+        if extra_tool_calls > 0 {
+            for call in self.tool_calls.iter().take(extra_tool_calls) {
+                lines.push(vec![" ↳ ".cyan(), call.clone().cyan()].into());
+            }
         }
         if !self.queued_messages.is_empty() {
             lines.push(Line::from(""));

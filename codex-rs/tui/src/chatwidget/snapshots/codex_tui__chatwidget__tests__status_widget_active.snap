@@ -3,8 +3,7 @@ source: tui/src/chatwidget/tests.rs
 expression: terminal.backend()
 ---
 "                                                                                "
-"• Analyzing (0s • esc to interrupt)                                             "
-" ↺ **Analyzing**                                                                "
+"• Analyzing - **Analyzing** (0s • esc to interrupt)                             "
 "                                                                                "
 "                                                                                "
 "› Ask Codex to do anything                                                      "

@@ -322,6 +322,10 @@
     const rawHtml = usedMarked ? marked.parse(text) : basicMarkdown(text);
     contentEl.innerHTML = rawHtml;
 
+    // Fix up any ordered lists that were split by intervening blocks
+    // (e.g., fenced code or diagrams) and ended up as plain paragraphs.
+    try { fixLooseOrderedLists(); } catch {}
+
     const headings = Array.from(contentEl.querySelectorAll('h1, h2, h3, h4, h5, h6'));
     const used = new Set();
     headings.forEach(h => {
@@ -374,6 +378,70 @@
 
     // Add per-bug floating actions
     enhanceBugTicketUI();
+  }
+
+  // Convert top-level paragraphs that begin with a numeric marker (e.g.,
+  // "2. Title") into an ordered list, absorbing following siblings until the
+  // next numbered paragraph or a heading. This helps when the Markdown parser
+  // fails to keep a single <ol> across interspersed blocks.
+  function fixLooseOrderedLists() {
+    const container = contentEl;
+    let currentOl = null;
+    let currentLi = null;
+
+    function closeList() {
+      currentLi = null;
+      currentOl = null;
+    }
+
+    function startList(startAt, beforeNode) {
+      currentOl = document.createElement('ol');
+      if (startAt && startAt !== 1) currentOl.setAttribute('start', String(startAt));
+      container.insertBefore(currentOl, beforeNode);
+    }
+
+    // Iterate over a snapshot of children; nodes may move during the loop
+    let i = 0;
+    while (i < container.childNodes.length) {
+      const node = container.childNodes[i];
+      if (!node) { i += 1; continue; }
+
+      const isHeading = node.nodeType === 1 && /^H[1-6]$/.test(node.nodeName);
+      if (isHeading && currentOl) { closeList(); i += 1; continue; }
+
+      let markerMatch = null;
+      if (node.nodeType === 1 && node.nodeName === 'P') {
+        const txt = (node.textContent || '').trim();
+        markerMatch = txt.match(/^(\d+)\.\s+(.*)$/);
+      }
+
+      if (markerMatch) {
+        const start = parseInt(markerMatch[1], 10) || 1;
+        if (!currentOl) startList(start, node);
+        else if (!currentLi && start && start !== 1) currentOl.setAttribute('start', String(start));
+
+        // Begin a new list item and move paragraph contents into it
+        currentLi = document.createElement('li');
+        const html = (node.innerHTML || '').replace(/^\s*\d+\.\s+/, '');
+        currentLi.innerHTML = html;
+        currentOl.appendChild(currentLi);
+        // Remove marker paragraph from the container
+        container.removeChild(node);
+        // Do not advance index; the next sibling slid into this index
+        continue;
+      }
+
+      if (currentOl) {
+        // Absorb non-heading siblings (paragraphs, code blocks, diagrams, lists)
+        // into the current list item until next numbered paragraph or heading.
+        if (!currentLi) { closeList(); i += 1; continue; }
+        currentLi.appendChild(node);
+        // Node moved from container; do not increment i
+        continue;
+      }
+
+      i += 1;
+    }
   }
 
   // no cleanup — we rely on correct Markdown

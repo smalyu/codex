@@ -1004,8 +1004,13 @@ fn render_bug_sections(snapshots: &[BugSnapshot]) -> String {
             continue;
         }
         let mut composed = String::new();
-        composed.push_str(&format!("<a id=\"bug-{}\"></a>\n", snapshot.bug.summary_id));
-        composed.push_str(base);
+        let anchor_snippet = format!("<a id=\"bug-{}\"", snapshot.bug.summary_id);
+        if base.contains(&anchor_snippet) {
+            composed.push_str(base);
+        } else {
+            composed.push_str(&format!("<a id=\"bug-{}\"></a>\n", snapshot.bug.summary_id));
+            composed.push_str(base);
+        }
         if !matches!(snapshot.bug.validation.status, BugValidationStatus::Pending) {
             composed.push_str("\n\n#### Validation\n");
             let status_label = validation_status_label(&snapshot.bug.validation);
@@ -1573,6 +1578,12 @@ pub(crate) async fn run_security_review(
         for summary in all_summaries.iter_mut() {
             if let Some(updated) =
                 rewrite_bug_markdown_severity(summary.markdown.as_str(), summary.severity.as_str())
+            {
+                summary.markdown = updated.clone();
+                replacements.insert(summary.id, updated);
+            }
+            if let Some(updated) =
+                rewrite_bug_markdown_heading_id(summary.markdown.as_str(), summary.id)
             {
                 summary.markdown = updated.clone();
                 replacements.insert(summary.id, updated);
@@ -3986,6 +3997,12 @@ async fn analyze_files_individually(
                 summary.markdown = updated.clone();
                 replacements.insert(summary.id, updated);
             }
+            if let Some(updated) =
+                rewrite_bug_markdown_heading_id(summary.markdown.as_str(), summary.id)
+            {
+                summary.markdown = updated.clone();
+                replacements.insert(summary.id, updated);
+            }
         }
         if !replacements.is_empty() {
             for detail in bug_details.iter_mut() {
@@ -4066,6 +4083,12 @@ async fn analyze_files_individually(
         for summary in bug_summaries.iter_mut() {
             if let Some(updated) =
                 rewrite_bug_markdown_severity(summary.markdown.as_str(), summary.severity.as_str())
+            {
+                summary.markdown = updated.clone();
+                replacements.insert(summary.id, updated);
+            }
+            if let Some(updated) =
+                rewrite_bug_markdown_heading_id(summary.markdown.as_str(), summary.id)
             {
                 summary.markdown = updated.clone();
                 replacements.insert(summary.id, updated);
@@ -4947,6 +4970,38 @@ fn rewrite_bug_markdown_severity(markdown: &str, severity: &str) -> Option<Strin
     }
 }
 
+// Ensure bug detail heading includes the canonical summary ID and not a model-provided index
+fn rewrite_bug_markdown_heading_id(markdown: &str, summary_id: usize) -> Option<String> {
+    if markdown.trim().is_empty() {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut changed = false;
+    let mut updated_first_heading = false;
+    for line in markdown.lines() {
+        if !updated_first_heading {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("### ") {
+                // Drop any leading bracketed id like "[12] " from the heading text
+                let clean = rest
+                    .trim_start()
+                    .trim_start_matches('[')
+                    .trim_start_matches(|c: char| c.is_ascii_digit())
+                    .trim_start_matches(']')
+                    .trim_start();
+                // Prepend an explicit anchor for stable linking
+                out.push(format!("<a id=\"bug-{summary_id}\"></a>"));
+                out.push(format!("### [{summary_id}] {clean}"));
+                changed = true;
+                updated_first_heading = true;
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    if changed { Some(out.join("\n")) } else { None }
+}
+
 fn make_bug_summary_table(bugs: &[BugSummary]) -> Option<String> {
     if bugs.is_empty() {
         return None;
@@ -4967,7 +5022,16 @@ fn make_bug_summary_table(bugs: &[BugSummary]) -> Option<String> {
     for (display_idx, bug) in ordered.iter().enumerate() {
         let id = display_idx + 1;
         let anchor_id = bug.id;
-        let raw_title = sanitize_table_field(&bug.title);
+        let mut raw_title = sanitize_table_field(&bug.title);
+        // Strip any leading bracketed numeric id from titles (e.g., "[5] Title")
+        if let Some(stripped) = raw_title
+            .trim_start()
+            .strip_prefix('[')
+            .and_then(|s| s.split_once(']'))
+            .map(|(_, rest)| rest.trim_start())
+        {
+            raw_title = stripped.to_string();
+        }
         let link_label = if raw_title == "-" {
             format!("Bug {anchor_id}")
         } else {
@@ -5015,7 +5079,16 @@ fn make_bug_summary_table_from_bugs(bugs: &[SecurityReviewBug]) -> Option<String
     for (display_idx, bug) in ordered.iter().enumerate() {
         let id = display_idx + 1;
         let anchor_id = bug.summary_id;
-        let raw_title = sanitize_table_field(&bug.title);
+        let mut raw_title = sanitize_table_field(&bug.title);
+        // Strip any leading bracketed numeric id from titles (e.g., "[5] Title")
+        if let Some(stripped) = raw_title
+            .trim_start()
+            .strip_prefix('[')
+            .and_then(|s| s.split_once(']'))
+            .map(|(_, rest)| rest.trim_start())
+        {
+            raw_title = stripped.to_string();
+        }
         let link_label = if raw_title == "-" {
             format!("Bug {anchor_id}")
         } else {

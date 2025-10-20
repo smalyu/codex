@@ -347,6 +347,7 @@ struct SecurityReviewContext {
     provider_name: String,
     started_at: Instant,
     last_log: Option<String>,
+    thinking_lines: Vec<String>,
 }
 
 struct SecurityReviewFollowUpState {
@@ -2393,23 +2394,10 @@ impl ChatWidget {
             }
         }
 
-        let mut scope_prompt = scope_prompt;
-        if matches!(mode, SecurityReviewMode::Bugs)
-            && resolved_paths.is_empty()
-            && scope_prompt.is_none()
-        {
-            scope_prompt = Some(
-                "Suggest up to 20 directories most likely to contain critical or high-risk code paths. Prioritise request parsing, input validation, authentication, authorisation, and secret handling. Skip tests, vendor bundles, docs, and generated files.".to_string(),
-            );
-        }
+        let skip_auto_scope_confirmation = false;
 
-        let mut context_paths = display_paths.clone();
-        if context_paths.is_empty()
-            && let Some(prompt) = scope_prompt.as_ref()
-        {
-            let summary = truncate_text(prompt, 72);
-            context_paths.push(format!("Auto scope requested: {summary}"));
-        }
+        let context_paths = display_paths.clone();
+        // Do not echo the auto-scope prompt into the scope list; keep the header concise.
 
         let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
         let output_root = repo_path.join("appsec_review").join(timestamp);
@@ -2446,6 +2434,7 @@ impl ChatWidget {
             provider_name: self.config.model_provider.name.clone(),
             started_at: Instant::now(),
             last_log: None,
+            thinking_lines: Vec::new(),
         });
 
         let annotated_scope_prompt = if matches!(mode, SecurityReviewMode::Bugs) {
@@ -2467,6 +2456,7 @@ impl ChatWidget {
             provider: self.config.model_provider.clone(),
             auth: self.auth_manager.auth(),
             progress_sender: Some(self.app_event_tx.clone()),
+            skip_auto_scope_confirmation,
             auto_scope_prompt: annotated_scope_prompt,
         };
 
@@ -2562,10 +2552,84 @@ impl ChatWidget {
 
     pub(crate) fn on_security_review_log(&mut self, message: String) {
         if let Some(ctx) = self.security_review_context.as_mut() {
+            // Drop overly verbose heartbeat for bug analysis; header already shows progress.
+            if message.starts_with("Still waiting for bug analysis response from model") {
+                return;
+            }
+            // Extract trailing percent in the form " - NN%" and move it to the front.
+            // Enhance with a small 10-slot progress bar.
+            let mut percent_prefix = String::new();
+            let mut core = message.as_str();
+            if let Some(idx) = message.rfind(" - ") {
+                let tail = &message[idx + 3..];
+                if let Some(no_dot) = tail
+                    .strip_suffix('.')
+                    .or_else(|| Some(tail).filter(|t| !t.is_empty()))
+                    && let Some(num_str) = no_dot.strip_suffix('%').filter(|s| !s.is_empty())
+                    && num_str.chars().all(|c| c.is_ascii_digit())
+                {
+                    let pct: usize = num_str.parse::<usize>().unwrap_or(0).min(100);
+                    let width = 10usize;
+                    let filled = (pct * width) / 100;
+                    let mut bar = String::new();
+                    if filled > 0 {
+                        bar.push_str(&"█".repeat(filled));
+                    }
+                    if width > filled {
+                        bar.push_str(&"░".repeat(width - filled));
+                    }
+                    percent_prefix = format!("{pct}% {bar} ");
+                    core = &message[..idx];
+                }
+            }
+
             ctx.last_log = Some(message.clone());
-            let truncated = truncate_text(&message, 96);
-            let header = format!("Security review ({}) — {}", ctx.mode.as_str(), truncated);
-            self.bottom_pane.update_status_header(header);
+            // Compact known progress messages: show counts succinctly.
+            let mut display_core = core.trim();
+            if let Some(rest) = display_core
+                .strip_prefix("File triage progress:")
+                .or_else(|| display_core.strip_prefix("Bug analysis progress:"))
+            {
+                let tail = rest.trim();
+                if let Some(slash_pos) = tail.find('/') {
+                    // Keep "N/M" and append " files" for clarity.
+                    let (a, b) = tail.split_at(slash_pos);
+                    let _ = a.trim();
+                    let _ = b.trim();
+                    // Use the original tail (N/M) if it looks correct.
+                    if tail.chars().any(|c| c == '/') {
+                        display_core = Box::leak(format!("{tail} files").into_boxed_str());
+                    }
+                }
+            }
+
+            let truncated = truncate_text(display_core, 96);
+            let header = format!(
+                "Security review ({}) - {}{}",
+                ctx.mode.as_str(),
+                percent_prefix,
+                truncated
+            );
+
+            if message.starts_with("Model reasoning:") {
+                let reason = message.trim_start_matches("Model reasoning:").trim();
+                let line = truncate_text(reason, 160);
+                ctx.thinking_lines.push(line);
+                if ctx.thinking_lines.len() > 4 {
+                    let start = ctx.thinking_lines.len() - 4;
+                    ctx.thinking_lines = ctx.thinking_lines.split_off(start);
+                }
+                self.bottom_pane.update_status_snapshot(
+                    crate::status_indicator_widget::StatusSnapshot {
+                        header,
+                        progress: None,
+                        thinking: ctx.thinking_lines.clone(),
+                        tool_calls: Vec::new(),
+                    },
+                );
+            } else {
+                self.bottom_pane.update_status_header(header);
+            }
         }
     }
 
@@ -2707,7 +2771,8 @@ impl ChatWidget {
             let mut log_lines: Vec<Line<'static>> = Vec::new();
             log_lines.push(vec!["Logs".bold()].into());
             for entry in &result.logs {
-                log_lines.push(vec!["  ↳ ".dim(), entry.clone().into()].into());
+                let prefix = security_review_log_prefix(entry);
+                log_lines.push(vec![prefix.dim(), entry.clone().into()].into());
             }
             self.add_to_history(PlainHistoryCell::new(log_lines));
         }
@@ -2735,6 +2800,16 @@ impl ChatWidget {
             "Bugs".to_string()
         };
         let follow_up_display = display_path_for(&follow_up_path, &repo_path);
+
+        // Show bug summary table at the end, just before the follow-up line.
+        if let Some(table) = result.bug_summary_table.as_ref() {
+            let mut table_lines: Vec<Line<'static>> = Vec::new();
+            table_lines.push("Bug summary table".bold().into());
+            for row in table.lines() {
+                table_lines.push(Line::from(row.to_string()));
+            }
+            self.add_to_history(PlainHistoryCell::new(table_lines));
+        }
         self.add_info_message(
             format!(
                 "Security review follow-up ready — questions will include context from {follow_up_label} ({follow_up_display})."
@@ -2767,7 +2842,8 @@ impl ChatWidget {
             let mut log_lines: Vec<Line<'static>> = Vec::new();
             log_lines.push(vec!["Logs".bold()].into());
             for entry in error.logs {
-                log_lines.push(vec!["  ↳ ".dim(), entry.into()].into());
+                let prefix = security_review_log_prefix(&entry);
+                log_lines.push(vec![prefix.dim(), entry.into()].into());
             }
             self.add_to_history(PlainHistoryCell::new(log_lines));
         }
@@ -3072,6 +3148,50 @@ pub(crate) fn show_review_commit_picker_with_entries(
         search_placeholder: Some("Type to search commits".to_string()),
         ..Default::default()
     });
+}
+
+fn security_review_log_prefix(entry: &str) -> &'static str {
+    if is_security_review_tool_log(entry) {
+        "    ↳ "
+    } else {
+        "  ↳ "
+    }
+}
+
+fn is_security_review_tool_log(entry: &str) -> bool {
+    const TOOL_PREFIXES: &[&str] = &[
+        "Search `",
+        "No content matches found for `",
+        "Ripgrep content search for `",
+        "Stopping search commands for ",
+        "grep_files for `",
+        "No files matched `",
+        "Auto scope content search `",
+        "Auto scope grep_files search",
+        "Auto scope read `",
+    ];
+    if TOOL_PREFIXES.iter().any(|prefix| entry.starts_with(prefix)) {
+        return true;
+    }
+
+    if entry.starts_with("Auto scope ") && (entry.contains(" search ") || entry.contains(" read "))
+    {
+        return true;
+    }
+
+    if entry.contains(" verification for ") {
+        return true;
+    }
+
+    const TOOL_FRAGMENTS: &[&str] = &[
+        ": curl",
+        ": failed to run curl",
+        ": python",
+        ": failed to run python",
+    ];
+    TOOL_FRAGMENTS
+        .iter()
+        .any(|fragment| entry.contains(fragment))
 }
 
 #[cfg(test)]
