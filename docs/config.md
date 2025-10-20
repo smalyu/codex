@@ -164,6 +164,20 @@ If you want to be notified whenever a command fails, use "on-failure":
 approval_policy = "on-failure"
 ```
 
+## auth_credentials_store
+
+Controls where the CLI stores login credentials.
+
+```toml
+auth_credentials_store = "keyring"
+```
+
+Valid values:
+
+- `auto` (default) – Save credentials to the operating system keyring when available, otherwise fall back to `auth.json` under `CODEX_HOME`.
+- `keyring` – Require the keyring backend; the CLI reports an error if secure storage is unavailable.
+- `file` – Force `auth.json` storage inside `CODEX_HOME`.
+
 If you want the model to run until it decides that it needs to ask you for escalated permissions, use "on-request":
 
 ```toml

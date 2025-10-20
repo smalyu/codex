@@ -1,3 +1,4 @@
+use crate::auth::AuthCredentialsStoreMode;
 use crate::config_loader::LoadedConfigLayers;
 pub use crate::config_loader::load_config_as_toml;
 use crate::config_loader::load_config_layers_with_overrides;
@@ -156,6 +157,9 @@ pub struct Config {
 
     /// Definition for MCP servers that Codex can reach out to for tool calls.
     pub mcp_servers: HashMap<String, McpServerConfig>,
+
+    /// Preferred store for CLI auth credentials.
+    pub auth_credentials_store_mode: AuthCredentialsStoreMode,
 
     /// Preferred store for MCP OAuth credentials.
     /// keyring: Use an OS-specific keyring service.
@@ -847,6 +851,13 @@ pub struct ConfigToml {
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
 
+    /// Preferred backend for storing CLI auth credentials.
+    /// keyring: Use an OS-specific keyring service.
+    /// file: Use a file in the Codex home directory.
+    /// auto (default): Use the keyring if available, otherwise use a file.
+    #[serde(default)]
+    pub auth_credentials_store: Option<AuthCredentialsStoreMode>,
+
     /// Preferred backend for storing MCP OAuth credentials.
     /// keyring: Use an OS-specific keyring service.
     ///          https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/oauth.rs#L2
@@ -1293,6 +1304,7 @@ impl Config {
             user_instructions,
             base_instructions,
             mcp_servers: cfg.mcp_servers,
+            auth_credentials_store_mode: cfg.auth_credentials_store.unwrap_or_default(),
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
             mcp_oauth_credentials_store_mode: cfg.mcp_oauth_credentials_store.unwrap_or_default(),
@@ -1645,6 +1657,10 @@ approve_all = true
         )?;
 
         assert_eq!(
+            config.auth_credentials_store_mode,
+            AuthCredentialsStoreMode::Auto,
+        );
+        assert_eq!(
             config.mcp_oauth_credentials_store_mode,
             OAuthCredentialsStoreMode::Auto,
         );
@@ -1680,6 +1696,28 @@ approve_all = true
         assert!(!config.features.enabled(Feature::ViewImageTool));
         assert!(config.include_plan_tool);
         assert!(!config.include_view_image_tool);
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_honors_explicit_file_auth_store_mode() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml {
+            auth_credentials_store: Some(AuthCredentialsStoreMode::File),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.auth_credentials_store_mode,
+            AuthCredentialsStoreMode::File,
+        );
 
         Ok(())
     }
@@ -2719,6 +2757,7 @@ model_verbosity = "high"
                 user_instructions: None,
                 notify: None,
                 cwd: fixture.cwd(),
+                auth_credentials_store_mode: Default::default(),
                 mcp_servers: HashMap::new(),
                 mcp_oauth_credentials_store_mode: Default::default(),
                 model_providers: fixture.model_provider_map.clone(),
@@ -2786,6 +2825,7 @@ model_verbosity = "high"
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),
@@ -2868,6 +2908,7 @@ model_verbosity = "high"
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),
@@ -2936,6 +2977,7 @@ model_verbosity = "high"
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
+            auth_credentials_store_mode: Default::default(),
             mcp_servers: HashMap::new(),
             mcp_oauth_credentials_store_mode: Default::default(),
             model_providers: fixture.model_provider_map.clone(),

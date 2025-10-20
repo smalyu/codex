@@ -1,8 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
+use codex_core::AuthCredentialsStoreMode;
 use codex_core::AuthManager;
 use codex_core::auth::CLIENT_ID;
-use codex_core::auth::login_with_api_key;
+use codex_core::auth::login_with_api_key_with_store_mode;
 use codex_core::auth::read_openai_api_key_from_env;
 use codex_login::ServerOptions;
 use codex_login::ShutdownHandle;
@@ -131,6 +132,7 @@ pub(crate) struct AuthModeWidget {
     pub codex_home: PathBuf,
     pub login_status: LoginStatus,
     pub auth_manager: Arc<AuthManager>,
+    pub auth_store_mode: AuthCredentialsStoreMode,
 }
 
 impl AuthModeWidget {
@@ -454,7 +456,7 @@ impl AuthModeWidget {
     }
 
     fn save_api_key(&mut self, api_key: String) {
-        match login_with_api_key(&self.codex_home, &api_key) {
+        match login_with_api_key_with_store_mode(&self.codex_home, &api_key, self.auth_store_mode) {
             Ok(()) => {
                 self.error = None;
                 self.login_status = LoginStatus::AuthMode(AuthMode::ApiKey);

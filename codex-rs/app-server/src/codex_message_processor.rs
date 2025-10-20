@@ -59,7 +59,7 @@ use codex_core::RolloutRecorder;
 use codex_core::SessionMeta;
 use codex_core::auth::CLIENT_ID;
 use codex_core::auth::get_auth_file;
-use codex_core::auth::login_with_api_key;
+use codex_core::auth::login_with_api_key_with_store_mode;
 use codex_core::auth::try_read_auth_json;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -250,7 +250,11 @@ impl CodexMessageProcessor {
             }
         }
 
-        match login_with_api_key(&self.config.codex_home, &params.api_key) {
+        match login_with_api_key_with_store_mode(
+            &self.config.codex_home,
+            &params.api_key,
+            self.config.auth_credentials_store_mode,
+        ) {
             Ok(()) => {
                 self.auth_manager.reload();
                 self.outgoing
