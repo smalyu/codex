@@ -3,8 +3,8 @@
 
 <p align="center"><code>npm i -g @openai/codex</code></p>
 
-> [!IMPORTANT]
-> This is the documentation for the _legacy_ TypeScript implementation of the Codex CLI. It has been superseded by the _Rust_ implementation. See the [README in the root of the Codex repository](https://github.com/openai/codex/blob/main/README.md) for details.
+> [!NOTE]
+> This README focuses on the native Rust CLI. For additional deep dives, see the [docs/](../docs) folder and the [root README](https://github.com/openai/codex/blob/main/README.md).
 
 ![Codex demo GIF using: codex "explain this codebase to me"](../.github/demo.gif)
 
@@ -94,37 +94,8 @@ export OPENAI_API_KEY="your-api-key-here"
 >
 > The CLI will automatically load variables from `.env` (via `dotenv/config`).
 
-<details>
-<summary><strong>Use <code>--provider</code> to use other models</strong></summary>
-
-> Codex also allows you to use other providers that support the OpenAI Chat Completions API. You can set the provider in the config file or use the `--provider` flag. The possible options for `--provider` are:
->
-> - openai (default)
-> - openrouter
-> - azure
-> - gemini
-> - ollama
-> - mistral
-> - deepseek
-> - xai
-> - groq
-> - arceeai
-> - any other provider that is compatible with the OpenAI API
->
-> If you use a provider other than OpenAI, you will need to set the API key for the provider in the config file or in the environment variable as:
->
-> ```shell
-> export <provider>_API_KEY="your-api-key-here"
-> ```
->
-> If you use a provider not listed above, you must also set the base URL for the provider:
->
-> ```shell
-> export <provider>_BASE_URL="https://your-provider-api-base-url"
-> ```
-
-</details>
-<br />
+> [!TIP]
+> The CLI ships with OpenAI and local OSS providers out of the box. To add additional providers, edit the `[model_providers]` table in `~/.codex/config.toml`. See [Configuration guide](#configuration-guide) for examples.
 
 Run interactively:
 
@@ -139,7 +110,7 @@ codex "explain this codebase to me"
 ```
 
 ```shell
-codex --approval-mode full-auto "create the fanciest todo-list app"
+codex --full-auto "create the fanciest todo-list app"
 ```
 
 That's it - Codex will scaffold a file, run it inside a sandbox, install any
@@ -165,67 +136,61 @@ And it's **fully open-source** so you can see and contribute to how it develops!
 
 ## Security model & permissions
 
-Codex lets you decide _how much autonomy_ the agent receives and auto-approval policy via the
-`--approval-mode` flag (or the interactive onboarding prompt):
+Codex lets you decide _how much autonomy_ the agent receives via the
+`--ask-for-approval` flag (or the interactive onboarding prompt). The default is `on-request`.
 
-| Mode                      | What the agent may do without asking                                                                | Still requires approval                                                                         |
-| ------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| **Suggest** <br>(default) | <li>Read any file in the repo                                                                       | <li>**All** file writes/patches<li> **Any** arbitrary shell commands (aside from reading files) |
-| **Auto Edit**             | <li>Read **and** apply-patch writes to files                                                        | <li>**All** shell commands                                                                      |
-| **Full Auto**             | <li>Read/write files <li> Execute shell commands (network disabled, writes limited to your workdir) | -                                                                                               |
+| Mode (`--ask-for-approval …`) | Auto-approves                                                                                                                                  | Escalates to you when…                                                                                 |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `untrusted`                  | Built-in "safe" commands that only read files (`ls`, `cat`, `sed`, etc.)                                                                        | The model proposes writing to disk or running any other command.                                       |
+| `on-failure`                 | All commands, executed inside the configured sandbox with network access disabled and writes limited to the allowed directories.               | A command fails in the sandbox and the model wants to retry it without sandboxing.                     |
+| `on-request` _(default)_     | Whatever the model deems safe; it typically asks you before launching riskier commands or writing files.                                       | The model decides it wants confirmation, or the sandbox refuses a command and the model asks to retry. |
+| `never`                      | Everything, with no escalation.                                                                                                                | Never; failures are returned straight to the model.                                                    |
 
-In **Full Auto** every command is run **network-disabled** and confined to the
-current working directory (plus temporary files) for defense-in-depth. Codex
-will also show a warning/confirmation if you start in **auto-edit** or
-**full-auto** while the directory is _not_ tracked by Git, so you always have a
-safety net.
-
-Coming soon: you'll be able to whitelist specific commands to auto-execute with
-the network enabled, once we're confident in additional safeguards.
+Use `codex --full-auto` as a shorthand for `--ask-for-approval on-failure --sandbox workspace-write`. For air-gapped or CI environments that provide their own isolation, `--dangerously-bypass-approvals-and-sandbox` disables both confirmation prompts and sandboxing—double-check before using it.
 
 ### Platform sandboxing details
 
 The hardening mechanism Codex uses depends on your OS:
 
 - **macOS 12+** - commands are wrapped with **Apple Seatbelt** (`sandbox-exec`).
-
   - Everything is placed in a read-only jail except for a small set of
     writable roots (`$PWD`, `$TMPDIR`, `~/.codex`, etc.).
-  - Outbound network is _fully blocked_ by default - even if a child process
+  - Outbound network is _fully blocked_ by default – even if a child process
     tries to `curl` somewhere it will fail.
 
-- **Linux** - there is no sandboxing by default.
-  We recommend using Docker for sandboxing, where Codex launches itself inside a **minimal
-  container image** and mounts your repo _read/write_ at the same path. A
-  custom `iptables`/`ipset` firewall script denies all egress except the
-  OpenAI API. This gives you deterministic, reproducible runs without needing
-  root on the host. You can use the [`run_in_container.sh`](../codex-cli/scripts/run_in_container.sh) script to set up the sandbox.
+- **Linux** - commands run through the bundled `codex-linux-sandbox` helper. It combines **Landlock** filesystem rules with a **seccomp** filter, mirroring the macOS policy: commands start network-disabled and only the working directory (plus a few temp paths) are writable. You still get escape hatches via the `--sandbox` flag:
+  - `--sandbox read-only` is ideal for review-only sessions.
+  - `--sandbox danger-full-access` turns the sandbox off. Pair it with `--ask-for-approval untrusted` if you still want Codex to double-check risky commands.
+
+Containers (Docker/Podman) can still be useful when you want completely reproducible toolchains, GPU access, or custom OS packages. In that case launch the CLI inside your container and keep the built-in sandbox on; it will happily sandbox _inside_ the container.
 
 ---
 
 ## System requirements
 
-| Requirement                 | Details                                                         |
-| --------------------------- | --------------------------------------------------------------- |
-| Operating systems           | macOS 12+, Ubuntu 20.04+/Debian 10+, or Windows 11 **via WSL2** |
-| Node.js                     | **16 or newer** (Node 20 LTS recommended)                       |
-| Git (optional, recommended) | 2.23+ for built-in PR helpers                                   |
-| RAM                         | 4-GB minimum (8-GB recommended)                                 |
+| Requirement                 | Details                                                                 |
+| --------------------------- | ----------------------------------------------------------------------- |
+| Operating systems           | macOS 12+, Ubuntu 22.04+/Debian 12+, or Windows 11 via WSL2             |
+| Runtime dependencies        | None for the packaged binaries (install via npm, Homebrew, or releases) |
+| Git (optional, recommended) | 2.39+ for built-in PR helpers                                           |
+| RAM                         | 4-GB minimum (8-GB recommended)                                         |
 
-> Never run `sudo npm install -g`; fix npm permissions instead.
+> Never run `sudo npm install -g`; fix npm or use another package manager instead.
 
 ---
 
 ## CLI reference
 
-| Command                              | Purpose                             | Example                              |
-| ------------------------------------ | ----------------------------------- | ------------------------------------ |
-| `codex`                              | Interactive REPL                    | `codex`                              |
-| `codex "..."`                        | Initial prompt for interactive REPL | `codex "fix lint errors"`            |
-| `codex -q "..."`                     | Non-interactive "quiet mode"        | `codex -q --json "explain utils.ts"` |
-| `codex completion <bash\|zsh\|fish>` | Print shell completion script       | `codex completion bash`              |
+| Command                              | Purpose                                             | Example                                              |
+| ------------------------------------ | --------------------------------------------------- | ---------------------------------------------------- |
+| `codex`                              | Launch the interactive TUI                         | `codex`                                              |
+| `codex "..."`                        | Seed the interactive session with an opening task  | `codex "fix lint errors"`                            |
+| `codex exec "..."`                   | Run a non-interactive turn in the current repo     | `codex exec "count the total number of TODO comments"` |
+| `codex exec --json "..."`            | Stream machine-readable events as JSON Lines       | `codex exec --json --full-auto "update CHANGELOG"`   |
+| `codex exec resume --last "..."`     | Resume the most recent non-interactive session     | `codex exec resume --last "ship the follow-up fix"`  |
+| `codex completion <bash\|zsh\|fish>` | Print shell completion script for your shell       | `codex completion bash`                              |
 
-Key flags: `--model/-m`, `--approval-mode/-a`, `--quiet/-q`, and `--notify`.
+Helpful flags: `--model/-m`, `--ask-for-approval/-a`, `--sandbox/-s`, `--oss`, `--full-auto`, `--config/-c key=value`, and `--web-search`.
 
 ---
 
@@ -236,8 +201,6 @@ You can give Codex extra instructions and guidance using `AGENTS.md` files. Code
 1. `~/.codex/AGENTS.md` - personal global guidance
 2. `AGENTS.md` at repo root - shared project notes
 3. `AGENTS.md` in the current working directory - sub-folder/feature specifics
-
-Disable loading of these files with `--no-project-doc` or the environment variable `CODEX_DISABLE_PROJECT_DOC=1`.
 
 ---
 
@@ -250,18 +213,20 @@ Run Codex head-less in pipelines. Example GitHub Action step:
   run: |
     npm install -g @openai/codex
     export OPENAI_API_KEY="${{ secrets.OPENAI_KEY }}"
-    codex -a auto-edit --quiet "update CHANGELOG for next release"
+    codex exec --json --full-auto "update CHANGELOG for next release" > codex.log
 ```
 
-Set `CODEX_QUIET_MODE=1` to silence interactive UI noise.
+`codex exec` streams its progress to stderr and writes the final assistant reply to stdout. Use `--json` when you need structured output, or `-o path/to/result.json` to capture just the closing message.
 
 ## Tracing / verbose logging
 
-Setting the environment variable `DEBUG=true` prints full API request and response details:
+Set `RUST_LOG` to control structured logging. The default filter is `codex_core=info,codex_tui=info,codex_rmcp_client=info`. To turn on verbose logs for troubleshooting:
 
 ```shell
-DEBUG=true codex
+RUST_LOG=codex_core=debug,codex_tui=debug codex
 ```
+
+Logs are written to `~/.codex/logs/codex-tui.log` in addition to stderr. You can use standard `env_logger` syntax (e.g., `RUST_LOG=info,reqwest=trace`).
 
 ---
 
@@ -302,28 +267,21 @@ pnpm add -g @openai/codex
 <summary><strong>Build from source</strong></summary>
 
 ```bash
-# Clone the repository and navigate to the CLI package
+# Clone the repository and navigate to the workspace root
 git clone https://github.com/openai/codex.git
-cd codex/codex-cli
+cd codex
 
-# Enable corepack
-corepack enable
+# Ensure you have the latest stable Rust toolchain
+rustup default stable
 
-# Install dependencies and build
-pnpm install
-pnpm build
+# (Optional) install just for handy automation
+cargo install just
 
-# Linux-only: download prebuilt sandboxing binaries (requires gh and zstd).
-./scripts/install_native_deps.sh
+# Build the interactive CLI
+cargo build -p codex-tui
 
-# Get the usage and the options
-node ./dist/cli.js --help
-
-# Run the locally-built CLI directly
-node ./dist/cli.js
-
-# Or link the command globally for convenience
-pnpm link
+# Run it directly from source
+cargo run -p codex-tui -- --help
 ```
 
 </details>
@@ -332,153 +290,93 @@ pnpm link
 
 ## Configuration guide
 
-Codex configuration files can be placed in the `~/.codex/` directory, supporting both YAML and JSON formats.
+Codex reads configuration from `~/.codex/config.toml` (or `$CODEX_HOME/config.toml`). TOML is the only supported format. Command-line flags (`--model`, `--ask-for-approval`, `--config key=value`, etc.) override whatever is set in the file.
 
 ### Basic configuration parameters
 
-| Parameter           | Type    | Default    | Description                      | Available Options                                                                              |
-| ------------------- | ------- | ---------- | -------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `model`             | string  | `o4-mini`  | AI model to use                  | Any model name supporting OpenAI API                                                           |
-| `approvalMode`      | string  | `suggest`  | AI assistant's permission mode   | `suggest` (suggestions only)<br>`auto-edit` (automatic edits)<br>`full-auto` (fully automatic) |
-| `fullAutoErrorMode` | string  | `ask-user` | Error handling in full-auto mode | `ask-user` (prompt for user input)<br>`ignore-and-continue` (ignore and proceed)               |
-| `notify`            | boolean | `true`     | Enable desktop notifications     | `true`/`false`                                                                                 |
+| Key                | Type     | Default                                      | Description                                                                                       |
+| ------------------ | -------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `model`            | string   | `gpt-5-codex` (macOS/Linux) / `gpt-5` (WSL)  | Selects the default model.                                                                        |
+| `model_provider`   | string   | `openai`                                     | Picks an entry from the `[model_providers]` table.                                                |
+| `approval_policy`  | string   | `on-request`                                 | Matches the CLI `--ask-for-approval` flag (`untrusted`, `on-failure`, `on-request`, `never`).      |
+| `sandbox_mode`     | string   | `workspace-write` on trusted repos, otherwise read-only | Controls how shell commands are sandboxed (`read-only`, `workspace-write`, `danger-full-access`). |
+| `notify`           | array    | _unset_                                      | Optional notifier command: e.g. `notify = ["terminal-notifier", "-message", "Codex done"]`.       |
+| `tui_notifications`| table    | `{"approvals": true, "turns": true}`         | Controls OSC 9 terminal notifications.                                                            |
+| `history.persistence` | string | `save-all`                                   | `save-all`, `commands-only`, or `none`.                                                           |
+| `hide_agent_reasoning` | bool | `false`                                      | Suppress reasoning summaries in the UI.                                                           |
 
-### Custom AI provider configuration
+Use `codex --config key=value` to experiment without editing the file. For example, `codex --config approval_policy="untrusted"`.
 
-In the `providers` object, you can configure multiple AI service providers. Each provider requires the following parameters:
+### Managing model providers
 
-| Parameter | Type   | Description                             | Example                       |
-| --------- | ------ | --------------------------------------- | ----------------------------- |
-| `name`    | string | Display name of the provider            | `"OpenAI"`                    |
-| `baseURL` | string | API service URL                         | `"https://api.openai.com/v1"` |
-| `envKey`  | string | Environment variable name (for API key) | `"OPENAI_API_KEY"`            |
+The CLI bundles two providers: `openai` (Responses API) and `oss` (local models via Ollama). You can add more by extending the `model_providers` map. Entries do **not** replace the defaults; they are merged in.
 
-### History configuration
+```toml
+model = "gpt-4o"
+model_provider = "openai-chat"
 
-In the `history` object, you can configure conversation history settings:
+[model_providers.openai-chat]
+name = "OpenAI (Chat Completions)"
+base_url = "https://api.openai.com/v1"
+wire_api = "chat"
+env_key = "OPENAI_API_KEY"
 
-| Parameter           | Type    | Description                                            | Example Value |
-| ------------------- | ------- | ------------------------------------------------------ | ------------- |
-| `maxSize`           | number  | Maximum number of history entries to save              | `1000`        |
-| `saveHistory`       | boolean | Whether to save history                                | `true`        |
-| `sensitivePatterns` | array   | Patterns of sensitive information to filter in history | `[]`          |
-
-### Configuration examples
-
-1. YAML format (save as `~/.codex/config.yaml`):
-
-```yaml
-model: o4-mini
-approvalMode: suggest
-fullAutoErrorMode: ask-user
-notify: true
+[model_providers.ollama]
+name = "Ollama"
+base_url = "http://localhost:11434/v1"
 ```
 
-2. JSON format (save as `~/.codex/config.json`):
+Set API keys by exporting the environment variable referenced by each provider (`env_key`). If you need to override headers or query parameters, add `http_headers`, `env_http_headers`, or `query_params` within the provider block. See [`docs/config.md`](../docs/config.md#model_providers) for more examples, including Azure and custom retries.
 
-```json
-{
-  "model": "o4-mini",
-  "approvalMode": "suggest",
-  "fullAutoErrorMode": "ask-user",
-  "notify": true
-}
+### History, profiles, and overrides
+
+- History is controlled via the `[history]` table. Example:
+
+  ```toml
+  [history]
+  persistence = "commands-only"
+  redact_patterns = ["api_key=*"]
+  ```
+
+- Use profiles to store alternative defaults:
+
+  ```toml
+  [profiles.ops]
+  model = "gpt-5"
+  approval_policy = "untrusted"
+  sandbox_mode = "read-only"
+  ```
+
+  Launch with `codex --profile ops`.
+
+- Override individual keys for a single run: `codex --config history.persistence="none"`.
+
+### MCP servers and instructions
+
+Add MCP integrations with `[mcp_servers.<id>]` blocks (stdio or streamable HTTP). Refer to [`docs/config.md#mcps`](../docs/config.md#mcp-integration) for the schema.
+
+For persistent guidance, create `AGENTS.md` files in `~/.codex`, your repo root, or subdirectories. Codex merges them from root to current directory before each turn.
+
+### Example `config.toml`
+
+```toml
+model = "gpt-5-codex"
+model_provider = "openai"
+approval_policy = "untrusted"
+sandbox_mode = "workspace-write"
+
+[history]
+persistence = "save-all"
+
+[model_providers.azure]
+name = "Azure"
+base_url = "https://YOUR_RESOURCE_NAME.openai.azure.com/openai"
+env_key = "AZURE_OPENAI_API_KEY"
+wire_api = "responses"
+query_params = { api-version = "2025-04-01-preview" }
 ```
 
-### Full configuration example
-
-Below is a comprehensive example of `config.json` with multiple custom providers:
-
-```json
-{
-  "model": "o4-mini",
-  "provider": "openai",
-  "providers": {
-    "openai": {
-      "name": "OpenAI",
-      "baseURL": "https://api.openai.com/v1",
-      "envKey": "OPENAI_API_KEY"
-    },
-    "azure": {
-      "name": "AzureOpenAI",
-      "baseURL": "https://YOUR_PROJECT_NAME.openai.azure.com/openai",
-      "envKey": "AZURE_OPENAI_API_KEY"
-    },
-    "openrouter": {
-      "name": "OpenRouter",
-      "baseURL": "https://openrouter.ai/api/v1",
-      "envKey": "OPENROUTER_API_KEY"
-    },
-    "gemini": {
-      "name": "Gemini",
-      "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai",
-      "envKey": "GEMINI_API_KEY"
-    },
-    "ollama": {
-      "name": "Ollama",
-      "baseURL": "http://localhost:11434/v1",
-      "envKey": "OLLAMA_API_KEY"
-    },
-    "mistral": {
-      "name": "Mistral",
-      "baseURL": "https://api.mistral.ai/v1",
-      "envKey": "MISTRAL_API_KEY"
-    },
-    "deepseek": {
-      "name": "DeepSeek",
-      "baseURL": "https://api.deepseek.com",
-      "envKey": "DEEPSEEK_API_KEY"
-    },
-    "xai": {
-      "name": "xAI",
-      "baseURL": "https://api.x.ai/v1",
-      "envKey": "XAI_API_KEY"
-    },
-    "groq": {
-      "name": "Groq",
-      "baseURL": "https://api.groq.com/openai/v1",
-      "envKey": "GROQ_API_KEY"
-    },
-    "arceeai": {
-      "name": "ArceeAI",
-      "baseURL": "https://conductor.arcee.ai/v1",
-      "envKey": "ARCEEAI_API_KEY"
-    }
-  },
-  "history": {
-    "maxSize": 1000,
-    "saveHistory": true,
-    "sensitivePatterns": []
-  }
-}
-```
-
-### Custom instructions
-
-You can create a `~/.codex/AGENTS.md` file to define custom guidance for the agent:
-
-```markdown
-- Always respond with emojis
-- Only use git commands when explicitly requested
-```
-
-### Environment variables setup
-
-For each AI provider, you need to set the corresponding API key in your environment variables. For example:
-
-```bash
-# OpenAI
-export OPENAI_API_KEY="your-api-key-here"
-
-# Azure OpenAI
-export AZURE_OPENAI_API_KEY="your-azure-api-key-here"
-export AZURE_OPENAI_API_VERSION="2025-04-01-preview" (Optional)
-
-# OpenRouter
-export OPENROUTER_API_KEY="your-openrouter-key-here"
-
-# Similarly for other providers
-```
+Restart Codex (or run the next command with `--config`) after editing the file to pick up changes.
 
 ---
 
@@ -494,7 +392,7 @@ In 2021, OpenAI released Codex, an AI system designed to generate code from natu
 <details>
 <summary>Which models are supported?</summary>
 
-Any model available with [Responses API](https://platform.openai.com/docs/api-reference/responses). The default is `o4-mini`, but pass `--model gpt-4.1` or set `model: gpt-4.1` in your config file to override.
+Any model available via the [Responses API](https://platform.openai.com/docs/api-reference/responses). The default is `gpt-5-codex` (or `gpt-5` on Windows/WSL), but pass `--model` or set `model = "gpt-4.1"` in `config.toml` to override.
 
 </details>
 <details>
@@ -507,13 +405,13 @@ It's possible that your [API account needs to be verified](https://help.openai.c
 <details>
 <summary>How do I stop Codex from editing my files?</summary>
 
-Codex runs model-generated commands in a sandbox. If a proposed command or file change doesn't look right, you can simply type **n** to deny the command or give the model feedback.
+Run with `codex --ask-for-approval untrusted` or `codex --sandbox read-only` to force Codex to ask before making changes. In interactive sessions, you can also deny a specific command or patch by answering **n** when prompted.
 
 </details>
 <details>
 <summary>Does it work on Windows?</summary>
 
-Not directly. It requires [Windows Subsystem for Linux (WSL2)](https://learn.microsoft.com/en-us/windows/wsl/install) - Codex is regularly tested on macOS and Linux with Node 20+, and also supports Node 16.
+Not natively. Use [Windows Subsystem for Linux (WSL2)](https://learn.microsoft.com/en-us/windows/wsl/install) and install the Linux build inside your WSL environment. We regularly test on macOS and Linux.
 
 </details>
 
@@ -544,59 +442,25 @@ We're excited to launch a **$1 million initiative** supporting open source proje
 
 ## Contributing
 
-This project is under active development and the code will likely change pretty significantly. We'll update this message once that's complete!
+This project is under active development and we currently prioritize external contributions that address bugs or security issues. If you are proposing a new feature or behavior change, please open an issue first and get confirmation from the team before investing significant effort.
 
-More broadly we welcome contributions - whether you are opening your very first pull request or you're a seasoned maintainer. At the same time we care about reliability and long-term maintainability, so the bar for merging code is intentionally **high**. The guidelines below spell out what "high-quality" means in practice and should make the whole process transparent and friendly.
+We care deeply about reliability and long-term maintainability, so the bar for merging code is intentionally **high**. Use this README together with the canonical [contributor guide](../docs/contributing.md).
 
 ### Development workflow
 
-- Create a _topic branch_ from `main` - e.g. `feat/interactive-prompt`.
-- Keep your changes focused. Multiple unrelated fixes should be opened as separate PRs.
-- Use `pnpm test:watch` during development for super-fast feedback.
-- We use **Vitest** for unit tests, **ESLint** + **Prettier** for style, and **TypeScript** for type-checking.
-- Before pushing, run the full test/type/lint suite:
-
-### Git hooks with Husky
-
-This project uses [Husky](https://typicode.github.io/husky/) to enforce code quality checks:
-
-- **Pre-commit hook**: Automatically runs lint-staged to format and lint files before committing
-- **Pre-push hook**: Runs tests and type checking before pushing to the remote
-
-These hooks help maintain code quality and prevent pushing code with failing tests. For more details, see [HUSKY.md](./HUSKY.md).
-
-```bash
-pnpm test && pnpm run lint && pnpm run typecheck
-```
-
-- If you have **not** yet signed the Contributor License Agreement (CLA), add a PR comment containing the exact text
-
-  ```text
-  I have read the CLA Document and I hereby sign the CLA
-  ```
-
-  The CLA-Assistant bot will turn the PR status green once all authors have signed.
-
-```bash
-# Watch mode (tests rerun on change)
-pnpm test:watch
-
-# Type-check without emitting files
-pnpm typecheck
-
-# Automatically fix lint + prettier issues
-pnpm lint:fix
-pnpm format:fix
-```
+- Create a topic branch from `main` (for example `feat/improve-sandbox`).
+- Keep changes focused; unrelated fixes should land as separate PRs.
+- Install Rust 1.80+ and `just`. Most commands run from the repo root:
+  - `just fmt` formats all Rust code.
+  - `just fix -p codex-tui` runs `cargo clippy --fix` and `cargo fmt` for the TUI crate (swap the crate name as appropriate).
+  - `cargo test -p codex-tui` or other crate-specific test commands keep feedback fast.
+- If you touch shared crates (for example `codex-core` or `codex-common`), prefer `cargo test --all-features` after the targeted suite passes.
 
 ### Debugging
 
-To debug the CLI with a visual debugger, do the following in the `codex-cli` folder:
-
-- Run `pnpm run build` to build the CLI, which will generate `cli.js.map` alongside `cli.js` in the `dist` folder.
-- Run the CLI with `node --inspect-brk ./dist/cli.js` The program then waits until a debugger is attached before proceeding. Options:
-  - In VS Code, choose **Debug: Attach to Node Process** from the command palette and choose the option in the dropdown with debug port `9229` (likely the first option)
-  - Go to <chrome://inspect> in Chrome and find **localhost:9229** and click **trace**
+- Run `cargo run -p codex-tui --` to launch the CLI under your debugger of choice. `cargo run -p codex-cli --bin codex-linux-sandbox -- --help` is helpful when iterating on the sandbox helper.
+- Set `RUST_LOG=codex_core=debug,codex_tui=debug` to capture verbose logs (see [Tracing](#tracing--verbose-logging)).
+- Use `cargo test -p <crate> -- --nocapture` to see println!/tracing output from tests while iterating on new features.
 
 ### Writing high-impact code changes
 
@@ -607,10 +471,10 @@ To debug the CLI with a visual debugger, do the following in the `codex-cli` fol
 
 ### Opening a pull request
 
-- Fill in the PR template (or include similar information) - **What? Why? How?**
-- Run **all** checks locally (`npm test && npm run lint && npm run typecheck`). CI failures that could have been caught locally slow down the process.
+- Fill in the PR template (or include similar information) – **What? Why? How?**
+- Run **all** checks locally (`cargo test`, `cargo clippy --tests`, `cargo fmt -- --check`, plus any `just fix -p <crate>` you relied on). CI failures that could have been caught locally slow down the process.
 - Make sure your branch is up-to-date with `main` and that you have resolved merge conflicts.
-- Mark the PR as **Ready for review** only when you believe it is in a merge-able state.
+- Mark the PR as **Ready for review** only when you believe it is in a mergeable state.
 
 ### Review process
 
@@ -655,29 +519,22 @@ The **DCO check** blocks merges until every commit in the PR carries the footer 
 
 ### Releasing `codex`
 
-To publish a new version of the CLI you first need to stage the npm package. A
-helper script in `codex-cli/scripts/` does all the heavy lifting. Inside the
-`codex-cli` folder run:
+To stage npm artifacts for a release, run the helper from the repo root:
 
 ```bash
-# Classic, JS implementation that includes small, native binaries for Linux sandboxing.
-pnpm stage-release
-
-# Optionally specify the temp directory to reuse between runs.
-RELEASE_DIR=$(mktemp -d)
-pnpm stage-release --tmp "$RELEASE_DIR"
-
-# "Fat" package that additionally bundles the native Rust CLI binaries for
-# Linux. End-users can then opt-in at runtime by setting CODEX_RUST=1.
-pnpm stage-release --native
+./scripts/stage_npm_packages.py \
+  --release-version 0.6.0 \
+  --package codex
 ```
 
-Go to the folder where the release is staged and verify that it works as intended. If so, run the following from the temp folder:
+The script assembles native binaries, hydrates the `vendor/` tree, and writes tarballs to `dist/npm/`. Inspect the generated package contents (for example by extracting them or running `npm pack --dry-run`). When satisfied:
 
+```bash
+cd dist/npm
+npm publish codex-0.6.0.tgz
 ```
-cd "$RELEASE_DIR"
-npm publish
-```
+
+Add additional `--package` flags if you need to ship the responses proxy or SDK in the same release. See [`codex-cli/scripts/README.md`](./scripts/README.md) for details and troubleshooting tips.
 
 ### Alternative build options
 
