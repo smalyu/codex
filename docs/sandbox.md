@@ -1,6 +1,6 @@
 ## Sandbox & approvals
 
-What Codex is allowed to do is governed by a combination of **sandbox modes** (what Codex is allowed to do without supervision) and **approval policies** (when you must confirm an action). This page explains the options, how they interact, and how the sandbox behaves on each platform.
+What Codex is allowed to do is governed by a combination of **sandbox modes** (what Codex is allowed to do without supervision) and **approval policies** (when you must confirm an action). Codex can inspect files and answer questions, but every edit or command requires approval.
 
 ### Approval policies
 
@@ -14,7 +14,7 @@ If you want maximum guardrails for a trusted repo, switch back to Read Only from
 
 - Every session starts in a sandbox. Until a repo is trusted, Codex enforces read-only access and will prompt before any write or command.
 - Marking a repo as trusted switches the default preset to Auto (`workspace-write` + `ask-for-approval on-request`) so Codex can keep iterating locally without nagging you.
-- The workspace always includes the current directory plus temporary directories like `/tmp`. `/status` shows the current sandbox preset, but it does not list the individual writable roots.
+- The workspace always includes the current directory plus temporary directories like `/tmp`.
 - You can override the defaults from the command line at any time:
   - `codex --sandbox read-only --ask-for-approval on-request`
   - `codex --sandbox workspace-write --ask-for-approval on-request`
