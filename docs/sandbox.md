@@ -4,7 +4,7 @@ What Codex is allowed to do is governed by a combination of **sandbox modes** (w
 
 ### Approval policies
 
-Codex starts conservatively. Until you explicitly tell it a workspace is trusted, the CLI defaults to **read-only sandboxing** with the `read-only` approval preset. Codex can inspect files and answer questions, but every edit or command requires approval.
+Codex starts conservatively. Until you explicitly tell it a workspace is trusted, the CLI defaults to **read-only sandboxing** with the `read-only` approval preset. Commands still run automatically under `AskForApproval::OnRequest`; Codex only prompts when it needs to write or request additional permissions.
 
 When you mark a workspace as trusted (for example via the onboarding prompt or `/approvals` → “Trust this directory”), Codex upgrades the default preset to **Auto**: sandboxed writes inside the workspace with `AskForApproval::OnRequest`. Codex only interrupts you when it needs to leave the workspace or rerun something outside the sandbox.
 
@@ -14,7 +14,7 @@ If you want maximum guardrails for a trusted repo, switch back to Read Only from
 
 - Every session starts in a sandbox. Until a repo is trusted, Codex enforces read-only access and will prompt before any write or command.
 - Marking a repo as trusted switches the default preset to Auto (`workspace-write` + `ask-for-approval on-request`) so Codex can keep iterating locally without nagging you.
-- The workspace always includes the current directory plus temporary directories like `/tmp`. Use `/status` to confirm the exact writable roots.
+- The workspace always includes the current directory plus temporary directories like `/tmp`. `/status` shows the current sandbox preset, but it does not list the individual writable roots.
 - You can override the defaults from the command line at any time:
   - `codex --sandbox read-only --ask-for-approval on-request`
   - `codex --sandbox workspace-write --ask-for-approval on-request`
@@ -56,12 +56,12 @@ You can also save presets as **profiles**:
 ```toml
 [profiles.full_auto]
 approval_policy = "on-request"
-sandbox_mode    = "workspace-write"
 
 [profiles.readonly_quiet]
 approval_policy = "never"
-sandbox_mode    = "read-only"
 ```
+
+> Profiles currently apply only their approval policy. Set the sandbox mode via CLI flags or top-level config keys until profile support catches up.
 
 ### Sandbox mechanics by platform {#platform-sandboxing-details}
 
