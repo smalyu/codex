@@ -657,7 +657,7 @@ pub struct RateLimitWindow {
     pub used_percent: f64,
     /// Rolling window duration, in minutes.
     #[ts(type = "number | null")]
-    pub window_minutes: Option<u64>,
+    pub window_minutes: Option<i64>,
     /// Timestamp (Unix seconds) when the window resets.
     #[ts(type = "number | null")]
     pub resets_at: Option<i64>,
