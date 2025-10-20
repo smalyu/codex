@@ -1043,6 +1043,7 @@ dependencies = [
  "codex-protocol",
  "codex-rmcp-client",
  "codex-utils-string",
+ "codex-windows-sandbox",
  "core-foundation 0.9.4",
  "core_test_support",
  "dirs",
@@ -1453,6 +1454,19 @@ dependencies = [
 [[package]]
 name = "codex-utils-string"
 version = "0.0.0"
+
+[[package]]
+name = "codex-windows-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs-next",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "windows-sys 0.52.0",
+]
 
 [[package]]
 name = "color-eyre"

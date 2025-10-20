@@ -150,16 +150,67 @@ pub async fn process_exec_tool_call(
                     env,
                     ..
                 } = params;
-                let child = spawn_command_under_windows_restricted_token(
-                    command,
-                    command_cwd,
-                    sandbox_policy,
-                    sandbox_cwd,
-                    StdioPolicy::RedirectForShellTool,
-                    env,
-                )
-                .await?;
-                consume_truncated_output(child, timeout_duration, stdout_stream.clone()).await
+                if std::env::var("CODEX_USE_RUST_WINDOWS_SANDBOX_INPROCESS")
+                    .ok()
+                    .as_deref()
+                    == Some("1")
+                {
+                    use codex_windows_sandbox::run_windows_sandbox_capture;
+                    let policy_json = serde_json::to_string(sandbox_policy)
+                        .map_err(|e| CodexErr::Fatal(e.to_string()))?;
+                    let cap = run_windows_sandbox_capture(
+                        &policy_json,
+                        sandbox_cwd,
+                        command,
+                        &command_cwd,
+                        env,
+                        Some(timeout_duration.as_millis() as u64),
+                    )
+                    .map_err(|e| CodexErr::Fatal(e.to_string()))?;
+
+                    let exit_status = if cap.timed_out {
+                        synthetic_exit_status(EXIT_CODE_SIGNAL_BASE + TIMEOUT_CODE)
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::process::ExitStatusExt;
+                            std::process::ExitStatus::from_raw(cap.exit_code)
+                        }
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::process::ExitStatusExt;
+                            std::process::ExitStatus::from_raw(cap.exit_code as u32)
+                        }
+                    };
+
+                    Ok(RawExecToolCallOutput {
+                        exit_status,
+                        stdout: StreamOutput {
+                            text: cap.stdout,
+                            truncated_after_lines: None,
+                        },
+                        stderr: StreamOutput {
+                            text: cap.stderr,
+                            truncated_after_lines: None,
+                        },
+                        aggregated_output: StreamOutput {
+                            text: Vec::new(),
+                            truncated_after_lines: None,
+                        },
+                        timed_out: cap.timed_out,
+                    })
+                } else {
+                    let child = spawn_command_under_windows_restricted_token(
+                        command,
+                        command_cwd,
+                        sandbox_policy,
+                        sandbox_cwd,
+                        StdioPolicy::RedirectForShellTool,
+                        env,
+                    )
+                    .await?;
+                    consume_truncated_output(child, timeout_duration, stdout_stream.clone()).await
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
