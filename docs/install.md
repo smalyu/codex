@@ -4,7 +4,7 @@
 
 | Requirement                 | Details                                                         |
 | --------------------------- | --------------------------------------------------------------- |
-| Operating systems           | macOS 12+, Ubuntu 20.04+/Debian 10+, or Windows 11 **via WSL2** |
+| Operating systems           | macOS 12+, Ubuntu 20.04+/Debian 10+, or Windows 11 (native or via WSL2) |
 | Git (optional, recommended) | 2.23+ for built-in PR helpers                                   |
 | RAM                         | 4-GB minimum (8-GB recommended)                                 |
 
@@ -33,8 +33,10 @@ cargo run --bin codex -- "explain this codebase to me"
 
 # After making changes, ensure the code is clean.
 cargo fmt -- --config imports_granularity=Item
-cargo clippy --tests
+cargo clippy --all-features --tests
+# or use `just clippy`
 
 # Run the tests.
-cargo test
+cargo nextest run --no-fail-fast
+# or use `just test`
 ```
