@@ -65,10 +65,23 @@ impl Executor {
 
     /// Updates the sandbox policy and working directory used for future
     /// executions without recreating the executor.
-    pub(crate) fn update_environment(&self, sandbox_policy: SandboxPolicy, sandbox_cwd: PathBuf) {
-        if let Ok(mut cfg) = self.config.write() {
-            cfg.sandbox_policy = sandbox_policy;
-            cfg.sandbox_cwd = sandbox_cwd;
+    pub(crate) fn update_environment(
+        &self,
+        sandbox_policy: SandboxPolicy,
+        sandbox_cwd: PathBuf,
+    ) -> ExecutorConfig {
+        match self.config.write() {
+            Ok(mut cfg) => {
+                cfg.sandbox_policy = sandbox_policy;
+                cfg.sandbox_cwd = sandbox_cwd;
+                cfg.clone()
+            }
+            Err(err) => {
+                let mut cfg = err.into_inner();
+                cfg.sandbox_policy = sandbox_policy;
+                cfg.sandbox_cwd = sandbox_cwd;
+                cfg.clone()
+            }
         }
     }
 
@@ -81,6 +94,7 @@ impl Executor {
         session: &Session,
         approval_policy: AskForApproval,
         context: &ExecCommandContext,
+        config: ExecutorConfig,
         on_exec_begin: F,
     ) -> Result<ExecToolCallOutput, ExecError>
     where
@@ -92,14 +106,7 @@ impl Executor {
                 maybe_translate_shell_command(request.params, session, request.use_shell_profile);
         }
 
-        // Step 1: Snapshot sandbox configuration so it stays stable for this run.
-        let config = self
-            .config
-            .read()
-            .map_err(|_| ExecError::rejection("executor config poisoned"))?
-            .clone();
-
-        // Step 2: Normalise parameters via the selected backend.
+        // Step 1: Normalise parameters via the selected backend.
         let backend = backend_for_mode(&request.mode);
         let stdout_stream = if backend.stream_stdout(&request.mode) {
             request.stdout_stream.clone()
@@ -110,7 +117,7 @@ impl Executor {
             .prepare(request.params, &request.mode, &config)
             .map_err(ExecError::from)?;
 
-        // Step 3: Decide sandbox placement, prompting for approval when needed.
+        // Step 2: Decide sandbox placement, prompting for approval when needed.
         let sandbox_decision = select_sandbox(
             &request,
             approval_policy,
@@ -126,7 +133,7 @@ impl Executor {
             self.approval_cache.insert(request.approval_command.clone());
         }
         on_exec_begin().await;
-        // Step 4: Launch the command within the chosen sandbox.
+        // Step 3: Launch the command within the chosen sandbox.
         let first_attempt = self
             .spawn(
                 request.params.clone(),
@@ -136,7 +143,7 @@ impl Executor {
             )
             .await;
 
-        // Step 5: Handle sandbox outcomes, optionally escalating to an unsandboxed retry.
+        // Step 4: Handle sandbox outcomes, optionally escalating to an unsandboxed retry.
         match first_attempt {
             Ok(output) => Ok(output),
             Err(CodexErr::Sandbox(SandboxErr::Timeout { output })) => {

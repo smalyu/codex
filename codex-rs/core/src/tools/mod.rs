@@ -129,7 +129,7 @@ pub(crate) async fn handle_container_exec_with_params(
         None => ExecutionMode::Shell,
     };
 
-    sess.services.executor.update_environment(
+    let executor_config = sess.services.executor.update_environment(
         turn_context.sandbox_policy.clone(),
         turn_context.cwd.clone(),
     );
@@ -152,6 +152,7 @@ pub(crate) async fn handle_container_exec_with_params(
             turn_diff_tracker.clone(),
             prepared_exec,
             turn_context.approval_policy,
+            executor_config,
         )
         .await;
 

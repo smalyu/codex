@@ -980,6 +980,7 @@ impl Session {
         turn_diff_tracker: SharedTurnDiffTracker,
         prepared: PreparedExec,
         approval_policy: AskForApproval,
+        config: ExecutorConfig,
     ) -> Result<ExecToolCallOutput, ExecError> {
         let PreparedExec { context, request } = prepared;
         let is_apply_patch = context.apply_patch.is_some();
@@ -992,13 +993,20 @@ impl Session {
         let result = self
             .services
             .executor
-            .run(request, self, approval_policy, &context, move || {
-                let turn_diff = begin_turn_diff.clone();
-                let ctx = begin_context.clone();
-                async move {
-                    session.on_exec_command_begin(turn_diff, ctx).await;
-                }
-            })
+            .run(
+                request,
+                self,
+                approval_policy,
+                &context,
+                config,
+                move || {
+                    let turn_diff = begin_turn_diff.clone();
+                    let ctx = begin_context.clone();
+                    async move {
+                        session.on_exec_command_begin(turn_diff, ctx).await;
+                    }
+                },
+            )
             .await;
 
         if matches!(
