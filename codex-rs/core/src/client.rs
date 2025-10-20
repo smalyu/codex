@@ -1469,5 +1469,4 @@ mod tests {
         let plan_json = serde_json::to_string(&resp.error.plan_type).expect("serialize plan_type");
         assert_eq!(plan_json, "\"vip\"");
     }
-
 }
