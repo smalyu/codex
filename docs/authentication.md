@@ -22,7 +22,7 @@ This key must, at minimum, have write access to the Responses API.
 
 If you've used the Codex CLI before with usage-based billing via an API key and want to switch to using your ChatGPT plan, follow these steps:
 
-1. Update the CLI and ensure `codex --version` is `0.20.0` or later
+1. Update the CLI to the latest available version and confirm `codex --version` reports that version
 2. Delete `~/.codex/auth.json` (on Windows: `C:\\Users\\USERNAME\\.codex\\auth.json`)
 3. Run `codex login` again
 
