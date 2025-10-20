@@ -37,6 +37,6 @@ cargo clippy --all-features --tests
 # or use `just clippy`
 
 # Run the tests.
-cargo nextest run --no-fail-fast
+cargo test
 # or use `just test`
 ```
