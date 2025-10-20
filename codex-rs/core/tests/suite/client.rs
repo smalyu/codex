@@ -915,7 +915,7 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
             "error": {
                 "type": "usage_limit_reached",
                 "message": "limit reached",
-                "resets_at": 1704067242,
+                "resets_at": "2024-01-01T00:00:42Z",
                 "plan_type": "pro"
             }
         }));
