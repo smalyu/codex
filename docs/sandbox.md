@@ -1,10 +1,10 @@
 ## Sandbox & approvals
 
-What Codex is allowed to do is governed by a combination of **sandbox modes** (what Codex is allowed to do without supervision) and **approval policies** (when you must confirm an action). Codex can inspect files and answer questions, but every edit or command requires approval.
+What Codex is allowed to do is governed by a combination of **sandbox modes** (what Codex is allowed to do without supervision) and **approval policies** (when you must confirm an action).  This page explains the options, how they interact, and how the sandbox behaves on each platform.
 
 ### Approval policies
 
-Codex starts conservatively. Until you explicitly tell it a workspace is trusted, the CLI defaults to **read-only sandboxing** with the `read-only` approval preset. Commands still run automatically under `AskForApproval::OnRequest`; Codex only prompts when it needs to write or request additional permissions.
+Codex starts conservatively. Until you explicitly tell it a workspace is trusted, the CLI defaults to **read-only sandboxing** with the `read-only` approval preset. Codex can inspect files and answer questions, but every edit or command requires approval.
 
 When you mark a workspace as trusted (for example via the onboarding prompt or `/approvals` → “Trust this directory”), Codex upgrades the default preset to **Auto**: sandboxed writes inside the workspace with `AskForApproval::OnRequest`. Codex only interrupts you when it needs to leave the workspace or rerun something outside the sandbox.
 
