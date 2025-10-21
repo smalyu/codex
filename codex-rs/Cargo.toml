@@ -33,10 +33,11 @@ members = [
     "otel",
     "tui",
     "git-apply",
+    "utils/image",
     "utils/json-to-toml",
-    "utils/readiness",
     "utils/pty",
-    "utils/string", "utils/image",
+    "utils/readiness",
+    "utils/string",
 ]
 resolver = "2"
 
@@ -78,8 +79,8 @@ codex-responses-api-proxy = { path = "responses-api-proxy" }
 codex-rmcp-client = { path = "rmcp-client" }
 codex-stdio-to-uds = { path = "stdio-to-uds" }
 codex-tui = { path = "tui" }
-codex-utils-json-to-toml = { path = "utils/json-to-toml" }
 codex-utils-image = { path = "utils/image" }
+codex-utils-json-to-toml = { path = "utils/json-to-toml" }
 codex-utils-pty = { path = "utils/pty" }
 codex-utils-readiness = { path = "utils/readiness" }
 codex-utils-string = { path = "utils/string" }
