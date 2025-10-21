@@ -8,22 +8,25 @@ use codex_protocol::protocol::ItemStartedEvent;
 use tracing::error;
 
 #[derive(Debug)]
-pub(crate) struct ItemCollector {
+pub(crate) struct TurnEvents {
     thread_id: ConversationId,
+    sub_id: String,
     turn_id: String,
     tx_event: Sender<Event>,
 }
 
-impl ItemCollector {
+impl TurnEvents {
     pub fn new(
         tx_event: Sender<Event>,
         thread_id: ConversationId,
+        sub_id: String,
         turn_id: String,
-    ) -> ItemCollector {
-        ItemCollector {
-            tx_event,
+    ) -> TurnEvents {
+        TurnEvents {
             thread_id,
+            sub_id,
             turn_id,
+            tx_event,
         }
     }
 
@@ -64,5 +67,16 @@ impl ItemCollector {
     pub async fn started_completed(&self, item: TurnItem) {
         self.started(item.clone()).await;
         self.completed(item).await;
+    }
+
+    pub async fn legacy(&self, msg: EventMsg) {
+        let event = Event {
+            id: self.sub_id.clone(),
+            msg,
+        };
+        let err = self.tx_event.send(event).await;
+        if let Err(e) = err {
+            error!("failed to send legacy event: {e}");
+        }
     }
 }

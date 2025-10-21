@@ -10,7 +10,7 @@ use crate::event_mapping::map_response_item_to_event_messages;
 use crate::function_tool::FunctionCallError;
 use crate::parse_command::parse_command;
 use crate::review_format::format_review_findings_block;
-use crate::state::ItemCollector;
+use crate::state::TurnEvents;
 use crate::terminal;
 use crate::user_notification::UserNotifier;
 use async_channel::Receiver;
@@ -267,7 +267,7 @@ pub(crate) struct TurnContext {
     pub(crate) is_review_mode: bool,
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
-    pub(crate) item_collector: ItemCollector,
+    pub(crate) turn_events: TurnEvents,
 }
 
 impl TurnContext {
@@ -351,6 +351,7 @@ pub(crate) struct SessionSettingsUpdate {
 
 impl Session {
     fn make_turn_context(
+        sub_id: String,
         auth_manager: Option<Arc<AuthManager>>,
         otel_event_manager: &OtelEventManager,
         provider: ModelProviderInfo,
@@ -402,7 +403,7 @@ impl Session {
             is_review_mode: false,
             final_output_json_schema: None,
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
-            item_collector: ItemCollector::new(tx_event, conversation_id, "turn_id".to_string()),
+            turn_events: TurnEvents::new(tx_event, conversation_id, sub_id.clone(), sub_id),
         }
     }
 
@@ -616,7 +617,10 @@ impl Session {
     }
 
     async fn record_initial_history(&self, conversation_history: InitialHistory) {
-        let turn_context = self.new_turn(SessionSettingsUpdate::default()).await;
+        // TODO(pakrym): Ideally we shouldn't need to create a fake turn context here.
+        let turn_context = self
+            .new_turn("init".to_string(), SessionSettingsUpdate::default())
+            .await;
         match conversation_history {
             InitialHistory::New => {
                 // Build and record initial items (user instructions + environment context)
@@ -648,7 +652,11 @@ impl Session {
         state.session_configuration = state.session_configuration.apply(&updates);
     }
 
-    pub(crate) async fn new_turn(&self, updates: SessionSettingsUpdate) -> Arc<TurnContext> {
+    pub(crate) async fn new_turn(
+        &self,
+        sub_id: String,
+        updates: SessionSettingsUpdate,
+    ) -> Arc<TurnContext> {
         let session_configuration = {
             let mut state = self.state.lock().await;
             let session_configuration = state.session_configuration.clone().apply(&updates);
@@ -657,6 +665,7 @@ impl Session {
         };
 
         let mut turn_context: TurnContext = Self::make_turn_context(
+            sub_id,
             Some(Arc::clone(&self.services.auth_manager)),
             &self.services.otel_event_manager,
             session_configuration.provider.clone(),
@@ -1140,7 +1149,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     Op::UserInput { items } => (items, SessionSettingsUpdate::default()),
                     _ => unreachable!(),
                 };
-                let current_context = sess.new_turn(updates).await;
+                let current_context = sess.new_turn(sub.id.clone(), updates).await;
                 current_context
                     .client
                     .get_otel_event_manager()
@@ -1165,7 +1174,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     }
 
                     current_context
-                        .item_collector
+                        .turn_events
                         .started_completed(TurnItem::UserMessage(UserMessageItem::new(&items)))
                         .await;
 
@@ -1277,7 +1286,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 sess.send_event(event).await;
             }
             Op::Compact => {
-                let turn_context = sess.new_turn(SessionSettingsUpdate::default()).await;
+                let turn_context = sess
+                    .new_turn(sub.id.clone(), SessionSettingsUpdate::default())
+                    .await;
                 // Attempt to inject input into current task
                 if let Err(items) = sess
                     .inject_input(vec![UserInput::Text {
@@ -1347,7 +1358,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 sess.send_event(event).await;
             }
             Op::Review { review_request } => {
-                let turn_context = sess.new_turn(SessionSettingsUpdate::default()).await;
+                let turn_context: Arc<TurnContext> = sess
+                    .new_turn(sub.id.clone(), SessionSettingsUpdate::default())
+                    .await;
                 spawn_review_thread(
                     sess.clone(),
                     config.clone(),
@@ -1434,10 +1447,11 @@ async fn spawn_review_thread(
         is_review_mode: true,
         final_output_json_schema: None,
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
-        item_collector: ItemCollector::new(
+        turn_events: TurnEvents::new(
             sess.get_tx_event(),
             sess.conversation_id,
             sub_id.to_string(),
+            sub_id.clone(),
         ),
     };
 
@@ -2642,6 +2656,7 @@ mod tests {
         };
 
         let turn_context = Session::make_turn_context(
+            "sub_1".to_string(),
             Some(Arc::clone(&auth_manager)),
             &otel_event_manager,
             session_configuration.provider.clone(),
@@ -2710,6 +2725,7 @@ mod tests {
         };
 
         let turn_context = Arc::new(Session::make_turn_context(
+            "sub_1".to_string(),
             Some(Arc::clone(&auth_manager)),
             &otel_event_manager,
             session_configuration.provider.clone(),
