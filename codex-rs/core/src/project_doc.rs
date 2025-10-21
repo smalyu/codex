@@ -316,9 +316,7 @@ async fn run_interpolation_script(
             Ok(result) => {
                 if result.exit_code == 0 {
                     let stdout = result.stdout.text;
-                    return Ok(stdout
-                        .trim_end_matches(|c| matches!(c, '\n' | '\r'))
-                        .to_string());
+                    return Ok(stdout.trim_end_matches(['\n', '\r']).to_string());
                 }
 
                 if can_fallback && manager.denied(sandbox_type, &result) {
@@ -336,7 +334,7 @@ async fn run_interpolation_script(
                     message.push_str(": ");
                     message.push_str(trimmed);
                 }
-                return Err(io::Error::new(io::ErrorKind::Other, message));
+                return Err(io::Error::other(message));
             }
             Err(err) if can_fallback => {
                 tracing::warn!(
@@ -346,15 +344,14 @@ async fn run_interpolation_script(
                 continue;
             }
             Err(err) => {
-                return Err(io::Error::new(io::ErrorKind::Other, err.to_string()));
+                return Err(io::Error::other(err.to_string()));
             }
         }
     }
 
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        format!("command `{script}` failed to execute"),
-    ))
+    Err(io::Error::other(format!(
+        "command `{script}` failed to execute"
+    )))
 }
 
 #[cfg(target_os = "macos")]
@@ -373,7 +370,7 @@ fn determine_sandbox_type() -> SandboxType {
 }
 
 fn sandbox_error_to_io(err: SandboxTransformError) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err.to_string())
+    io::Error::other(err.to_string())
 }
 
 fn candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
