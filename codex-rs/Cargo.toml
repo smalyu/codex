@@ -36,7 +36,7 @@ members = [
     "utils/json-to-toml",
     "utils/readiness",
     "utils/pty",
-    "utils/string",
+    "utils/string", "utils/image",
 ]
 resolver = "2"
 
@@ -79,6 +79,7 @@ codex-rmcp-client = { path = "rmcp-client" }
 codex-stdio-to-uds = { path = "stdio-to-uds" }
 codex-tui = { path = "tui" }
 codex-utils-json-to-toml = { path = "utils/json-to-toml" }
+codex-utils-image = { path = "utils/image" }
 codex-utils-pty = { path = "utils/pty" }
 codex-utils-readiness = { path = "utils/readiness" }
 codex-utils-string = { path = "utils/string" }

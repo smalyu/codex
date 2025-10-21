@@ -1,0 +1,16 @@
+[package]
+name = "codex-utils-image"
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true, features = ["jpeg", "png"] }
+tempfile = { workspace = true }

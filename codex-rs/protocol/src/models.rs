@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use base64::Engine;
+use codex_utils_image::load_and_resize_to_fit;
 use mcp_types::CallToolResult;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -10,6 +11,7 @@ use ts_rs::TS;
 
 use crate::user_input::UserInput;
 use schemars::JsonSchema;
+use codex_utils_image::error::ImageProcessingError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -215,24 +217,37 @@ impl From<Vec<UserInput>> for ResponseInputItem {
                 .filter_map(|c| match c {
                     UserInput::Text { text } => Some(ContentItem::InputText { text }),
                     UserInput::Image { image_url } => Some(ContentItem::InputImage { image_url }),
-                    UserInput::LocalImage { path } => match std::fs::read(&path) {
-                        Ok(bytes) => {
-                            let mime = mime_guess::from_path(&path)
-                                .first()
-                                .map(|m| m.essence_str().to_owned())
-                                .unwrap_or_else(|| "image".to_string());
-                            let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-                            Some(ContentItem::InputImage {
-                                image_url: format!("data:{mime};base64,{encoded}"),
-                            })
-                        }
+                    UserInput::LocalImage { path } => match load_and_resize_to_fit(&path) {
+                        Ok(image) => Some(ContentItem::InputImage {
+                            image_url: image.into_data_url(),
+                        }),
                         Err(err) => {
-                            tracing::warn!(
-                                "Skipping image {} – could not read file: {}",
-                                path.display(),
-                                err
-                            );
-                            None
+                            tracing::warn!("Failed to resize image {}: {}", path.display(), err);
+                            if matches!(err, ImageProcessingError::Read { .. }) {
+                                None
+                            } else {
+                                match std::fs::read(&path) {
+                                    Ok(bytes) => {
+                                        let mime = mime_guess::from_path(&path)
+                                            .first()
+                                            .map(|m| m.essence_str().to_owned())
+                                            .unwrap_or_else(|| "image".to_string());
+                                        let encoded =
+                                            base64::engine::general_purpose::STANDARD.encode(bytes);
+                                        Some(ContentItem::InputImage {
+                                            image_url: format!("data:{mime};base64,{encoded}"),
+                                        })
+                                    }
+                                    Err(read_err) => {
+                                        tracing::warn!(
+                                            "Skipping image {} – could not read file: {}",
+                                            path.display(),
+                                            read_err
+                                        );
+                                        None
+                                    }
+                                }
+                            }
                         }
                     },
                 })
