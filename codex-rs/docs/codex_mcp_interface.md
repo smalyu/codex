@@ -27,7 +27,7 @@ At a glance:
 - Approvals (server → client requests)
   - `applyPatchApproval`, `execCommandApproval`
 - Notifications (server → client)
-  - `loginChatGptComplete`, `authStatusChange`
+  - `loginChatGptComplete`, `authStatusChange`, `account/rateLimits/updated`
   - `codex/event` stream with agent events
 
 See code for full type definitions and exact shapes: `protocol/src/mcp_protocol.rs`.
@@ -97,6 +97,7 @@ Each response yields:
 While a conversation runs, the server sends notifications:
 
 - `codex/event` with the serialized Codex event payload. The shape matches `core/src/protocol.rs`’s `Event` and `EventMsg` types. Some notifications include a `_meta.requestId` to correlate with the originating request.
+- `account/rateLimits/updated` whenever Codex observes a new rate-limit snapshot for the active account. The payload matches `RateLimitSnapshot`.
 - Auth notifications via method names `loginChatGptComplete` and `authStatusChange`.
 
 Clients should render events and, when present, surface approval requests (see next section).

@@ -883,6 +883,10 @@ pub enum ServerNotification {
 
     /// The special session configured event for a new or resumed conversation.
     SessionConfigured(SessionConfiguredNotification),
+    #[serde(rename = "account/rateLimits/updated")]
+    #[ts(rename = "account/rateLimits/updated")]
+    #[strum(serialize = "account/rateLimits/updated")]
+    AccountRateLimitsUpdated(RateLimitSnapshot),
 }
 
 impl ServerNotification {
@@ -891,6 +895,7 @@ impl ServerNotification {
             ServerNotification::AuthStatusChange(params) => serde_json::to_value(params),
             ServerNotification::LoginChatGptComplete(params) => serde_json::to_value(params),
             ServerNotification::SessionConfigured(params) => serde_json::to_value(params),
+            ServerNotification::AccountRateLimitsUpdated(params) => serde_json::to_value(params),
         }
     }
 }
