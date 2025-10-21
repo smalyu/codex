@@ -10,8 +10,8 @@ use serde::ser::Serializer;
 use ts_rs::TS;
 
 use crate::user_input::UserInput;
-use schemars::JsonSchema;
 use codex_utils_image::error::ImageProcessingError;
+use schemars::JsonSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
