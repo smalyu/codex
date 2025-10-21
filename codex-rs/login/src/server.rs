@@ -38,10 +38,15 @@ pub struct ServerOptions {
     pub port: u16,
     pub open_browser: bool,
     pub force_state: Option<String>,
+    pub forced_chatgpt_workspace_id: Option<String>,
 }
 
 impl ServerOptions {
-    pub fn new(codex_home: PathBuf, client_id: String) -> Self {
+    pub fn new(
+        codex_home: PathBuf,
+        client_id: String,
+        forced_chatgpt_workspace_id: Option<String>,
+    ) -> Self {
         Self {
             codex_home,
             client_id,
@@ -49,6 +54,7 @@ impl ServerOptions {
             port: DEFAULT_PORT,
             open_browser: true,
             force_state: None,
+            forced_chatgpt_workspace_id,
         }
     }
 }
@@ -104,7 +110,14 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
     let server = Arc::new(server);
 
     let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
-    let auth_url = build_authorize_url(&opts.issuer, &opts.client_id, &redirect_uri, &pkce, &state);
+    let auth_url = build_authorize_url(
+        &opts.issuer,
+        &opts.client_id,
+        &redirect_uri,
+        &pkce,
+        &state,
+        opts.forced_chatgpt_workspace_id.as_deref(),
+    );
 
     if opts.open_browser {
         let _ = webbrowser::open(&auth_url);
@@ -240,6 +253,13 @@ async fn process_request(
                 .await
             {
                 Ok(tokens) => {
+                    if let Err(message) = ensure_workspace_allowed(
+                        opts.forced_chatgpt_workspace_id.as_deref(),
+                        &tokens.id_token,
+                    ) {
+                        eprintln!("Workspace restriction error: {message}");
+                        return login_error_response(&message);
+                    }
                     // Obtain API key via token-exchange and persist
                     let api_key = obtain_api_key(&opts.issuer, &opts.client_id, &tokens.id_token)
                         .await
@@ -358,25 +378,32 @@ fn build_authorize_url(
     redirect_uri: &str,
     pkce: &PkceCodes,
     state: &str,
+    forced_chatgpt_workspace_id: Option<&str>,
 ) -> String {
-    let query = vec![
-        ("response_type", "code"),
-        ("client_id", client_id),
-        ("redirect_uri", redirect_uri),
+    let mut query = vec![
+        ("response_type".to_owned(), "code".to_owned()),
+        ("client_id".to_owned(), client_id.to_owned()),
+        ("redirect_uri".to_owned(), redirect_uri.to_owned()),
         (
-            "scope",
-            "openid profile email offline_access api.model.audio.request",
+            "scope".to_owned(),
+            "openid profile email offline_access api.model.audio.request".to_owned(),
         ),
-        ("code_challenge", &pkce.code_challenge),
-        ("code_challenge_method", "S256"),
-        ("id_token_add_organizations", "true"),
-        ("codex_cli_simplified_flow", "true"),
-        ("state", state),
-        ("originator", originator().value.as_str()),
+        ("code_challenge".to_owned(), pkce.code_challenge.to_string()),
+        ("code_challenge_method".to_owned(), "S256".to_owned()),
+        ("id_token_add_organizations".to_owned(), "true".to_owned()),
+        ("codex_cli_simplified_flow".to_owned(), "true".to_owned()),
+        ("state".to_owned(), state.to_owned()),
+        (
+            "originator".to_owned(),
+            originator().value.as_str().to_owned(),
+        ),
     ];
+    if let Some(workspace_id) = forced_chatgpt_workspace_id {
+        query.push(("allowed_workspace_id".to_owned(), workspace_id.to_owned()));
+    }
     let qs = query
         .into_iter()
-        .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+        .map(|(k, v)| format!("{k}={}", urlencoding::encode(&v)))
         .collect::<Vec<_>>()
         .join("&");
     format!("{issuer}/oauth/authorize?{qs}")
@@ -617,6 +644,43 @@ fn jwt_auth_claims(jwt: &str) -> serde_json::Map<String, serde_json::Value> {
         }
     }
     serde_json::Map::new()
+}
+
+pub(crate) fn ensure_workspace_allowed(
+    expected: Option<&str>,
+    id_token: &str,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+
+    let claims = jwt_auth_claims(id_token);
+    let Some(actual) = claims.get("chatgpt_account_id").and_then(JsonValue::as_str) else {
+        return Err("Login is restricted to a specific workspace, but the token did not include an chatgpt_account_id claim.".to_string());
+    };
+
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("Login is restricted to workspace id {expected}."))
+    }
+}
+
+// Respond to the oauth server with an error so the code becomes unusable by anybody else.
+fn login_error_response(message: &str) -> HandledRequest {
+    let mut headers = Vec::new();
+    if let Ok(header) = Header::from_bytes(&b"Content-Type"[..], &b"text/plain; charset=utf-8"[..])
+    {
+        headers.push(header);
+    }
+    HandledRequest::ResponseAndExit {
+        headers,
+        body: message.as_bytes().to_vec(),
+        result: Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            message.to_string(),
+        )),
+    }
 }
 
 pub(crate) async fn obtain_api_key(

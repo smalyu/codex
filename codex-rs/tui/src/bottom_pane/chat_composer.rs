@@ -58,6 +58,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -65,6 +66,7 @@ use std::time::Instant;
 use std::collections::VecDeque;
 #[cfg(not(target_env = "musl"))]
 use std::sync::Mutex;
+use tokio::runtime::Handle;
 
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
@@ -124,7 +126,7 @@ pub(crate) struct ChatComposer {
     custom_prompts: Vec<CustomPrompt>,
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
-    context_window_percent: Option<u8>,
+    context_window_percent: Option<i64>,
     // Monotonically increasing identifier for textarea elements we insert.
     next_element_id: u64,
 
@@ -1150,17 +1152,8 @@ impl ChatComposer {
 
                 // Spawn a delayed task to flip an atomic flag; we check it on next key event.
                 let flag = Arc::new(AtomicBool::new(false));
-                let flag_clone = flag.clone();
                 let frame = self.frame_requester.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    // Signal timer elapsed for this id
-                    flag_clone.store(true, Ordering::Relaxed);
-                    // Request a frame so the draw loop can process the conversion without key repeats
-                    if let Some(frame) = frame {
-                        frame.schedule_frame();
-                    }
-                });
+                Self::schedule_space_hold_timer(flag.clone(), frame);
                 self.space_hold_trigger = Some(flag);
 
                 (InputResult::None, true)
@@ -1683,7 +1676,7 @@ impl ChatComposer {
         self.is_task_running = running;
     }
 
-    pub(crate) fn set_context_window_percent(&mut self, percent: Option<u8>) {
+    pub(crate) fn set_context_window_percent(&mut self, percent: Option<i64>) {
         if self.context_window_percent != percent {
             self.context_window_percent = percent;
         }
@@ -1695,6 +1688,30 @@ impl ChatComposer {
             self.footer_mode = esc_hint_mode(self.footer_mode, self.is_task_running);
         } else {
             self.footer_mode = reset_mode_after_activity(self.footer_mode);
+        }
+    }
+
+    fn schedule_space_hold_timer(flag: Arc<AtomicBool>, frame: Option<FrameRequester>) {
+        const HOLD_DELAY_MILLIS: u64 = 500;
+        if let Ok(handle) = Handle::try_current() {
+            let flag_clone = flag;
+            let frame_clone = frame;
+            handle.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(HOLD_DELAY_MILLIS)).await;
+                Self::complete_space_hold_timer(flag_clone, frame_clone);
+            });
+        } else {
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(HOLD_DELAY_MILLIS));
+                Self::complete_space_hold_timer(flag, frame);
+            });
+        }
+    }
+
+    fn complete_space_hold_timer(flag: Arc<AtomicBool>, frame: Option<FrameRequester>) {
+        flag.store(true, Ordering::Relaxed);
+        if let Some(frame) = frame {
+            frame.schedule_frame();
         }
     }
 }

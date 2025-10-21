@@ -3,6 +3,7 @@
 // alternate‑screen mode starts; that file opts‑out locally via `allow`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 #![deny(clippy::disallowed_methods)]
+use additional_dirs::add_dir_warning_message;
 use app::App;
 pub use app::AppExitInfo;
 use codex_app_server_protocol::AuthMode;
@@ -11,6 +12,7 @@ use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use codex_core::CodexAuth;
 use codex_core::INTERACTIVE_SESSION_SOURCES;
 use codex_core::RolloutRecorder;
+use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::find_conversation_path_by_id_str;
@@ -23,8 +25,10 @@ use std::path::PathBuf;
 use tracing::error;
 use tracing_appender::non_blocking;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::Targets;
 use tracing_subscriber::prelude::*;
 
+mod additional_dirs;
 mod app;
 mod app_backtrack;
 mod app_event;
@@ -32,7 +36,6 @@ mod app_event_sender;
 mod ascii_animation;
 mod bottom_pane;
 mod chatwidget;
-mod citation_regex;
 mod cli;
 mod clipboard_paste;
 mod color;
@@ -68,6 +71,7 @@ mod text_formatting;
 mod tui;
 mod ui_consts;
 mod update_prompt;
+pub mod updates;
 mod version;
 #[cfg(not(target_env = "musl"))]
 mod voice;
@@ -104,9 +108,6 @@ impl UpdateAction {
 
 #[cfg(test)]
 pub mod test_backend;
-
-#[cfg(not(debug_assertions))]
-mod updates;
 
 use crate::onboarding::TrustDirectorySelection;
 use crate::onboarding::WSL_INSTRUCTIONS;
@@ -161,6 +162,7 @@ pub async fn run_main(
 
     // canonicalize the cwd
     let cwd = cli.cwd.clone().map(|p| p.canonicalize().unwrap_or(p));
+    let additional_dirs = cli.add_dir.clone();
 
     let overrides = ConfigOverrides {
         model,
@@ -172,11 +174,11 @@ pub async fn run_main(
         config_profile: cli.config_profile.clone(),
         codex_linux_sandbox_exe,
         base_instructions: None,
-        include_plan_tool: Some(true),
         include_apply_patch_tool: None,
         include_view_image_tool: None,
         show_raw_agent_reasoning: cli.oss.then_some(true),
         tools_web_search_request: cli.web_search.then_some(true),
+        additional_writable_roots: additional_dirs,
     };
     let raw_overrides = cli.config_overrides.raw_overrides.clone();
     let overrides_cli = codex_common::CliConfigOverrides { raw_overrides };
@@ -190,6 +192,20 @@ pub async fn run_main(
     };
 
     let config = load_config_or_exit(cli_kv_overrides.clone(), overrides.clone()).await;
+
+    if let Some(warning) = add_dir_warning_message(&cli.add_dir, &config.sandbox_policy) {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("Error adding directories: {warning}");
+            std::process::exit(1);
+        }
+    }
+
+    #[allow(clippy::print_stderr)]
+    if let Err(err) = enforce_login_restrictions(&config).await {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
 
     let active_profile = config.active_profile.clone();
     let log_dir = codex_core::config::log_dir(&config)?;
@@ -220,12 +236,20 @@ pub async fn run_main(
         })
     };
 
-    // Build layered subscriber:
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
         .with_target(false)
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_filter(env_filter());
+
+    let feedback = codex_feedback::CodexFeedback::new();
+    let targets = Targets::new().with_default(tracing::Level::TRACE);
+
+    let feedback_layer = tracing_subscriber::fmt::layer()
+        .with_writer(feedback.make_writer())
+        .with_ansi(false)
+        .with_target(false)
+        .with_filter(targets);
 
     if cli.oss {
         codex_ollama::ensure_oss_ready(&config)
@@ -251,15 +275,26 @@ pub async fn run_main(
 
         let _ = tracing_subscriber::registry()
             .with(file_layer)
+            .with(feedback_layer)
             .with(otel_layer)
             .try_init();
     } else {
-        let _ = tracing_subscriber::registry().with(file_layer).try_init();
+        let _ = tracing_subscriber::registry()
+            .with(file_layer)
+            .with(feedback_layer)
+            .try_init();
     };
 
-    run_ratatui_app(cli, config, overrides, cli_kv_overrides, active_profile)
-        .await
-        .map_err(|err| std::io::Error::other(err.to_string()))
+    run_ratatui_app(
+        cli,
+        config,
+        overrides,
+        cli_kv_overrides,
+        active_profile,
+        feedback,
+    )
+    .await
+    .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
 async fn run_ratatui_app(
@@ -268,6 +303,7 @@ async fn run_ratatui_app(
     overrides: ConfigOverrides,
     cli_kv_overrides: Vec<(String, toml::Value)>,
     active_profile: Option<String>,
+    feedback: codex_feedback::CodexFeedback,
 ) -> color_eyre::Result<AppExitInfo> {
     color_eyre::install()?;
 
@@ -303,56 +339,6 @@ async fn run_ratatui_app(
                 }
             }
         }
-    }
-
-    // Show update banner in terminal history (instead of stderr) so it is visible
-    // within the TUI scrollback. Building spans keeps styling consistent.
-    #[cfg(not(debug_assertions))]
-    if let Some(latest_version) = updates::get_upgrade_version(&initial_config) {
-        use crate::history_cell::padded_emoji;
-        use crate::history_cell::with_border_with_inner_width;
-        use ratatui::style::Stylize as _;
-        use ratatui::text::Line;
-
-        let current_version = env!("CARGO_PKG_VERSION");
-
-        let mut content_lines: Vec<Line<'static>> = vec![
-            Line::from(vec![
-                padded_emoji("✨").bold().cyan(),
-                "Update available!".bold().cyan(),
-                " ".into(),
-                format!("{current_version} -> {latest_version}.").bold(),
-            ]),
-            Line::from(""),
-            Line::from("See full release notes:"),
-            Line::from(""),
-            Line::from(
-                "https://github.com/openai/codex/releases/latest"
-                    .cyan()
-                    .underlined(),
-            ),
-            Line::from(""),
-        ];
-
-        if let Some(update_action) = get_update_action() {
-            content_lines.push(Line::from(vec![
-                "Run ".into(),
-                update_action.command_str().cyan(),
-                " to update.".into(),
-            ]));
-        } else {
-            content_lines.push(Line::from(vec![
-                "See ".into(),
-                "https://github.com/openai/codex".cyan().underlined(),
-                " for installation options.".into(),
-            ]));
-        }
-
-        let viewport_width = tui.terminal.viewport_area.width as usize;
-        let inner_width = viewport_width.saturating_sub(4).max(1);
-        let mut lines = with_border_with_inner_width(content_lines, inner_width);
-        lines.push("".into());
-        tui.insert_history_lines(lines);
     }
 
     // Initialize high-fidelity session event logging if enabled.
@@ -417,7 +403,20 @@ async fn run_ratatui_app(
             Some(path) => resume_picker::ResumeSelection::Resume(path),
             None => {
                 error!("Error finding conversation path: {id_str}");
-                resume_picker::ResumeSelection::StartFresh
+                restore();
+                session_log::log_session_end();
+                let _ = tui.terminal.clear();
+                if let Err(err) = writeln!(
+                    std::io::stdout(),
+                    "No saved session found with ID {id_str}. Run `codex resume` without an ID to choose from existing sessions."
+                ) {
+                    error!("Failed to write resume error message: {err}");
+                }
+                return Ok(AppExitInfo {
+                    token_usage: codex_core::protocol::TokenUsage::default(),
+                    conversation_id: None,
+                    update_action: None,
+                });
             }
         }
     } else if cli.resume_last {
@@ -463,6 +462,7 @@ async fn run_ratatui_app(
         prompt,
         images,
         resume_selection,
+        feedback,
     )
     .await;
 
@@ -471,47 +471,6 @@ async fn run_ratatui_app(
     session_log::log_session_end();
     // ignore error when collecting usage – report underlying error instead
     app_result
-}
-
-/// Get the update action from the environment.
-/// Returns `None` if not managed by npm, bun, or brew.
-#[cfg(not(debug_assertions))]
-pub(crate) fn get_update_action() -> Option<UpdateAction> {
-    let exe = std::env::current_exe().unwrap_or_default();
-    let managed_by_npm = std::env::var_os("CODEX_MANAGED_BY_NPM").is_some();
-    let managed_by_bun = std::env::var_os("CODEX_MANAGED_BY_BUN").is_some();
-    if managed_by_npm {
-        Some(UpdateAction::NpmGlobalLatest)
-    } else if managed_by_bun {
-        Some(UpdateAction::BunGlobalLatest)
-    } else if cfg!(target_os = "macos")
-        && (exe.starts_with("/opt/homebrew") || exe.starts_with("/usr/local"))
-    {
-        Some(UpdateAction::BrewUpgrade)
-    } else {
-        None
-    }
-}
-
-#[test]
-#[cfg(not(debug_assertions))]
-fn test_get_update_action() {
-    let prev = std::env::var_os("CODEX_MANAGED_BY_NPM");
-
-    // First: no npm var -> expect None (we do not run from brew in CI)
-    unsafe { std::env::remove_var("CODEX_MANAGED_BY_NPM") };
-    assert_eq!(get_update_action(), None);
-
-    // Then: with npm var -> expect NpmGlobalLatest
-    unsafe { std::env::set_var("CODEX_MANAGED_BY_NPM", "1") };
-    assert_eq!(get_update_action(), Some(UpdateAction::NpmGlobalLatest));
-
-    // Restore prior value to avoid leaking state
-    if let Some(v) = prev {
-        unsafe { std::env::set_var("CODEX_MANAGED_BY_NPM", v) };
-    } else {
-        unsafe { std::env::remove_var("CODEX_MANAGED_BY_NPM") };
-    }
 }
 
 #[expect(

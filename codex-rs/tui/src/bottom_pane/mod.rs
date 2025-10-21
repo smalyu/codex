@@ -27,11 +27,13 @@ mod footer;
 mod list_selection_view;
 mod prompt_args;
 pub(crate) use list_selection_view::SelectionViewParams;
+mod feedback_view;
 mod paste_burst;
 pub mod popup_consts;
 mod scroll_state;
 mod selection_popup_common;
 mod textarea;
+pub(crate) use feedback_view::FeedbackView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CancellationEvent {
@@ -68,7 +70,7 @@ pub(crate) struct BottomPane {
     status: Option<StatusIndicatorWidget>,
     /// Queued user messages to show under the status indicator.
     queued_user_messages: Vec<String>,
-    context_window_percent: Option<u8>,
+    context_window_percent: Option<i64>,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -378,7 +380,7 @@ impl BottomPane {
         }
     }
 
-    pub(crate) fn set_context_window_percent(&mut self, percent: Option<u8>) {
+    pub(crate) fn set_context_window_percent(&mut self, percent: Option<i64>) {
         if self.context_window_percent == percent {
             return;
         }

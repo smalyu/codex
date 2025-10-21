@@ -23,7 +23,6 @@ use codex_core::protocol::ExecApprovalRequestEvent;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
-use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::ListCustomPromptsResponseEvent;
 use codex_core::protocol::McpListToolsResponseEvent;
@@ -45,6 +44,7 @@ use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_protocol::ConversationId;
 use codex_protocol::parse_command::ParsedCommand;
+use codex_protocol::user_input::UserInput;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -54,10 +54,13 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
+use ratatui::widgets::Wrap;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 
@@ -85,6 +88,7 @@ use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::markdown::append_markdown;
 use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::Renderable;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::text_formatting::truncate_text;
@@ -138,9 +142,9 @@ impl RateLimitWarningState {
     fn take_warnings(
         &mut self,
         secondary_used_percent: Option<f64>,
-        secondary_window_minutes: Option<u64>,
+        secondary_window_minutes: Option<i64>,
         primary_used_percent: Option<f64>,
-        primary_window_minutes: Option<u64>,
+        primary_window_minutes: Option<i64>,
     ) -> Vec<String> {
         let reached_secondary_cap =
             matches!(secondary_used_percent, Some(percent) if percent == 100.0);
@@ -191,12 +195,14 @@ impl RateLimitWarningState {
     }
 }
 
-pub(crate) fn get_limits_duration(windows_minutes: u64) -> String {
-    const MINUTES_PER_HOUR: u64 = 60;
-    const MINUTES_PER_DAY: u64 = 24 * MINUTES_PER_HOUR;
-    const MINUTES_PER_WEEK: u64 = 7 * MINUTES_PER_DAY;
-    const MINUTES_PER_MONTH: u64 = 30 * MINUTES_PER_DAY;
-    const ROUNDING_BIAS_MINUTES: u64 = 3;
+pub(crate) fn get_limits_duration(windows_minutes: i64) -> String {
+    const MINUTES_PER_HOUR: i64 = 60;
+    const MINUTES_PER_DAY: i64 = 24 * MINUTES_PER_HOUR;
+    const MINUTES_PER_WEEK: i64 = 7 * MINUTES_PER_DAY;
+    const MINUTES_PER_MONTH: i64 = 30 * MINUTES_PER_DAY;
+    const ROUNDING_BIAS_MINUTES: i64 = 3;
+
+    let windows_minutes = windows_minutes.max(0);
 
     if windows_minutes <= MINUTES_PER_DAY.saturating_add(ROUNDING_BIAS_MINUTES) {
         let adjusted = windows_minutes.saturating_add(ROUNDING_BIAS_MINUTES);
@@ -220,6 +226,7 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) initial_images: Vec<PathBuf>,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) feedback: codex_feedback::CodexFeedback,
 }
 
 pub(crate) struct ChatWidget {
@@ -268,6 +275,8 @@ pub(crate) struct ChatWidget {
     needs_final_message_separator: bool,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
+    // Feedback sink for /feedback
+    feedback: codex_feedback::CodexFeedback,
 }
 
 struct UserMessage {
@@ -710,7 +719,6 @@ impl ChatWidget {
                 self.needs_final_message_separator = false;
             }
             self.stream_controller = Some(StreamController::new(
-                self.config.clone(),
                 self.last_rendered_width.get().map(|w| w.saturating_sub(2)),
             ));
         }
@@ -917,6 +925,7 @@ impl ChatWidget {
             initial_images,
             enhanced_keys_supported,
             auth_manager,
+            feedback,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -963,6 +972,7 @@ impl ChatWidget {
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
+            feedback,
         }
     }
 
@@ -980,6 +990,7 @@ impl ChatWidget {
             initial_images,
             enhanced_keys_supported,
             auth_manager,
+            feedback,
         } = common;
         let mut rng = rand::rng();
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
@@ -1028,6 +1039,7 @@ impl ChatWidget {
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
+            feedback,
         }
     }
 
@@ -1131,6 +1143,25 @@ impl ChatWidget {
             return;
         }
         match cmd {
+            SlashCommand::Feedback => {
+                let snapshot = self.feedback.snapshot(self.conversation_id);
+                match snapshot.save_to_temp_file() {
+                    Ok(path) => {
+                        crate::bottom_pane::FeedbackView::show(
+                            &mut self.bottom_pane,
+                            path,
+                            snapshot,
+                        );
+                        self.request_redraw();
+                    }
+                    Err(e) => {
+                        self.add_to_history(history_cell::new_error_event(format!(
+                            "Failed to save feedback logs: {e}"
+                        )));
+                        self.request_redraw();
+                    }
+                }
+            }
             SlashCommand::New => {
                 self.app_event_tx.send(AppEvent::NewSession);
             }
@@ -1288,14 +1319,14 @@ impl ChatWidget {
 
         self.capture_ghost_snapshot();
 
-        let mut items: Vec<InputItem> = Vec::new();
+        let mut items: Vec<UserInput> = Vec::new();
 
         if !text.is_empty() {
-            items.push(InputItem::Text { text: text.clone() });
+            items.push(UserInput::Text { text: text.clone() });
         }
 
         for path in image_paths {
-            items.push(InputItem::LocalImage { path });
+            items.push(UserInput::LocalImage { path });
         }
 
         self.codex_op_tx
@@ -1482,6 +1513,7 @@ impl ChatWidget {
                 self.on_entered_review_mode(review_request)
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
+            EventMsg::ItemStarted(_) | EventMsg::ItemCompleted(_) => {}
         }
     }
 
@@ -1510,7 +1542,7 @@ impl ChatWidget {
                 } else {
                     // Show explanation when there are no structured findings.
                     let mut rendered: Vec<ratatui::text::Line<'static>> = vec!["".into()];
-                    append_markdown(&explanation, None, &mut rendered, &self.config);
+                    append_markdown(&explanation, None, &mut rendered);
                     let body_cell = AgentMessageCell::new(rendered, false);
                     self.app_event_tx
                         .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -1519,7 +1551,7 @@ impl ChatWidget {
                 let message_text =
                     codex_core::review_format::format_review_findings_block(&output.findings, None);
                 let mut message_lines: Vec<ratatui::text::Line<'static>> = Vec::new();
-                append_markdown(&message_text, None, &mut message_lines, &self.config);
+                append_markdown(&message_text, None, &mut message_lines);
                 let body_cell = AgentMessageCell::new(message_lines, true);
                 self.app_event_tx
                     .send(AppEvent::InsertHistoryCell(Box::new(body_cell)));
@@ -1823,22 +1855,24 @@ impl ChatWidget {
         for preset in presets.into_iter() {
             let is_current =
                 current_approval == preset.approval && current_sandbox == preset.sandbox;
-            let approval = preset.approval;
-            let sandbox = preset.sandbox.clone();
             let name = preset.label.to_string();
             let description = Some(preset.description.to_string());
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
-                    cwd: None,
-                    approval_policy: Some(approval),
-                    sandbox_policy: Some(sandbox.clone()),
-                    model: None,
-                    effort: None,
-                    summary: None,
-                }));
-                tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
-                tx.send(AppEvent::UpdateSandboxPolicy(sandbox.clone()));
-            })];
+            let requires_confirmation = preset.id == "full-access"
+                && !self
+                    .config
+                    .notices
+                    .hide_full_access_warning
+                    .unwrap_or(false);
+            let actions: Vec<SelectionAction> = if requires_confirmation {
+                let preset_clone = preset.clone();
+                vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenFullAccessConfirmation {
+                        preset: preset_clone.clone(),
+                    });
+                })]
+            } else {
+                Self::approval_preset_actions(preset.approval, preset.sandbox.clone())
+            };
             items.push(SelectionItem {
                 name,
                 description,
@@ -1857,6 +1891,89 @@ impl ChatWidget {
         });
     }
 
+    fn approval_preset_actions(
+        approval: AskForApproval,
+        sandbox: SandboxPolicy,
+    ) -> Vec<SelectionAction> {
+        vec![Box::new(move |tx| {
+            let sandbox_clone = sandbox.clone();
+            tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
+                cwd: None,
+                approval_policy: Some(approval),
+                sandbox_policy: Some(sandbox_clone.clone()),
+                model: None,
+                effort: None,
+                summary: None,
+            }));
+            tx.send(AppEvent::UpdateAskForApprovalPolicy(approval));
+            tx.send(AppEvent::UpdateSandboxPolicy(sandbox_clone));
+        })]
+    }
+
+    pub(crate) fn open_full_access_confirmation(&mut self, preset: ApprovalPreset) {
+        let approval = preset.approval;
+        let sandbox = preset.sandbox;
+        let mut header_children: Vec<Box<dyn Renderable>> = Vec::new();
+        let title_line = Line::from("Enable full access?").bold();
+        let info_line = Line::from(vec![
+            "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. "
+                .into(),
+            "Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior."
+                .fg(Color::Red),
+        ]);
+        header_children.push(Box::new(title_line));
+        header_children.push(Box::new(
+            Paragraph::new(vec![info_line]).wrap(Wrap { trim: false }),
+        ));
+        let header = ColumnRenderable::with(header_children);
+
+        let mut accept_actions = Self::approval_preset_actions(approval, sandbox.clone());
+        accept_actions.push(Box::new(|tx| {
+            tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
+        }));
+
+        let mut accept_and_remember_actions = Self::approval_preset_actions(approval, sandbox);
+        accept_and_remember_actions.push(Box::new(|tx| {
+            tx.send(AppEvent::UpdateFullAccessWarningAcknowledged(true));
+            tx.send(AppEvent::PersistFullAccessWarningAcknowledged);
+        }));
+
+        let deny_actions: Vec<SelectionAction> = vec![Box::new(|tx| {
+            tx.send(AppEvent::OpenApprovalsPopup);
+        })];
+
+        let items = vec![
+            SelectionItem {
+                name: "Yes, continue anyway".to_string(),
+                description: Some("Apply full access for this session".to_string()),
+                actions: accept_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Yes, and don't ask again".to_string(),
+                description: Some("Enable full access and remember this choice".to_string()),
+                actions: accept_and_remember_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Cancel".to_string(),
+                description: Some("Go back without enabling full access".to_string()),
+                actions: deny_actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+        ];
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            header: Box::new(header),
+            ..Default::default()
+        });
+    }
+
     /// Set the approval policy in the widget's config copy.
     pub(crate) fn set_approval_policy(&mut self, policy: AskForApproval) {
         self.config.approval_policy = policy;
@@ -1865,6 +1982,10 @@ impl ChatWidget {
     /// Set the sandbox policy in the widget's config copy.
     pub(crate) fn set_sandbox_policy(&mut self, policy: SandboxPolicy) {
         self.config.sandbox_policy = policy;
+    }
+
+    pub(crate) fn set_full_access_warning_acknowledged(&mut self, acknowledged: bool) {
+        self.config.notices.hide_full_access_warning = Some(acknowledged);
     }
 
     /// Set the reasoning effort in the widget's config copy.
@@ -1956,6 +2077,8 @@ impl ChatWidget {
         self.add_to_history(history_cell::new_mcp_tools_output(
             &self.config,
             ev.tools,
+            ev.resources,
+            ev.resource_templates,
             &ev.auth_statuses,
         ));
     }

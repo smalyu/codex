@@ -25,7 +25,6 @@ pub enum ConfigShellToolType {
 #[derive(Debug, Clone)]
 pub(crate) struct ToolsConfig {
     pub shell_type: ConfigShellToolType,
-    pub plan_tool: bool,
     pub apply_patch_tool_type: Option<ApplyPatchToolType>,
     pub web_search_request: bool,
     pub include_view_image_tool: bool,
@@ -46,7 +45,6 @@ impl ToolsConfig {
         } = params;
         let use_streamable_shell_tool = features.enabled(Feature::StreamableShell);
         let experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
-        let include_plan_tool = features.enabled(Feature::PlanTool);
         let include_apply_patch_tool = features.enabled(Feature::ApplyPatchFreeform);
         let include_web_search_request = features.enabled(Feature::WebSearchRequest);
         let include_view_image_tool = features.enabled(Feature::ViewImageTool);
@@ -73,7 +71,6 @@ impl ToolsConfig {
 
         Self {
             shell_type,
-            plan_tool: include_plan_tool,
             apply_patch_tool_type,
             web_search_request: include_web_search_request,
             include_view_image_tool,
@@ -511,6 +508,107 @@ fn create_list_dir_tool() -> ToolSpec {
         },
     })
 }
+
+fn create_list_mcp_resources_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "server".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional MCP server name. When omitted, lists resources from every configured server."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "cursor".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Opaque cursor returned by a previous list_mcp_resources call for the same server."
+                    .to_string(),
+            ),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "list_mcp_resources".to_string(),
+        description: "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_list_mcp_resource_templates_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "server".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional MCP server name. When omitted, lists resource templates from all configured servers."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "cursor".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Opaque cursor returned by a previous list_mcp_resource_templates call for the same server."
+                    .to_string(),
+            ),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "list_mcp_resource_templates".to_string(),
+        description: "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: None,
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_read_mcp_resource_tool() -> ToolSpec {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "server".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "uri".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Resource URI to read. Must be one of the URIs returned by list_mcp_resources."
+                    .to_string(),
+            ),
+        },
+    );
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "read_mcp_resource".to_string(),
+        description:
+            "Read a specific resource from an MCP server given the server name and resource URI."
+                .to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["server".to_string(), "uri".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
 /// TODO(dylan): deprecate once we get rid of json tool
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ApplyPatchToolArgs {
@@ -714,15 +812,11 @@ pub(crate) fn build_specs(
     config: &ToolsConfig,
     mcp_tools: Option<HashMap<String, mcp_types::Tool>>,
 ) -> ToolRegistryBuilder {
-    use crate::exec_command::EXEC_COMMAND_TOOL_NAME;
-    use crate::exec_command::WRITE_STDIN_TOOL_NAME;
-    use crate::exec_command::create_exec_command_tool_for_responses_api;
-    use crate::exec_command::create_write_stdin_tool_for_responses_api;
     use crate::tools::handlers::ApplyPatchHandler;
-    use crate::tools::handlers::ExecStreamHandler;
     use crate::tools::handlers::GrepFilesHandler;
     use crate::tools::handlers::ListDirHandler;
     use crate::tools::handlers::McpHandler;
+    use crate::tools::handlers::McpResourceHandler;
     use crate::tools::handlers::PlanHandler;
     use crate::tools::handlers::ReadFileHandler;
     use crate::tools::handlers::ShellHandler;
@@ -734,14 +828,17 @@ pub(crate) fn build_specs(
     let mut builder = ToolRegistryBuilder::new();
 
     let shell_handler = Arc::new(ShellHandler);
-    let exec_stream_handler = Arc::new(ExecStreamHandler);
     let unified_exec_handler = Arc::new(UnifiedExecHandler);
     let plan_handler = Arc::new(PlanHandler);
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
+    let mcp_resource_handler = Arc::new(McpResourceHandler);
 
-    if config.experimental_unified_exec_tool {
+    let use_unified_exec = config.experimental_unified_exec_tool
+        || matches!(config.shell_type, ConfigShellToolType::Streamable);
+
+    if use_unified_exec {
         builder.push_spec(create_unified_exec_tool());
         builder.register_handler("unified_exec", unified_exec_handler);
     } else {
@@ -753,14 +850,7 @@ pub(crate) fn build_specs(
                 builder.push_spec(ToolSpec::LocalShell {});
             }
             ConfigShellToolType::Streamable => {
-                builder.push_spec(ToolSpec::Function(
-                    create_exec_command_tool_for_responses_api(),
-                ));
-                builder.push_spec(ToolSpec::Function(
-                    create_write_stdin_tool_for_responses_api(),
-                ));
-                builder.register_handler(EXEC_COMMAND_TOOL_NAME, exec_stream_handler.clone());
-                builder.register_handler(WRITE_STDIN_TOOL_NAME, exec_stream_handler);
+                // Already handled by use_unified_exec.
             }
         }
     }
@@ -770,10 +860,15 @@ pub(crate) fn build_specs(
     builder.register_handler("container.exec", shell_handler.clone());
     builder.register_handler("local_shell", shell_handler);
 
-    if config.plan_tool {
-        builder.push_spec(PLAN_TOOL.clone());
-        builder.register_handler("update_plan", plan_handler);
-    }
+    builder.push_spec_with_parallel_support(create_list_mcp_resources_tool(), true);
+    builder.push_spec_with_parallel_support(create_list_mcp_resource_templates_tool(), true);
+    builder.push_spec_with_parallel_support(create_read_mcp_resource_tool(), true);
+    builder.register_handler("list_mcp_resources", mcp_resource_handler.clone());
+    builder.register_handler("list_mcp_resource_templates", mcp_resource_handler.clone());
+    builder.register_handler("read_mcp_resource", mcp_resource_handler);
+
+    builder.push_spec(PLAN_TOOL.clone());
+    builder.register_handler("update_plan", plan_handler);
 
     if let Some(apply_patch_tool_type) = &config.apply_patch_tool_type {
         match apply_patch_tool_type {
@@ -906,7 +1001,6 @@ mod tests {
         let model_family = find_family_for_model("codex-mini-latest")
             .expect("codex-mini-latest should be a valid model family");
         let mut features = Features::with_defaults();
-        features.enable(Feature::PlanTool);
         features.enable(Feature::WebSearchRequest);
         features.enable(Feature::UnifiedExec);
         let config = ToolsConfig::new(&ToolsConfigParams {
@@ -917,7 +1011,15 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
+                "web_search",
+                "view_image",
+            ],
         );
     }
 
@@ -925,7 +1027,6 @@ mod tests {
     fn test_build_specs_default_shell() {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let mut features = Features::with_defaults();
-        features.enable(Feature::PlanTool);
         features.enable(Feature::WebSearchRequest);
         features.enable(Feature::UnifiedExec);
         let config = ToolsConfig::new(&ToolsConfigParams {
@@ -936,7 +1037,15 @@ mod tests {
 
         assert_eq_tool_names(
             &tools,
-            &["unified_exec", "update_plan", "web_search", "view_image"],
+            &[
+                "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
+                "web_search",
+                "view_image",
+            ],
         );
     }
 
@@ -1043,15 +1152,20 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
                 "web_search",
                 "view_image",
                 "test_server/do_something_cool",
             ],
         );
 
+        let tool = find_tool(&tools, "test_server/do_something_cool");
         assert_eq!(
-            tools[3].spec,
-            ToolSpec::Function(ResponsesApiTool {
+            &tool.spec,
+            &ToolSpec::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
                     properties: BTreeMap::from([
@@ -1158,6 +1272,10 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
                 "view_image",
                 "test_server/cool",
                 "test_server/do",
@@ -1206,6 +1324,10 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1214,7 +1336,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[4].spec,
+            tools[8].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/search".to_string(),
                 parameters: JsonSchema::Object {
@@ -1271,6 +1393,10 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1278,7 +1404,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[4].spec,
+            tools[8].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/paginate".to_string(),
                 parameters: JsonSchema::Object {
@@ -1334,6 +1460,10 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1341,7 +1471,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[4].spec,
+            tools[8].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/tags".to_string(),
                 parameters: JsonSchema::Object {
@@ -1399,6 +1529,10 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1406,7 +1540,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            tools[4].spec,
+            tools[8].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "dash/value".to_string(),
                 parameters: JsonSchema::Object {
@@ -1501,6 +1635,10 @@ mod tests {
             &tools,
             &[
                 "unified_exec",
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+                "update_plan",
                 "apply_patch",
                 "web_search",
                 "view_image",
@@ -1509,7 +1647,7 @@ mod tests {
         );
 
         assert_eq!(
-            tools[4].spec,
+            tools[8].spec,
             ToolSpec::Function(ResponsesApiTool {
                 name: "test_server/do_something_cool".to_string(),
                 parameters: JsonSchema::Object {
