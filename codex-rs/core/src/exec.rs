@@ -28,7 +28,7 @@ use crate::seatbelt::spawn_command_under_seatbelt;
 use crate::spawn::StdioPolicy;
 use crate::spawn::spawn_child_async;
 #[cfg(target_os = "windows")]
-use crate::windows::spawn_command_under_windows_restricted_token;
+// Windows sandbox runs in-process via codex-windows-sandbox crate
 
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
@@ -150,10 +150,6 @@ pub async fn process_exec_tool_call(
                     env,
                     ..
                 } = params;
-                if std::env::var("CODEX_USE_RUST_WINDOWS_SANDBOX_INPROCESS")
-                    .ok()
-                    .as_deref()
-                    == Some("1")
                 {
                     use codex_windows_sandbox::run_windows_sandbox_capture;
                     let policy_json = serde_json::to_string(sandbox_policy)
@@ -199,17 +195,6 @@ pub async fn process_exec_tool_call(
                         },
                         timed_out: cap.timed_out,
                     })
-                } else {
-                    let child = spawn_command_under_windows_restricted_token(
-                        command,
-                        command_cwd,
-                        sandbox_policy,
-                        sandbox_cwd,
-                        StdioPolicy::RedirectForShellTool,
-                        env,
-                    )
-                    .await?;
-                    consume_truncated_output(child, timeout_duration, stdout_stream.clone()).await
                 }
             }
             #[cfg(not(target_os = "windows"))]
