@@ -86,7 +86,7 @@ mod tests {
         let (session, mut turn) = make_session_and_context();
         turn.approval_policy = AskForApproval::Never;
         turn.sandbox_policy = SandboxPolicy::DangerFullAccess;
-        (Arc::new(session), Arc::new(turn))
+        (session, Arc::new(turn))
     }
 
     async fn run_unified_exec_request(

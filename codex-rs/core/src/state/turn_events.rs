@@ -1,4 +1,6 @@
-use async_channel::Sender;
+use core::fmt;
+use std::sync::Arc;
+
 use codex_protocol::ConversationId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::Event;
@@ -7,17 +9,28 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use tracing::error;
 
-#[derive(Debug)]
+use crate::codex::Session;
+
 pub(crate) struct TurnEvents {
     thread_id: ConversationId,
     sub_id: String,
     turn_id: String,
-    tx_event: Sender<Event>,
+    session: Arc<Session>,
+}
+
+impl fmt::Debug for TurnEvents {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "TurnEvents {{ thread_id: {}, sub_id: {}, turn_id: {} }}",
+            self.thread_id, self.sub_id, self.turn_id
+        )
+    }
 }
 
 impl TurnEvents {
     pub fn new(
-        tx_event: Sender<Event>,
+        session: Arc<Session>,
         thread_id: ConversationId,
         sub_id: String,
         turn_id: String,
@@ -26,13 +39,14 @@ impl TurnEvents {
             thread_id,
             sub_id,
             turn_id,
-            tx_event,
+            session,
         }
     }
 
     pub async fn started(&self, item: TurnItem) {
         let err = self
-            .tx_event
+            .session
+            .get_tx_event()
             .send(Event {
                 id: self.turn_id.clone(),
                 msg: EventMsg::ItemStarted(ItemStartedEvent {
@@ -49,7 +63,8 @@ impl TurnEvents {
 
     pub async fn completed(&self, item: TurnItem) {
         let err = self
-            .tx_event
+            .session
+            .get_tx_event()
             .send(Event {
                 id: self.turn_id.clone(),
                 msg: EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -74,9 +89,6 @@ impl TurnEvents {
             id: self.sub_id.clone(),
             msg,
         };
-        let err = self.tx_event.send(event).await;
-        if let Err(e) = err {
-            error!("failed to send legacy event: {e}");
-        }
+        self.session.send_event(event).await;
     }
 }

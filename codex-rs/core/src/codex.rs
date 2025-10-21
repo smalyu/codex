@@ -357,7 +357,7 @@ impl Session {
         provider: ModelProviderInfo,
         session_configuration: &SessionConfiguration,
         conversation_id: ConversationId,
-        tx_event: Sender<Event>,
+        session: Arc<Session>,
     ) -> TurnContext {
         let config = session_configuration.original_config_do_not_use.clone();
         let model_family = find_family_for_model(&session_configuration.model)
@@ -403,7 +403,7 @@ impl Session {
             is_review_mode: false,
             final_output_json_schema: None,
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
-            turn_events: TurnEvents::new(tx_event, conversation_id, sub_id.clone(), sub_id),
+            turn_events: TurnEvents::new(session, conversation_id, sub_id.clone(), sub_id),
         }
     }
 
@@ -616,7 +616,7 @@ impl Session {
         format!("auto-compact-{id}")
     }
 
-    async fn record_initial_history(&self, conversation_history: InitialHistory) {
+    async fn record_initial_history(self: &Arc<Self>, conversation_history: InitialHistory) {
         // TODO(pakrym): Ideally we shouldn't need to create a fake turn context here.
         let turn_context = self
             .new_turn("init".to_string(), SessionSettingsUpdate::default())
@@ -653,7 +653,7 @@ impl Session {
     }
 
     pub(crate) async fn new_turn(
-        &self,
+        self: &Arc<Self>,
         sub_id: String,
         updates: SessionSettingsUpdate,
     ) -> Arc<TurnContext> {
@@ -671,7 +671,7 @@ impl Session {
             session_configuration.provider.clone(),
             &session_configuration,
             self.conversation_id,
-            self.get_tx_event(),
+            self.clone(),
         );
         if let Some(final_schema) = updates.final_output_json_schema {
             turn_context.final_output_json_schema = final_schema;
@@ -1448,7 +1448,7 @@ async fn spawn_review_thread(
         final_output_json_schema: None,
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
         turn_events: TurnEvents::new(
-            sess.get_tx_event(),
+            sess.clone(),
             sess.conversation_id,
             sub_id.to_string(),
             sub_id.clone(),
@@ -2614,7 +2614,7 @@ mod tests {
         )
     }
 
-    pub(crate) fn make_session_and_context() -> (Session, TurnContext) {
+    pub(crate) fn make_session_and_context() -> (Arc<Session>, TurnContext) {
         let (tx_event, _rx_event) = async_channel::unbounded();
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let config = Config::load_from_base_config_with_overrides(
@@ -2655,16 +2655,6 @@ mod tests {
             tool_approvals: Mutex::new(ApprovalStore::default()),
         };
 
-        let turn_context = Session::make_turn_context(
-            "sub_1".to_string(),
-            Some(Arc::clone(&auth_manager)),
-            &otel_event_manager,
-            session_configuration.provider.clone(),
-            &session_configuration,
-            conversation_id,
-            tx_event.clone(),
-        );
-
         let session = Session {
             conversation_id,
             tx_event,
@@ -2673,6 +2663,18 @@ mod tests {
             services,
             next_internal_sub_id: AtomicU64::new(0),
         };
+
+        let session = Arc::new(session);
+
+        let turn_context = Session::make_turn_context(
+            "sub_1".to_string(),
+            Some(Arc::clone(&auth_manager)),
+            &otel_event_manager,
+            session_configuration.provider.clone(),
+            &session_configuration,
+            conversation_id,
+            session.clone(),
+        );
 
         (session, turn_context)
     }
@@ -2724,16 +2726,6 @@ mod tests {
             tool_approvals: Mutex::new(ApprovalStore::default()),
         };
 
-        let turn_context = Arc::new(Session::make_turn_context(
-            "sub_1".to_string(),
-            Some(Arc::clone(&auth_manager)),
-            &otel_event_manager,
-            session_configuration.provider.clone(),
-            &session_configuration,
-            conversation_id,
-            tx_event.clone(),
-        ));
-
         let session = Arc::new(Session {
             conversation_id,
             tx_event,
@@ -2742,6 +2734,16 @@ mod tests {
             services,
             next_internal_sub_id: AtomicU64::new(0),
         });
+        let session = Arc::clone(&session);
+        let turn_context = Arc::new(Session::make_turn_context(
+            "sub_1".to_string(),
+            Some(Arc::clone(&auth_manager)),
+            &otel_event_manager,
+            session_configuration.provider.clone(),
+            &session_configuration,
+            conversation_id,
+            session.clone(),
+        ));
 
         (session, turn_context, rx_event)
     }
