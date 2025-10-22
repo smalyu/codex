@@ -141,9 +141,6 @@ impl BottomPane {
                 } else {
                     1
                 };
-                tracing::info!(
-                    "status_height {status_height}, queue_height {queue_height}, spacing_height {spacing_height}"
-                );
                 self.composer
                     .desired_height(width)
                     .saturating_add(spacing_height)
@@ -526,7 +523,6 @@ impl WidgetRef for &BottomPane {
         if let Some(view) = self.active_view() {
             view.render(content_area, buf);
         } else {
-            tracing::info!("top area {top_area:?}, content area {content_area:?}");
             let status_height = self
                 .status
                 .as_ref()
