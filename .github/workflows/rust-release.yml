@@ -327,6 +327,38 @@ jobs:
             zstd -T0 -19 --rm "$dest/$base"
           done
 
+      - if: ${{ contains(matrix.target, 'unknown-linux') }}
+        name: Install cosign
+        uses: sigstore/cosign-installer@v3.6.0
+
+      - if: ${{ contains(matrix.target, 'unknown-linux') }}
+        name: Sign Linux artifacts
+        shell: bash
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+
+          dest="dist/${{ matrix.target }}"
+          shopt -s nullglob
+
+          for artifact in "$dest"/*; do
+            [[ -f "$artifact" ]] || continue
+
+            case "$artifact" in
+              *.sig|*.pem)
+                continue
+                ;;
+            esac
+
+            cosign sign-blob \
+              --yes \
+              --output-signature "${artifact}.sig" \
+              --output-certificate "${artifact}.pem" \
+              "$artifact"
+          done
+
       - name: Remove signing keychain
         if: ${{ always() && matrix.runner == 'macos-15-xlarge' }}
         shell: bash
