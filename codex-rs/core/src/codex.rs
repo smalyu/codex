@@ -2089,15 +2089,15 @@ async fn try_run_turn(
             } => {
                 sess.update_token_usage_info(turn_context.as_ref(), token_usage.as_ref())
                     .await;
+                let processed_items = output.try_collect().await?;
                 let unified_diff = {
                     let mut tracker = turn_diff_tracker.lock().await;
                     tracker.get_unified_diff()
                 };
                 if let Ok(Some(unified_diff)) = unified_diff {
                     let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-                    sess.send_event(turn_context.as_ref(), msg).await;
+                    sess.send_event(&turn_context, msg).await;
                 }
-                let processed_items = output.try_collect().await?;
                 return Ok(TurnRunResult {
                     processed_items,
                     total_token_usage: token_usage.clone(),
