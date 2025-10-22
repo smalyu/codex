@@ -194,7 +194,7 @@ jobs:
         name: Enable sccache
         uses: mozilla-actions/sccache-action@v0.0.9
         with:
-          version: 0.5.4
+          version: v0.5.4
 
       - uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2
         if: ${{ matrix.profile != 'release' || startsWith(matrix.runner, 'macos') }}
@@ -207,6 +207,7 @@ jobs:
         # Tests take too long for release builds to run them on every PR.
         if: ${{ matrix.profile != 'release' }}
         continue-on-error: true
+        shell: bash
         run: cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test
         env:
           RUST_BACKTRACE: 1
@@ -215,6 +216,7 @@ jobs:
         id: test_release
         if: ${{ matrix.profile == 'release' && startsWith(matrix.runner, 'macos') }}
         continue-on-error: true
+        shell: bash
         run: |
           if [[ "$IS_MACOS_RELEASE" == 'true' ]]; then
             export RUSTC_WRAPPER="sccache"
@@ -226,6 +228,7 @@ jobs:
 
       - name: cargo clippy
         id: clippy
+        shell: bash
         run: |
           if [[ "$IS_MACOS_RELEASE" == 'true' ]]; then
             export RUSTC_WRAPPER="sccache"
