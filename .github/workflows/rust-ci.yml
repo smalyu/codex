@@ -192,7 +192,7 @@ jobs:
 
       - if: ${{ matrix.profile == 'release' && startsWith(matrix.runner, 'macos') }}
         name: Enable sccache
-        uses: mozilla-actions/sccache-action@v0
+        uses: mozilla-actions/sccache-action@v0.0.9
         with:
           version: 0.5.4
 
