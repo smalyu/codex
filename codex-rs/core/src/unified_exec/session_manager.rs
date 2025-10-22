@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
+use crate::exec_env::CODEX_SESSION_ID_ENV_VAR;
 use crate::exec_env::create_env;
 use crate::sandboxing::ExecEnv;
 use crate::tools::events::ToolEmitter;
@@ -109,11 +110,12 @@ impl UnifiedExecSessionManager {
     ) -> Result<UnifiedExecSession, UnifiedExecError> {
         let mut orchestrator = ToolOrchestrator::new();
         let mut runtime = UnifiedExecRuntime::new(self);
-        let req = UnifiedExecToolRequest::new(
-            command,
-            context.turn.cwd.clone(),
-            create_env(&context.turn.shell_environment_policy),
+        let mut env = create_env(&context.turn.shell_environment_policy);
+        env.insert(
+            CODEX_SESSION_ID_ENV_VAR.to_string(),
+            context.session.conversation_id().to_string(),
         );
+        let req = UnifiedExecToolRequest::new(command, context.turn.cwd.clone(), env);
         let tool_ctx = ToolCtx {
             session: context.session,
             turn: context.turn,
