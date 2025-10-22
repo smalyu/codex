@@ -659,7 +659,9 @@ fn streaming_final_answer_keeps_task_running_state() {
     chat.on_commit_tick();
 
     assert!(chat.bottom_pane.is_task_running());
-    assert!(chat.bottom_pane.status_widget().is_none());
+    // Status indicator remains visible while the final answer streams so queued
+    // messages and the Esc-to-interrupt hint stay accessible.
+    assert!(chat.bottom_pane.status_widget().is_some());
 
     chat.bottom_pane
         .set_composer_text("queued submission".to_string());
