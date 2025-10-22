@@ -2098,10 +2098,12 @@ async fn try_run_turn(
                     let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
                     sess.send_event(&turn_context, msg).await;
                 }
+
                 let result = TurnRunResult {
                     processed_items,
                     total_token_usage: token_usage.clone(),
                 };
+
                 return Ok(result);
             }
             ResponseEvent::OutputTextDelta(delta) => {
