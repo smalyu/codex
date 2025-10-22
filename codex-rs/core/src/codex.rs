@@ -1657,7 +1657,9 @@ pub(crate) async fn run_task(
                 }
                 continue;
             }
-            Err(CodexErr::TurnAborted { processed_items }) => {
+            Err(CodexErr::TurnAborted {
+                dangling_artifacts: processed_items,
+            }) => {
                 let (_responses, items_to_record_in_conversation_history) =
                     process_items(processed_items);
                 sess.record_conversation_items(&items_to_record_in_conversation_history)
@@ -1850,8 +1852,12 @@ async fn run_turn(
         .await
         {
             Ok(output) => return Ok(output),
-            Err(CodexErr::TurnAborted { processed_items }) => {
-                return Err(CodexErr::TurnAborted { processed_items });
+            Err(CodexErr::TurnAborted {
+                dangling_artifacts: processed_items,
+            }) => {
+                return Err(CodexErr::TurnAborted {
+                    dangling_artifacts: processed_items,
+                });
             }
             Err(CodexErr::Interrupted) => return Err(CodexErr::Interrupted),
             Err(CodexErr::EnvVar(var)) => return Err(CodexErr::EnvVar(var)),
@@ -1905,9 +1911,9 @@ async fn run_turn(
 /// "handled" such that it produces a `ResponseInputItem` that needs to be
 /// sent back to the model on the next turn.
 #[derive(Debug)]
-pub(crate) struct ProcessedResponseItem {
-    pub(crate) item: ResponseItem,
-    pub(crate) response: Option<ResponseInputItem>,
+pub struct ProcessedResponseItem {
+    pub item: ResponseItem,
+    pub response: Option<ResponseInputItem>,
 }
 
 #[derive(Debug)]
@@ -1962,7 +1968,9 @@ async fn try_run_turn(
                 info!("Turn aborted");
                 let processed_items =
                     finalize_turn(&sess, &turn_context, &turn_diff_tracker, output).await?;
-                return Err(CodexErr::TurnAborted { processed_items });
+                return Err(CodexErr::TurnAborted {
+                    dangling_artifacts: processed_items,
+                });
             }
         };
 

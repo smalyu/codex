@@ -56,7 +56,7 @@ pub enum SandboxErr {
 pub enum CodexErr {
     #[error("turn aborted")]
     TurnAborted {
-        processed_items: Vec<ProcessedResponseItem>,
+        dangling_artifacts: Vec<ProcessedResponseItem>,
     },
 
     /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
@@ -162,7 +162,7 @@ pub enum CodexErr {
 impl From<CancelErr> for CodexErr {
     fn from(_: CancelErr) -> Self {
         CodexErr::TurnAborted {
-            processed_items: Vec::new(),
+            dangling_artifacts: Vec::new(),
         }
     }
 }
