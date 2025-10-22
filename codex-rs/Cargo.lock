@@ -1061,6 +1061,7 @@ dependencies = [
  "codex-apply-patch",
  "codex-async-utils",
  "codex-file-search",
+ "codex-keyring-store",
  "codex-mcp-client",
  "codex-otel",
  "codex-protocol",
@@ -1212,6 +1213,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.16",
  "walkdir",
+]
+
+[[package]]
+name = "codex-keyring-store"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "keyring",
 ]
 
 [[package]]
@@ -1390,6 +1399,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "codex-keyring-store",
  "codex-protocol",
  "dirs",
  "escargot",

@@ -1,6 +1,7 @@
 use chrono::DateTime;
 use chrono::Utc;
-use keyring::Entry;
+use codex_keyring_store::CredentialStoreError;
+use codex_keyring_store::DefaultKeyringStore;
 use serde::Deserialize;
 use serde::Serialize;
 #[cfg(test)]
@@ -45,36 +46,22 @@ pub enum AuthCredentialsStoreMode {
 const KEYRING_SERVICE: &str = "Codex CLI Auth";
 
 trait KeyringStore: Send + Sync {
-    fn load(&self, service: &str, account: &str) -> Result<Option<String>, keyring::Error>;
-    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), keyring::Error>;
-    fn delete(&self, service: &str, account: &str) -> Result<bool, keyring::Error>;
+    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError>;
+    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError>;
+    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError>;
 }
 
-#[derive(Default)]
-struct DefaultKeyringStore;
-
 impl KeyringStore for DefaultKeyringStore {
-    fn load(&self, service: &str, account: &str) -> Result<Option<String>, keyring::Error> {
-        let entry = Entry::new(service, account)?;
-        match entry.get_password() {
-            Ok(password) => Ok(Some(password)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error),
-        }
+    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError> {
+        DefaultKeyringStore::load(self, service, account)
     }
 
-    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), keyring::Error> {
-        let entry = Entry::new(service, account)?;
-        entry.set_password(value)
+    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError> {
+        DefaultKeyringStore::save(self, service, account, value)
     }
 
-    fn delete(&self, service: &str, account: &str) -> Result<bool, keyring::Error> {
-        let entry = Entry::new(service, account)?;
-        match entry.delete_credential() {
-            Ok(()) => Ok(true),
-            Err(keyring::Error::NoEntry) => Ok(false),
-            Err(error) => Err(error),
-        }
+    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
+        DefaultKeyringStore::delete(self, service, account)
     }
 }
 
@@ -169,7 +156,6 @@ impl AuthStorage {
         let key = compute_store_key(&self.codex_home)?;
         let keyring_removed = match self.keyring_store.delete(KEYRING_SERVICE, &key) {
             Ok(removed) => removed,
-            Err(keyring::Error::NoEntry) => false,
             Err(err) => {
                 if matches!(
                     self.mode,
@@ -742,17 +728,26 @@ mod tests {
     }
 
     impl KeyringStore for MockKeyringStore {
-        fn load(&self, _service: &str, account: &str) -> Result<Option<String>, keyring::Error> {
+        fn load(
+            &self,
+            _service: &str,
+            account: &str,
+        ) -> Result<Option<String>, CredentialStoreError> {
             Ok(self.get(account))
         }
 
-        fn save(&self, _service: &str, account: &str, value: &str) -> Result<(), keyring::Error> {
+        fn save(
+            &self,
+            _service: &str,
+            account: &str,
+            value: &str,
+        ) -> Result<(), CredentialStoreError> {
             let mut guard = self.entries.lock().unwrap();
             guard.insert(account.to_string(), value.to_string());
             Ok(())
         }
 
-        fn delete(&self, _service: &str, account: &str) -> Result<bool, keyring::Error> {
+        fn delete(&self, _service: &str, account: &str) -> Result<bool, CredentialStoreError> {
             let mut guard = self.entries.lock().unwrap();
             Ok(guard.remove(account).is_some())
         }

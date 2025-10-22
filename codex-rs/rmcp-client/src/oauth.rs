@@ -18,7 +18,8 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use keyring::Entry;
+use codex_keyring_store::CredentialStoreError;
+use codex_keyring_store::DefaultKeyringStore;
 use oauth2::AccessToken;
 use oauth2::EmptyExtraTokenFields;
 use oauth2::RefreshToken;
@@ -73,61 +74,23 @@ pub enum OAuthCredentialsStoreMode {
     Keyring,
 }
 
-#[derive(Debug)]
-struct CredentialStoreError(anyhow::Error);
-
-impl CredentialStoreError {
-    fn new(error: impl Into<anyhow::Error>) -> Self {
-        Self(error.into())
-    }
-
-    fn message(&self) -> String {
-        self.0.to_string()
-    }
-
-    fn into_error(self) -> anyhow::Error {
-        self.0
-    }
-}
-
-impl fmt::Display for CredentialStoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for CredentialStoreError {}
-
 trait KeyringStore {
     fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError>;
     fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError>;
     fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError>;
 }
 
-struct DefaultKeyringStore;
-
 impl KeyringStore for DefaultKeyringStore {
     fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError> {
-        let entry = Entry::new(service, account).map_err(CredentialStoreError::new)?;
-        match entry.get_password() {
-            Ok(password) => Ok(Some(password)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(CredentialStoreError::new(error)),
-        }
+        DefaultKeyringStore::load(self, service, account)
     }
 
     fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError> {
-        let entry = Entry::new(service, account).map_err(CredentialStoreError::new)?;
-        entry.set_password(value).map_err(CredentialStoreError::new)
+        DefaultKeyringStore::save(self, service, account, value)
     }
 
     fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-        let entry = Entry::new(service, account).map_err(CredentialStoreError::new)?;
-        match entry.delete_credential() {
-            Ok(()) => Ok(true),
-            Err(keyring::Error::NoEntry) => Ok(false),
-            Err(error) => Err(CredentialStoreError::new(error)),
-        }
+        DefaultKeyringStore::delete(self, service, account)
     }
 }
 

@@ -16,6 +16,7 @@ members = [
     "core",
     "exec",
     "execpolicy",
+    "keyring-store",
     "file-search",
     "git-tooling",
     "linux-sandbox",
@@ -68,6 +69,7 @@ codex-file-search = { path = "file-search" }
 codex-git-tooling = { path = "git-tooling" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-login = { path = "login" }
+codex-keyring-store = { path = "keyring-store" }
 codex-mcp-client = { path = "mcp-client" }
 codex-mcp-server = { path = "mcp-server" }
 codex-ollama = { path = "ollama" }
