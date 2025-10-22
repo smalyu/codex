@@ -1966,8 +1966,7 @@ async fn try_run_turn(
             Ok(event) => event,
             Err(codex_async_utils::CancelErr::Cancelled) => {
                 info!("Turn aborted");
-                let processed_items =
-                    finalize_turn(&sess, &turn_context, &turn_diff_tracker, output).await?;
+                let processed_items = finalize_turn(output).await?;
                 return Err(CodexErr::TurnAborted {
                     dangling_artifacts: processed_items,
                 });
@@ -2079,8 +2078,15 @@ async fn try_run_turn(
             } => {
                 sess.update_token_usage_info(turn_context.as_ref(), token_usage.as_ref())
                     .await;
-                let processed_items =
-                    finalize_turn(&sess, &turn_context, &turn_diff_tracker, output).await?;
+                let unified_diff = {
+                    let mut tracker = turn_diff_tracker.lock().await;
+                    tracker.get_unified_diff()
+                };
+                if let Ok(Some(unified_diff)) = unified_diff {
+                    let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
+                    sess.send_event(turn_context.as_ref(), msg).await;
+                }
+                let processed_items = finalize_turn(output).await?;
                 return Ok(TurnRunResult {
                     processed_items,
                     total_token_usage: token_usage.clone(),
@@ -2118,21 +2124,9 @@ async fn try_run_turn(
 }
 
 async fn finalize_turn<'a>(
-    sess: &Arc<Session>,
-    turn_context: &Arc<TurnContext>,
-    turn_diff_tracker: &SharedTurnDiffTracker,
     output: FuturesOrdered<BoxFuture<'a, CodexResult<ProcessedResponseItem>>>,
 ) -> CodexResult<Vec<ProcessedResponseItem>> {
     let processed_items = output.try_collect().await?;
-
-    let unified_diff = {
-        let mut tracker = turn_diff_tracker.lock().await;
-        tracker.get_unified_diff()
-    };
-    if let Ok(Some(unified_diff)) = unified_diff {
-        let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-        sess.send_event(turn_context, msg).await;
-    }
 
     Ok(processed_items)
 }
