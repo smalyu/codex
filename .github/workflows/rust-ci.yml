@@ -205,6 +205,14 @@ jobs:
         env:
           RUST_BACKTRACE: 1
 
+      - name: tests (release on macOS)
+        id: test_release
+        if: ${{ matrix.profile == 'release' && startsWith(matrix.runner, 'macos') }}
+        continue-on-error: true
+        run: cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile release
+        env:
+          RUST_BACKTRACE: 1
+
       # Save caches explicitly; make non-fatal so cache packaging
       # never fails the overall job. Only save when key wasn't hit.
       - name: Save cargo home cache
@@ -235,7 +243,8 @@ jobs:
         if: |
           steps.clippy.outcome == 'failure' ||
           steps.cargo_check_all_crates.outcome == 'failure' ||
-          steps.test.outcome == 'failure'
+          steps.test.outcome == 'failure' ||
+          steps.test_release.outcome == 'failure'
         run: |
           echo "One or more checks failed (clippy, cargo_check_all_crates, or test). See logs for details."
           exit 1
