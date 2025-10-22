@@ -1608,18 +1608,14 @@ pub(crate) async fn run_task(
                 let token_limit_reached = total_usage_tokens
                     .map(|tokens| tokens >= limit)
                     .unwrap_or(false);
-                let (responses, items_to_record_in_conversation_history) =
-                    process_items(processed_items);
-                // Only attempt to take the lock if there is something to record.
-                if !items_to_record_in_conversation_history.is_empty() {
-                    if is_review_mode {
-                        review_thread_history
-                            .record_items(items_to_record_in_conversation_history.iter());
-                    } else {
-                        sess.record_conversation_items(&items_to_record_in_conversation_history)
-                            .await;
-                    }
-                }
+                let (responses, items_to_record_in_conversation_history) = process_items(
+                    processed_items,
+                    is_review_mode,
+                    &mut review_thread_history,
+                    &sess,
+                )
+                .await;
+
                 if token_limit_reached {
                     if auto_compact_recently_attempted {
                         let limit_str = limit.to_string();
@@ -1660,10 +1656,13 @@ pub(crate) async fn run_task(
             Err(CodexErr::TurnAborted {
                 dangling_artifacts: processed_items,
             }) => {
-                let (_responses, items_to_record_in_conversation_history) =
-                    process_items(processed_items);
-                sess.record_conversation_items(&items_to_record_in_conversation_history)
-                    .await;
+                let _ = process_items(
+                    processed_items,
+                    is_review_mode,
+                    &mut review_thread_history,
+                    &sess,
+                )
+                .await;
                 // Aborted turn is reported via a different event.
                 break;
             }
@@ -1698,8 +1697,11 @@ pub(crate) async fn run_task(
     last_agent_message
 }
 
-fn process_items(
+async fn process_items(
     processed_items: Vec<ProcessedResponseItem>,
+    is_review_mode: bool,
+    review_thread_history: &mut ConversationHistory,
+    sess: &Session,
 ) -> (Vec<ResponseInputItem>, Vec<ResponseItem>) {
     let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
     let mut responses = Vec::<ResponseInputItem>::new();
@@ -1781,6 +1783,16 @@ fn process_items(
         };
         if let Some(response) = response {
             responses.push(response);
+        }
+    }
+
+    // Only attempt to take the lock if there is something to record.
+    if !items_to_record_in_conversation_history.is_empty() {
+        if is_review_mode {
+            review_thread_history.record_items(items_to_record_in_conversation_history.iter());
+        } else {
+            sess.record_conversation_items(&items_to_record_in_conversation_history)
+                .await;
         }
     }
     (responses, items_to_record_in_conversation_history)
