@@ -161,12 +161,10 @@ fn build_never_denied_message_from_output(output: &ExecToolCallOutput) -> String
 
     match detail {
         Some(tag) => format!("failed in sandbox: {tag}"),
-        None => "failed in sandbox".to_string(),
+        None => format!("failed in sandbox: {}", output.aggregated_output.text),
     }
 }
 
-fn build_denial_reason_from_output(_output: &ExecToolCallOutput) -> String {
-    // Keep approval reason terse and stable for UX/tests, but accept the
-    // output so we can evolve heuristics later without touching call sites.
-    "command failed; retry without sandbox?".to_string()
+fn build_denial_reason_from_output(output: &ExecToolCallOutput) -> String {
+    format!("command failed: {}\nretry without sandbox?", output.aggregated_output.text)
 }
