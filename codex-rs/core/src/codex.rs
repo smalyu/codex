@@ -1965,7 +1965,6 @@ async fn try_run_turn(
         let event = match stream.next().or_cancel(&cancellation_token).await {
             Ok(event) => event,
             Err(codex_async_utils::CancelErr::Cancelled) => {
-                info!("Turn aborted");
                 let processed_items = output.try_collect().await?;
                 return Err(CodexErr::TurnAborted {
                     dangling_artifacts: processed_items,
