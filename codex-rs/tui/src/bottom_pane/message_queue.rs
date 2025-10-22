@@ -80,14 +80,14 @@ mod tests {
     #[test]
     fn desired_height_empty() {
         let queue = MessageQueue::new();
-        assert_eq!(queue.desired_height(10), 0);
+        assert_eq!(queue.desired_height(40), 0);
     }
 
     #[test]
     fn desired_height_one_message() {
         let mut queue = MessageQueue::new();
         queue.messages.push("Hello, world!".to_string());
-        assert_eq!(queue.desired_height(10), 2);
+        assert_eq!(queue.desired_height(40), 2);
     }
 
     #[test]
