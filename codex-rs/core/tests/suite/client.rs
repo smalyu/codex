@@ -765,17 +765,38 @@ async fn token_count_includes_rate_limits_snapshot() {
 
     let response = ResponseTemplate::new(200)
         .insert_header("content-type", "text/event-stream")
-        .insert_header("x-codex-primary-used-percent", "12.5")
-        .insert_header("x-codex-secondary-used-percent", "40.0")
-        .insert_header("x-codex-primary-window-minutes", "10")
-        .insert_header("x-codex-secondary-window-minutes", "60")
-        .insert_header("x-codex-primary-reset-at", "1704069000")
-        .insert_header("x-codex-secondary-reset-at", "1704074400")
         .set_body_raw(sse_body, "text/event-stream");
 
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .respond_with(response)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let usage_payload = serde_json::json!({
+        "plan_type": "plus",
+        "rate_limit": {
+            "allowed": true,
+            "limit_reached": false,
+            "primary_window": {
+                "used_percent": 12,
+                "limit_window_seconds": 600,
+                "reset_after_seconds": 30,
+                "reset_at": 1704069000
+            },
+            "secondary_window": {
+                "used_percent": 40,
+                "limit_window_seconds": 3600,
+                "reset_after_seconds": 120,
+                "reset_at": 1704074400
+            }
+        }
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(usage_payload))
         .expect(1)
         .mount(&server)
         .await;
@@ -786,8 +807,10 @@ async fn token_count_includes_rate_limits_snapshot() {
     let home = TempDir::new().unwrap();
     let mut config = load_default_config_for_test(&home);
     config.model_provider = provider;
+    config.chatgpt_base_url = format!("{}/backend-api", server.uri());
 
-    let conversation_manager = ConversationManager::with_auth(CodexAuth::from_api_key("test"));
+    let conversation_manager =
+        ConversationManager::with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
     let codex = conversation_manager
         .new_conversation(config)
         .await
@@ -803,33 +826,6 @@ async fn token_count_includes_rate_limits_snapshot() {
         .await
         .unwrap();
 
-    let first_token_event =
-        wait_for_event(&codex, |msg| matches!(msg, EventMsg::TokenCount(_))).await;
-    let rate_limit_only = match first_token_event {
-        EventMsg::TokenCount(ev) => ev,
-        _ => unreachable!(),
-    };
-
-    let rate_limit_json = serde_json::to_value(&rate_limit_only).unwrap();
-    pretty_assertions::assert_eq!(
-        rate_limit_json,
-        json!({
-            "info": null,
-            "rate_limits": {
-                "primary": {
-                    "used_percent": 12.5,
-                    "window_minutes": 10,
-                    "resets_at": 1704069000
-                },
-                "secondary": {
-                    "used_percent": 40.0,
-                    "window_minutes": 60,
-                    "resets_at": 1704074400
-                }
-            }
-        })
-    );
-
     let token_event = wait_for_event(
         &codex,
         |msg| matches!(msg, EventMsg::TokenCount(ev) if ev.info.is_some()),
@@ -839,7 +835,7 @@ async fn token_count_includes_rate_limits_snapshot() {
         EventMsg::TokenCount(ev) => ev,
         _ => unreachable!(),
     };
-    // Assert full JSON for the final token count event (usage + rate limits)
+    // Assert full JSON for the token count event (usage + rate limits)
     let final_json = serde_json::to_value(&final_payload).unwrap();
     pretty_assertions::assert_eq!(
         final_json,
@@ -864,7 +860,7 @@ async fn token_count_includes_rate_limits_snapshot() {
             },
             "rate_limits": {
                 "primary": {
-                    "used_percent": 12.5,
+                    "used_percent": 12.0,
                     "window_minutes": 10,
                     "resets_at": 1704069000
                 },
@@ -888,7 +884,7 @@ async fn token_count_includes_rate_limits_snapshot() {
             .primary
             .as_ref()
             .map(|window| window.used_percent),
-        Some(12.5)
+        Some(12.0)
     );
     assert_eq!(
         final_snapshot

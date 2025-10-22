@@ -17,7 +17,9 @@ use crate::terminal;
 use crate::user_notification::UserNotifier;
 use async_channel::Receiver;
 use async_channel::Sender;
+use codex_app_server_protocol::AuthMode;
 use codex_apply_patch::ApplyPatchAction;
+use codex_backend_openapi_models::models::RateLimitStatusPayload as BackendRateLimitStatusPayload;
 use codex_protocol::ConversationId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
@@ -39,6 +41,7 @@ use mcp_types::ListResourcesRequestParams;
 use mcp_types::ListResourcesResult;
 use mcp_types::ReadResourceRequestParams;
 use mcp_types::ReadResourceResult;
+use reqwest::StatusCode;
 use serde_json;
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -59,11 +62,14 @@ use crate::config::Config;
 use crate::config_types::McpServerTransportConfig;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::conversation_history::ConversationHistory;
+use crate::default_client::create_client;
+use crate::default_client::get_codex_user_agent;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 #[cfg(test)]
 use crate::exec::StreamOutput;
+use crate::rate_limits::rate_limit_snapshot_from_usage_payload;
 // Removed: legacy executor wiring replaced by ToolOrchestrator flows.
 // legacy normalize_exec_result no longer used after orchestrator migration
 use crate::mcp::auth::compute_auth_statuses;
@@ -350,6 +356,27 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) reasoning_effort: Option<Option<ReasoningEffortConfig>>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
+}
+
+#[derive(Debug)]
+enum RateLimitFetchError {
+    MissingAuth,
+    WrongAuthMode,
+    Request(String),
+}
+
+impl RateLimitFetchError {
+    fn message(&self) -> String {
+        match self {
+            RateLimitFetchError::MissingAuth => {
+                "codex account authentication required to read rate limits".to_string()
+            }
+            RateLimitFetchError::WrongAuthMode => {
+                "chatgpt authentication required to read rate limits".to_string()
+            }
+            RateLimitFetchError::Request(message) => message.clone(),
+        }
+    }
 }
 
 impl Session {
@@ -895,10 +922,11 @@ impl Session {
         state.history_snapshot()
     }
 
-    async fn update_token_usage_info(
+    async fn update_usage_snapshot(
         &self,
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
+        rate_limits: Option<RateLimitSnapshot>,
     ) {
         {
             let mut state = self.state.lock().await;
@@ -908,20 +936,93 @@ impl Session {
                     turn_context.client.get_model_context_window(),
                 );
             }
+            if let Some(snapshot) = rate_limits {
+                state.set_rate_limits(snapshot);
+            }
         }
         self.send_token_count_event(turn_context).await;
     }
 
-    async fn update_rate_limits(
+    async fn refresh_usage_after_turn(
         &self,
         turn_context: &TurnContext,
-        new_rate_limits: RateLimitSnapshot,
+        token_usage: Option<&TokenUsage>,
     ) {
-        {
-            let mut state = self.state.lock().await;
-            state.set_rate_limits(new_rate_limits);
+        let rate_limits = match self.fetch_rate_limits(turn_context).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(RateLimitFetchError::MissingAuth) | Err(RateLimitFetchError::WrongAuthMode) => None,
+            Err(RateLimitFetchError::Request(message)) => {
+                warn!("{message}");
+                None
+            }
+        };
+
+        self.update_usage_snapshot(turn_context, token_usage, rate_limits)
+            .await;
+    }
+
+    async fn refresh_usage_for_status(
+        &self,
+        turn_context: &TurnContext,
+    ) -> Result<(), RateLimitFetchError> {
+        let snapshot = self.fetch_rate_limits(turn_context).await?;
+        self.update_usage_snapshot(turn_context, None, Some(snapshot))
+            .await;
+        Ok(())
+    }
+
+    async fn fetch_rate_limits(
+        &self,
+        turn_context: &TurnContext,
+    ) -> Result<RateLimitSnapshot, RateLimitFetchError> {
+        let Some(auth) = self.services.auth_manager.auth() else {
+            return Err(RateLimitFetchError::MissingAuth);
+        };
+        if auth.mode != AuthMode::ChatGPT {
+            return Err(RateLimitFetchError::WrongAuthMode);
         }
-        self.send_token_count_event(turn_context).await;
+
+        let token = auth.get_token().await.map_err(|err| {
+            RateLimitFetchError::Request(format!("failed to fetch codex rate limits: {err}"))
+        })?;
+
+        let base = turn_context.client.backend_base_url().trim_end_matches('/');
+        let url = if base.contains("/backend-api") {
+            format!("{base}/wham/usage")
+        } else {
+            format!("{base}/api/codex/usage")
+        };
+
+        let client = create_client();
+        let mut request = client
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, get_codex_user_agent())
+            .bearer_auth(token);
+
+        if let Some(account_id) = auth.get_account_id() {
+            request = request.header("ChatGPT-Account-Id", account_id);
+        }
+
+        let response = request.send().await.map_err(|err| {
+            RateLimitFetchError::Request(format!("failed to fetch codex rate limits: {err}"))
+        })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            if status == StatusCode::UNAUTHORIZED {
+                return Err(RateLimitFetchError::WrongAuthMode);
+            }
+            let body = response.text().await.unwrap_or_default();
+            return Err(RateLimitFetchError::Request(format!(
+                "failed to fetch codex rate limits: status {status}; body={body}"
+            )));
+        }
+
+        let payload: BackendRateLimitStatusPayload = response.json().await.map_err(|err| {
+            RateLimitFetchError::Request(format!("failed to fetch codex rate limits: {err}"))
+        })?;
+
+        Ok(rate_limit_snapshot_from_usage_payload(payload))
     }
 
     async fn send_token_count_event(&self, turn_context: &TurnContext) {
@@ -1281,6 +1382,23 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     }),
                 };
                 sess.send_event_raw(event).await;
+            }
+            Op::RefreshUsage => {
+                let turn_context = sess
+                    .new_turn_with_sub_id(sub.id.clone(), SessionSettingsUpdate::default())
+                    .await;
+                match sess.refresh_usage_for_status(turn_context.as_ref()).await {
+                    Ok(()) => {}
+                    Err(err) => {
+                        let event = Event {
+                            id: turn_context.sub_id.clone(),
+                            msg: EventMsg::Error(ErrorEvent {
+                                message: err.message(),
+                            }),
+                        };
+                        sess.send_event_raw(event).await;
+                    }
+                }
             }
             Op::Compact => {
                 let turn_context = sess
@@ -1838,7 +1956,7 @@ async fn run_turn(
             Err(CodexErr::UsageLimitReached(e)) => {
                 let rate_limits = e.rate_limits.clone();
                 if let Some(rate_limits) = rate_limits {
-                    sess.update_rate_limits(turn_context.as_ref(), rate_limits)
+                    sess.update_usage_snapshot(turn_context.as_ref(), None, Some(rate_limits))
                         .await;
                 }
                 return Err(CodexErr::UsageLimitReached(e));
@@ -2078,17 +2196,11 @@ async fn try_run_turn(
                     })
                     .await;
             }
-            ResponseEvent::RateLimits(snapshot) => {
-                // Update internal state with latest rate limits, but defer sending until
-                // token usage is available to avoid duplicate TokenCount events.
-                sess.update_rate_limits(turn_context.as_ref(), snapshot)
-                    .await;
-            }
             ResponseEvent::Completed {
                 response_id: _,
                 token_usage,
             } => {
-                sess.update_token_usage_info(turn_context.as_ref(), token_usage.as_ref())
+                sess.refresh_usage_after_turn(turn_context.as_ref(), token_usage.as_ref())
                     .await;
 
                 let processed_items = output
@@ -2328,6 +2440,7 @@ mod tests {
     use crate::exec::ExecToolCallOutput;
     use crate::mcp::auth::McpAuthStatusEntry;
     use crate::tools::format_exec_output_str;
+    use serde::Deserialize;
 
     use crate::protocol::CompactedItem;
     use crate::protocol::InitialHistory;
@@ -2352,7 +2465,6 @@ mod tests {
     use mcp_types::ContentBlock;
     use mcp_types::TextContent;
     use pretty_assertions::assert_eq;
-    use serde::Deserialize;
     use serde_json::json;
     use std::path::PathBuf;
     use std::sync::Arc;

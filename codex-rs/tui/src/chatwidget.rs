@@ -241,6 +241,7 @@ pub(crate) struct ChatWidget {
     token_info: Option<TokenUsageInfo>,
     rate_limit_snapshot: Option<RateLimitSnapshotDisplay>,
     rate_limit_warnings: RateLimitWarningState,
+    status_refresh_pending: bool,
     // Stream lifecycle controller
     stream_controller: Option<StreamController>,
     running_commands: HashMap<String, RunningCommand>,
@@ -940,6 +941,7 @@ impl ChatWidget {
             token_info: None,
             rate_limit_snapshot: None,
             rate_limit_warnings: RateLimitWarningState::default(),
+            status_refresh_pending: false,
             stream_controller: None,
             running_commands: HashMap::new(),
             task_complete_pending: false,
@@ -1007,6 +1009,7 @@ impl ChatWidget {
             token_info: None,
             rate_limit_snapshot: None,
             rate_limit_warnings: RateLimitWarningState::default(),
+            status_refresh_pending: false,
             stream_controller: None,
             running_commands: HashMap::new(),
             task_complete_pending: false,
@@ -1209,7 +1212,7 @@ impl ChatWidget {
                 self.insert_str("@");
             }
             SlashCommand::Status => {
-                self.add_status_output();
+                self.request_status_refresh();
             }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
@@ -1446,8 +1449,20 @@ impl ChatWidget {
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
+                if self.status_refresh_pending {
+                    self.status_refresh_pending = false;
+                    self.add_status_output();
+                }
             }
-            EventMsg::Error(ErrorEvent { message }) => self.on_error(message),
+            EventMsg::Error(ErrorEvent { message }) => {
+                if self.status_refresh_pending {
+                    self.status_refresh_pending = false;
+                    self.add_to_history(history_cell::new_error_event(message));
+                    self.request_redraw();
+                } else {
+                    self.on_error(message);
+                }
+            }
             EventMsg::TurnAborted(ev) => match ev.reason {
                 TurnAbortReason::Interrupted => {
                     self.on_interrupted_turn(ev.reason);
@@ -1626,6 +1641,15 @@ impl ChatWidget {
 
     pub(crate) fn on_diff_complete(&mut self) {
         self.request_redraw();
+    }
+
+    fn request_status_refresh(&mut self) {
+        if self.status_refresh_pending {
+            return;
+        }
+
+        self.status_refresh_pending = true;
+        self.submit_op(Op::RefreshUsage);
     }
 
     pub(crate) fn add_status_output(&mut self) {

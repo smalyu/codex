@@ -273,6 +273,7 @@ fn make_chatwidget_manual() -> (
         token_info: None,
         rate_limit_snapshot: None,
         rate_limit_warnings: RateLimitWarningState::default(),
+        status_refresh_pending: false,
         stream_controller: None,
         running_commands: HashMap::new(),
         task_complete_pending: false,

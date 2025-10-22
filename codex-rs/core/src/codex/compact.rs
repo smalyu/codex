@@ -257,11 +257,8 @@ async fn drain_to_completed(
             Ok(ResponseEvent::OutputItemDone(item)) => {
                 sess.record_into_history(std::slice::from_ref(&item)).await;
             }
-            Ok(ResponseEvent::RateLimits(snapshot)) => {
-                sess.update_rate_limits(turn_context, snapshot).await;
-            }
             Ok(ResponseEvent::Completed { token_usage, .. }) => {
-                sess.update_token_usage_info(turn_context, token_usage.as_ref())
+                sess.refresh_usage_after_turn(turn_context, token_usage.as_ref())
                     .await;
                 return Ok(());
             }

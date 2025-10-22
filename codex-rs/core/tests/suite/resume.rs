@@ -53,6 +53,11 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
             EventMsg::TokenCount(_),
             EventMsg::AgentMessage(assistant_message),
             EventMsg::TokenCount(_),
+        ]
+        | [
+            EventMsg::UserMessage(first_user),
+            EventMsg::AgentMessage(assistant_message),
+            EventMsg::TokenCount(_),
         ] => {
             assert_eq!(first_user.message, "Record some messages");
             assert_eq!(assistant_message.message, "Completed first turn");

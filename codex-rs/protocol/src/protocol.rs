@@ -132,6 +132,9 @@ pub enum Op {
         summary: Option<ReasoningSummaryConfig>,
     },
 
+    /// Request the latest usage and rate limits without sending a turn to the model.
+    RefreshUsage,
+
     /// Approve a command execution
     ExecApproval {
         /// The id of the submission we are approving

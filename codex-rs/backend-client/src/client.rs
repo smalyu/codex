@@ -1,13 +1,12 @@
 use crate::types::CodeTaskDetailsResponse;
 use crate::types::PaginatedListTaskListItem;
 use crate::types::RateLimitStatusPayload;
-use crate::types::RateLimitWindowSnapshot;
 use crate::types::TurnAttemptsSiblingTurnsResponse;
 use anyhow::Result;
 use codex_core::auth::CodexAuth;
 use codex_core::default_client::get_codex_user_agent;
+use codex_core::rate_limits::rate_limit_snapshot_from_usage_payload;
 use codex_protocol::protocol::RateLimitSnapshot;
-use codex_protocol::protocol::RateLimitWindow;
 use reqwest::header::AUTHORIZATION;
 use reqwest::header::CONTENT_TYPE;
 use reqwest::header::HeaderMap;
@@ -163,7 +162,7 @@ impl Client {
         let req = self.http.get(&url).headers(self.headers());
         let (body, ct) = self.exec_request(req, "GET", &url).await?;
         let payload: RateLimitStatusPayload = self.decode_json(&url, &ct, &body)?;
-        Ok(Self::rate_limit_snapshot_from_payload(payload))
+        Ok(rate_limit_snapshot_from_usage_payload(payload))
     }
 
     pub async fn list_tasks(
@@ -268,50 +267,5 @@ impl Client {
             }
             Err(e) => anyhow::bail!("Decode error for {url}: {e}; content-type={ct}; body={body}"),
         }
-    }
-
-    // rate limit helpers
-    fn rate_limit_snapshot_from_payload(payload: RateLimitStatusPayload) -> RateLimitSnapshot {
-        let Some(details) = payload
-            .rate_limit
-            .and_then(|inner| inner.map(|boxed| *boxed))
-        else {
-            return RateLimitSnapshot {
-                primary: None,
-                secondary: None,
-            };
-        };
-
-        RateLimitSnapshot {
-            primary: Self::map_rate_limit_window(details.primary_window),
-            secondary: Self::map_rate_limit_window(details.secondary_window),
-        }
-    }
-
-    fn map_rate_limit_window(
-        window: Option<Option<Box<RateLimitWindowSnapshot>>>,
-    ) -> Option<RateLimitWindow> {
-        let snapshot = match window {
-            Some(Some(snapshot)) => *snapshot,
-            _ => return None,
-        };
-
-        let used_percent = f64::from(snapshot.used_percent);
-        let window_minutes = Self::window_minutes_from_seconds(snapshot.limit_window_seconds);
-        let resets_at = Some(i64::from(snapshot.reset_at));
-        Some(RateLimitWindow {
-            used_percent,
-            window_minutes,
-            resets_at,
-        })
-    }
-
-    fn window_minutes_from_seconds(seconds: i32) -> Option<i64> {
-        if seconds <= 0 {
-            return None;
-        }
-
-        let seconds_i64 = i64::from(seconds);
-        Some((seconds_i64 + 59) / 60)
     }
 }

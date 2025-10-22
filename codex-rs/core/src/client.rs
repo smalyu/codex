@@ -120,6 +120,10 @@ impl ModelClient {
             .map(|w| w.saturating_mul(pct) / 100)
     }
 
+    pub(crate) fn backend_base_url(&self) -> &str {
+        self.config.chatgpt_base_url.as_str()
+    }
+
     pub fn get_auto_compact_token_limit(&self) -> Option<i64> {
         self.config.model_auto_compact_token_limit.or_else(|| {
             get_model_info(&self.config.model_family).and_then(|info| info.auto_compact_token_limit)
@@ -347,15 +351,6 @@ impl ModelClient {
         match res {
             Ok(resp) if resp.status().is_success() => {
                 let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
-
-                if let Some(snapshot) = parse_rate_limit_snapshot(resp.headers())
-                    && tx_event
-                        .send(Ok(ResponseEvent::RateLimits(snapshot)))
-                        .await
-                        .is_err()
-                {
-                    debug!("receiver dropped rate limit snapshot event");
-                }
 
                 // spawn task to process SSE
                 let stream = resp.bytes_stream().map_err(move |e| {
