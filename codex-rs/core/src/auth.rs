@@ -426,10 +426,6 @@ pub fn read_codex_api_key_from_env() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-pub fn get_auth_file(codex_home: &Path) -> PathBuf {
-    codex_home.join("auth.json")
-}
-
 /// Delete stored credentials using the specified backend.
 pub fn logout(codex_home: &Path, store_mode: AuthCredentialsStoreMode) -> std::io::Result<bool> {
     let storage = AuthStorage::new(codex_home.to_path_buf(), store_mode);
@@ -522,6 +518,10 @@ pub async fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> 
     Ok(())
 }
 
+fn get_auth_file(codex_home: &Path) -> PathBuf {
+    codex_home.join("auth.json")
+}
+
 fn logout_with_message(
     codex_home: &Path,
     message: String,
@@ -579,9 +579,19 @@ fn load_auth(
     }))
 }
 
+/// Load CLI auth data using the configured credential store backend.
+/// Returns `None` when no credentials are stored.
+pub fn load_auth_dot_json(
+    codex_home: &Path,
+    store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<Option<AuthDotJson>> {
+    let storage = AuthStorage::new(codex_home.to_path_buf(), store_mode);
+    storage.load()
+}
+
 /// Attempt to read and refresh the `auth.json` file in the given `CODEX_HOME` directory.
 /// Returns the full AuthDotJson structure after refreshing if necessary.
-pub fn try_read_auth_json(auth_file: &Path) -> std::io::Result<AuthDotJson> {
+fn try_read_auth_json(auth_file: &Path) -> std::io::Result<AuthDotJson> {
     let mut file = File::open(auth_file)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
@@ -590,7 +600,7 @@ pub fn try_read_auth_json(auth_file: &Path) -> std::io::Result<AuthDotJson> {
     Ok(auth_dot_json)
 }
 
-pub fn write_auth_json(auth_file: &Path, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
+fn write_auth_json(auth_file: &Path, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
     if let Some(parent) = auth_file.parent() {
         std::fs::create_dir_all(parent)?;
     }
