@@ -10,11 +10,11 @@ use crate::render::renderable::Renderable;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
-pub(crate) struct MessageQueue {
+pub(crate) struct QueuedUserMessages {
     pub messages: Vec<String>,
 }
 
-impl MessageQueue {
+impl QueuedUserMessages {
     pub(crate) fn new() -> Self {
         Self {
             messages: Vec::new(),
@@ -57,7 +57,7 @@ impl MessageQueue {
     }
 }
 
-impl Renderable for MessageQueue {
+impl Renderable for QueuedUserMessages {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         if area.is_empty() {
             return;
@@ -79,20 +79,20 @@ mod tests {
 
     #[test]
     fn desired_height_empty() {
-        let queue = MessageQueue::new();
+        let queue = QueuedUserMessages::new();
         assert_eq!(queue.desired_height(40), 0);
     }
 
     #[test]
     fn desired_height_one_message() {
-        let mut queue = MessageQueue::new();
+        let mut queue = QueuedUserMessages::new();
         queue.messages.push("Hello, world!".to_string());
         assert_eq!(queue.desired_height(40), 2);
     }
 
     #[test]
     fn render_one_message() {
-        let mut queue = MessageQueue::new();
+        let mut queue = QueuedUserMessages::new();
         queue.messages.push("Hello, world!".to_string());
         let width = 40;
         let height = queue.desired_height(width);
@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn render_two_messages() {
-        let mut queue = MessageQueue::new();
+        let mut queue = QueuedUserMessages::new();
         queue.messages.push("Hello, world!".to_string());
         queue.messages.push("This is another message".to_string());
         let width = 40;
@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn render_wrapped_message() {
-        let mut queue = MessageQueue::new();
+        let mut queue = QueuedUserMessages::new();
         queue
             .messages
             .push("This is a longer message that should be wrapped".to_string());
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn render_many_line_message() {
-        let mut queue = MessageQueue::new();
+        let mut queue = QueuedUserMessages::new();
         queue
             .messages
             .push("This is\na message\nwith many\nlines".to_string());

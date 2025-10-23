@@ -2,7 +2,7 @@
 use std::path::PathBuf;
 
 use crate::app_event_sender::AppEventSender;
-use crate::bottom_pane::message_queue::MessageQueue;
+use crate::bottom_pane::queued_user_messages::QueuedUserMessages;
 use crate::render::Insets;
 use crate::render::RectExt;
 use crate::render::renderable::Renderable as _;
@@ -38,7 +38,7 @@ mod scroll_state;
 mod selection_popup_common;
 mod textarea;
 pub(crate) use feedback_view::FeedbackView;
-mod message_queue;
+mod queued_user_messages;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CancellationEvent {
@@ -74,7 +74,7 @@ pub(crate) struct BottomPane {
     /// Inline status indicator shown above the composer while a task is running.
     status: Option<StatusIndicatorWidget>,
     /// Queued user messages to show above the composer while a turn is running.
-    message_queue: MessageQueue,
+    queued_user_messages: QueuedUserMessages,
     context_window_percent: Option<i64>,
 }
 
@@ -105,7 +105,7 @@ impl BottomPane {
             is_task_running: false,
             ctrl_c_quit_hint: false,
             status: None,
-            message_queue: MessageQueue::new(),
+            queued_user_messages: QueuedUserMessages::new(),
             esc_backtrack_hint: false,
             context_window_percent: None,
         }
@@ -135,7 +135,7 @@ impl BottomPane {
                     .status
                     .as_ref()
                     .map_or(0, |status| status.desired_height(width));
-                let queue_height = self.message_queue.desired_height(width);
+                let queue_height = self.queued_user_messages.desired_height(width);
                 let spacing_height = if status_height == 0 && queue_height == 0 {
                     0
                 } else {
@@ -160,7 +160,7 @@ impl BottomPane {
         if self.active_view().is_some() {
             return [Rect::ZERO, area];
         }
-        let has_queue = !self.message_queue.messages.is_empty();
+        let has_queue = !self.queued_user_messages.messages.is_empty();
         let mut status_height = self
             .status
             .as_ref()
@@ -170,7 +170,7 @@ impl BottomPane {
             status_height = status_height.saturating_sub(1);
         }
         let combined_height = status_height
-            .saturating_add(self.message_queue.desired_height(area.width))
+            .saturating_add(self.queued_user_messages.desired_height(area.width))
             .min(area.height.saturating_sub(1));
 
         let [status_area, _, content_area] = Layout::vertical([
@@ -388,7 +388,7 @@ impl BottomPane {
 
     /// Update the queued messages preview shown above the composer.
     pub(crate) fn set_queued_user_messages(&mut self, queued: Vec<String>) {
-        self.message_queue.messages = queued;
+        self.queued_user_messages.messages = queued;
         self.request_redraw();
     }
 
@@ -541,7 +541,7 @@ impl WidgetRef for &BottomPane {
                 height: top_area.height.saturating_sub(status_height),
             };
             if queue_area.height > 0 {
-                self.message_queue.render(queue_area, buf);
+                self.queued_user_messages.render(queue_area, buf);
             }
 
             self.composer.render_ref(content_area, buf);
