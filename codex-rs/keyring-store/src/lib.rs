@@ -72,3 +72,122 @@ impl DefaultKeyringStore {
         }
     }
 }
+
+pub mod testing {
+    use super::CredentialStoreError;
+    use keyring::Error as KeyringError;
+    use keyring::credential::CredentialApi as _;
+    use keyring::mock::MockCredential;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::PoisonError;
+
+    #[derive(Default, Clone)]
+    pub struct MockKeyringStore {
+        credentials: Arc<Mutex<HashMap<String, Arc<MockCredential>>>>,
+    }
+
+    impl MockKeyringStore {
+        fn get_credential(&self, account: &str) -> Option<Arc<MockCredential>> {
+            let guard = self
+                .credentials
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.get(account).cloned()
+        }
+
+        fn get_or_create_credential(&self, account: &str) -> Arc<MockCredential> {
+            let mut guard = self
+                .credentials
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard
+                .entry(account.to_string())
+                .or_insert_with(|| Arc::new(MockCredential::default()))
+                .clone()
+        }
+
+        #[inline]
+        pub fn load(
+            &self,
+            _service: &str,
+            account: &str,
+        ) -> Result<Option<String>, CredentialStoreError> {
+            let credential = self.get_credential(account);
+
+            let Some(credential) = credential else {
+                return Ok(None);
+            };
+
+            match credential.get_password() {
+                Ok(password) => Ok(Some(password)),
+                Err(KeyringError::NoEntry) => Ok(None),
+                Err(error) => Err(CredentialStoreError::new(error)),
+            }
+        }
+
+        #[inline]
+        pub fn save(
+            &self,
+            _service: &str,
+            account: &str,
+            value: &str,
+        ) -> Result<(), CredentialStoreError> {
+            let credential = self.get_or_create_credential(account);
+            credential
+                .set_password(value)
+                .map_err(CredentialStoreError::new)?;
+            Ok(())
+        }
+
+        #[inline]
+        pub fn delete(&self, _service: &str, account: &str) -> Result<bool, CredentialStoreError> {
+            let credential = self.get_credential(account);
+
+            let Some(credential) = credential else {
+                return Ok(false);
+            };
+
+            match credential.delete_credential() {
+                Ok(()) => {
+                    let mut guard = self
+                        .credentials
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    guard.remove(account);
+                    Ok(true)
+                }
+                Err(KeyringError::NoEntry) => {
+                    let mut guard = self
+                        .credentials
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    guard.remove(account);
+                    Ok(false)
+                }
+                Err(error) => Err(CredentialStoreError::new(error)),
+            }
+        }
+
+        pub fn saved_value(&self, account: &str) -> Option<String> {
+            let credential = self.get_credential(account)?;
+            credential.get_password().ok()
+        }
+
+        pub fn set_error(&self, account: &str, error: KeyringError) {
+            let credential = self.get_or_create_credential(account);
+            credential.set_error(error);
+        }
+
+        pub fn contains(&self, account: &str) -> bool {
+            let guard = self
+                .credentials
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            guard.contains_key(account)
+        }
+    }
+}
+
+pub use testing::MockKeyringStore;

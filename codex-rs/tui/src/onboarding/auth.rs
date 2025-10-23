@@ -555,6 +555,7 @@ impl AuthModeWidget {
             self.codex_home.clone(),
             CLIENT_ID.to_string(),
             self.forced_chatgpt_workspace_id.clone(),
+            self.auth_store_mode,
         );
         match run_login_server(opts) {
             Ok(child) => {
@@ -652,9 +653,14 @@ mod tests {
             sign_in_state: Arc::new(RwLock::new(SignInState::PickMode)),
             codex_home: codex_home_path.clone(),
             login_status: LoginStatus::NotAuthenticated,
-            auth_manager: AuthManager::shared(codex_home_path, false),
+            auth_manager: AuthManager::shared(
+                codex_home_path,
+                false,
+                AuthCredentialsStoreMode::Auto,
+            ),
             forced_chatgpt_workspace_id: None,
             forced_login_method: Some(ForcedLoginMethod::Chatgpt),
+            auth_store_mode: AuthCredentialsStoreMode::Auto,
         };
         (widget, codex_home)
     }

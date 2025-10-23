@@ -102,6 +102,7 @@ fn server_opts(codex_home: &tempfile::TempDir, issuer: String) -> ServerOptions 
         codex_home.path().to_path_buf(),
         "client-id".to_string(),
         None,
+        AuthCredentialsStoreMode::File,
     );
     opts.auth_store_mode = AuthCredentialsStoreMode::File;
     opts.issuer = issuer;
@@ -229,6 +230,7 @@ async fn device_code_login_integration_persists_without_api_key_on_exchange_fail
         codex_home.path().to_path_buf(),
         "client-id".to_string(),
         None,
+        AuthCredentialsStoreMode::File,
     );
     opts.auth_store_mode = AuthCredentialsStoreMode::File;
     opts.issuer = issuer;
@@ -277,6 +279,7 @@ async fn device_code_login_integration_handles_error_payload() {
         codex_home.path().to_path_buf(),
         "client-id".to_string(),
         None,
+        AuthCredentialsStoreMode::File,
     );
     opts.auth_store_mode = AuthCredentialsStoreMode::File;
     opts.issuer = issuer;

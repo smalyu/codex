@@ -326,6 +326,7 @@ impl CodexMessageProcessor {
                 config.codex_home.clone(),
                 CLIENT_ID.to_string(),
                 config.forced_chatgpt_workspace_id.clone(),
+                config.auth_credentials_store_mode,
             )
         };
 

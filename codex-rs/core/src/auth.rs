@@ -65,6 +65,7 @@ impl KeyringStore for DefaultKeyringStore {
     }
 }
 
+// turns codex_home path into a stable, short key string
 fn compute_store_key(codex_home: &Path) -> std::io::Result<String> {
     let canonical = codex_home
         .canonicalize()
@@ -548,18 +549,17 @@ fn load_auth(
     }
 
     let storage = AuthStorage::new(codex_home.to_path_buf(), store_mode);
-    let auth = match storage.load()? {
+    let client = crate::default_client::create_client();
+    let auth_dot_json = match storage.load()? {
         Some(auth) => auth,
         None => return Ok(None),
     };
-
-    let client = crate::default_client::create_client();
 
     let AuthDotJson {
         openai_api_key: auth_json_api_key,
         tokens,
         last_refresh,
-    } = auth;
+    } = auth_dot_json;
 
     // Prefer AuthMode.ApiKey if it's set in the auth.json.
     if let Some(api_key) = &auth_json_api_key {
@@ -713,49 +713,34 @@ mod tests {
     use crate::token_data::KnownPlan;
     use crate::token_data::PlanType;
     use base64::Engine;
+    use codex_keyring_store::MockKeyringStore;
     use codex_protocol::config_types::ForcedLoginMethod;
     use pretty_assertions::assert_eq;
     use serde::Serialize;
     use serde_json::json;
-    use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::Mutex;
     use tempfile::tempdir;
-
-    #[derive(Default, Clone)]
-    struct MockKeyringStore {
-        entries: Arc<Mutex<HashMap<String, String>>>,
-    }
-
-    impl MockKeyringStore {
-        fn get(&self, account: &str) -> Option<String> {
-            self.entries.lock().unwrap().get(account).cloned()
-        }
-    }
 
     impl KeyringStore for MockKeyringStore {
         fn load(
             &self,
-            _service: &str,
+            service: &str,
             account: &str,
         ) -> Result<Option<String>, CredentialStoreError> {
-            Ok(self.get(account))
+            MockKeyringStore::load(self, service, account)
         }
 
         fn save(
             &self,
-            _service: &str,
+            service: &str,
             account: &str,
             value: &str,
         ) -> Result<(), CredentialStoreError> {
-            let mut guard = self.entries.lock().unwrap();
-            guard.insert(account.to_string(), value.to_string());
-            Ok(())
+            MockKeyringStore::save(self, service, account, value)
         }
 
-        fn delete(&self, _service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-            let mut guard = self.entries.lock().unwrap();
-            Ok(guard.remove(account).is_some())
+        fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
+            MockKeyringStore::delete(self, service, account)
         }
     }
 
@@ -921,7 +906,9 @@ mod tests {
 
         storage.save(&auth)?;
         let account = compute_store_key(codex_home.path())?;
-        let stored = keyring.get(&account).expect("keyring entry expected");
+        let stored = keyring
+            .saved_value(&account)
+            .expect("keyring entry expected");
         let parsed: AuthDotJson = serde_json::from_str(&stored)?;
         assert_eq!(parsed.openai_api_key, auth.openai_api_key);
         assert!(!codex_home.path().join("auth.json").exists());
@@ -965,7 +952,7 @@ mod tests {
         storage.save(&auth)?;
         assert!(storage.delete()?);
         let account = compute_store_key(codex_home.path())?;
-        assert!(keyring.get(&account).is_none());
+        assert!(keyring.saved_value(&account).is_none());
         Ok(())
     }
 
@@ -1073,7 +1060,8 @@ mod tests {
     #[tokio::test]
     async fn enforce_login_restrictions_logs_out_for_method_mismatch() {
         let codex_home = tempdir().unwrap();
-        login_with_api_key(codex_home.path(), "sk-test").expect("seed api key");
+        super::login_with_api_key(codex_home.path(), "sk-test", AuthCredentialsStoreMode::File)
+            .expect("seed api key");
 
         let config = build_config(codex_home.path(), Some(ForcedLoginMethod::Chatgpt), None);
 
@@ -1142,7 +1130,8 @@ mod tests {
     async fn enforce_login_restrictions_allows_api_key_if_login_method_not_set_but_forced_chatgpt_workspace_id_is_set()
      {
         let codex_home = tempdir().unwrap();
-        login_with_api_key(codex_home.path(), "sk-test").expect("seed api key");
+        super::login_with_api_key(codex_home.path(), "sk-test", AuthCredentialsStoreMode::File)
+            .expect("seed api key");
 
         let config = build_config(codex_home.path(), None, Some("org_mine".to_string()));
 
