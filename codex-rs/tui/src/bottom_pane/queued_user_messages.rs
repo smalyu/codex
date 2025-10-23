@@ -115,6 +115,20 @@ mod tests {
     }
 
     #[test]
+    fn render_more_than_three_messages() {
+        let mut queue = QueuedUserMessages::new();
+        queue.messages.push("Hello, world!".to_string());
+        queue.messages.push("This is another message".to_string());
+        queue.messages.push("This is a third message".to_string());
+        queue.messages.push("This is a fourth message".to_string());
+        let width = 40;
+        let height = queue.desired_height(width);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, height));
+        queue.render(Rect::new(0, 0, width, height), &mut buf);
+        assert_snapshot!("render_more_than_three_messages", format!("{buf:?}"));
+    }
+
+    #[test]
     fn render_wrapped_message() {
         let mut queue = QueuedUserMessages::new();
         queue
