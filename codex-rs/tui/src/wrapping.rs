@@ -239,6 +239,7 @@ where
     out
 }
 
+/// Utilities to allow wrapping either borrowed or owned lines.
 #[derive(Debug)]
 enum LineInput<'a> {
     Borrowed(&'a Line<'a>),
@@ -254,6 +255,7 @@ impl<'a> LineInput<'a> {
     }
 }
 
+/// This trait makes it easier to pass whatever we need into word_wrap_lines.
 trait IntoLineInput<'a> {
     fn into_line_input(self) -> LineInput<'a>;
 }
@@ -308,7 +310,7 @@ impl<'a> IntoLineInput<'a> for Vec<Span<'a>> {
 
 /// Wrap a sequence of lines, applying the initial indent only to the very first
 /// output line, and using the subsequent indent for all later wrapped pieces.
-#[allow(private_bounds)]
+#[allow(private_bounds)] // IntoLineInput isn't public, but it doesn't really need to be.
 pub(crate) fn word_wrap_lines<'a, I, O, L>(lines: I, width_or_options: O) -> Vec<Line<'static>>
 where
     I: IntoIterator<Item = L>,
