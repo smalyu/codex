@@ -10,6 +10,7 @@ use crate::render::renderable::Renderable;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
 
+/// Widget that displays a list of user messages queued while a turn is in progress.
 pub(crate) struct QueuedUserMessages {
     pub messages: Vec<String>,
 }
