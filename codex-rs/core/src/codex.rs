@@ -14,6 +14,7 @@ use crate::response_processing::process_items;
 use crate::review_format::format_review_findings_block;
 use crate::terminal;
 use crate::user_notification::UserNotifier;
+use crate::util::error_or_panic;
 use async_channel::Receiver;
 use async_channel::Sender;
 use codex_apply_patch::ApplyPatchAction;
@@ -1507,8 +1508,7 @@ pub(crate) async fn run_task(
     let mut review_thread_history: ConversationHistory = ConversationHistory::new();
     if is_review_mode {
         // Seed review threads with environment context so the model knows the working directory.
-        review_thread_history
-            .record_items(sess.build_initial_context(&turn_context).iter());
+        review_thread_history.record_items(sess.build_initial_context(&turn_context).iter());
         review_thread_history.record_items(std::iter::once(&initial_input_for_turn.into()));
     } else {
         sess.record_input_and_rollout_usermsg(&turn_context, &initial_input_for_turn)
@@ -2009,7 +2009,7 @@ async fn try_run_turn(
                     sess.send_event(&turn_context, EventMsg::AgentMessageContentDelta(event))
                         .await;
                 } else {
-                    error!("ReasoningSummaryDelta without active item");
+                    error_or_panic("ReasoningSummaryDelta without active item".to_string());
                 }
             }
             ResponseEvent::ReasoningSummaryDelta(delta) => {
@@ -2023,7 +2023,7 @@ async fn try_run_turn(
                     sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
                         .await;
                 } else {
-                    error!("ReasoningSummaryDelta without active item");
+                    error_or_panic("ReasoningSummaryDelta without active item".to_string());
                 }
             }
             ResponseEvent::ReasoningSummaryPartAdded => {
@@ -2042,7 +2042,7 @@ async fn try_run_turn(
                     sess.send_event(&turn_context, EventMsg::ReasoningRawContentDelta(event))
                         .await;
                 } else {
-                    error!("ReasoningRawContentDelta without active item");
+                    error_or_panic("ReasoningRawContentDelta without active item".to_string());
                 }
             }
         }

@@ -536,6 +536,17 @@ pub struct ItemStartedEvent {
     pub item: TurnItem,
 }
 
+impl HasLegacyEvent for ItemStartedEvent {
+    fn as_legacy_events(&self, _: bool) -> Vec<EventMsg> {
+        match &self.item {
+            TurnItem::WebSearch(item) => vec![EventMsg::WebSearchBegin(WebSearchBeginEvent {
+                call_id: item.id.clone(),
+            })],
+            _ => Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
 pub struct ItemCompletedEvent {
     pub thread_id: ConversationId,
@@ -1415,9 +1426,41 @@ pub enum TurnAbortReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::items::UserMessageItem;
+    use crate::items::WebSearchItem;
     use anyhow::Result;
     use serde_json::json;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn item_started_event_from_web_search_emits_begin_event() {
+        let event = ItemStartedEvent {
+            thread_id: ConversationId::new(),
+            turn_id: "turn-1".into(),
+            item: TurnItem::WebSearch(WebSearchItem {
+                id: "search-1".into(),
+                query: "find docs".into(),
+            }),
+        };
+
+        let legacy_events = event.as_legacy_events(false);
+        assert_eq!(legacy_events.len(), 1);
+        match &legacy_events[0] {
+            EventMsg::WebSearchBegin(event) => assert_eq!(event.call_id, "search-1"),
+            _ => panic!("expected WebSearchBegin event"),
+        }
+    }
+
+    #[test]
+    fn item_started_event_from_non_web_search_emits_no_legacy_events() {
+        let event = ItemStartedEvent {
+            thread_id: ConversationId::new(),
+            turn_id: "turn-1".into(),
+            item: TurnItem::UserMessage(UserMessageItem::new(&[])),
+        };
+
+        assert!(event.as_legacy_events(false).is_empty());
+    }
 
     /// Serialize Event to verify that its JSON representation has the expected
     /// amount of nesting.
