@@ -20,6 +20,7 @@ You are assisting with an application security review. Identify the minimal set 
 {conversation}
 
 # Available tools
+- SEARCH: respond with `SEARCH: literal:<term>` or `SEARCH: regex:<pattern>` to run ripgrep over the repository root (returns colored matches with line numbers).
 - GREP_FILES: respond with `GREP_FILES: {"pattern":"needle","include":"*.rs","path":"subdir","limit":200}` to list files whose contents match. Fields:
   - pattern: regex string (required)
   - include: optional glob filter (ripgrep --glob)
@@ -34,6 +35,7 @@ Issue at most one tool command per message and wait for the tool output before c
 - Return directories (not files). Use the highest level that contains the relevant implementation; avoid returning both a parent and its child.
 - Skip tests, docs, vendored dependencies, caches, build artefacts, editor configuration, or directories that do not exist.
 - Limit to the most relevant 3–8 directories when possible.
+- Before including a directory, confirm it clearly relates to <intent>{user_query}</intent>; use SEARCH or READ to look for matching terminology (README, module names, config files) when uncertain.
 
 # Output format
 Return JSON Lines: each line must be a single JSON object with keys {"path", "include", "reason"}. Omit fences and additional commentary. If unsure, set include=false and explain in reason. Output `ALL` alone on one line to include the entire repository.
@@ -58,11 +60,36 @@ Output format: JSON Lines, each {{"keyword": "<term>"}}. Do not add commentary o
 
 // Spec generation prompts
 pub(crate) const SPEC_SYSTEM_PROMPT: &str = "You are an application security engineer documenting how a project is built. Produce an architecture specification that focuses on components, flows, and controls. Stay within the provided code locations and keep the output in markdown.";
-pub(crate) const SPEC_COMBINE_SYSTEM_PROMPT: &str = "You are consolidating multiple specification drafts into a single, cohesive project specification. Merge overlapping content, keep terminology consistent, and follow the supplied template. Preserve important security-relevant details while avoiding repetition.";
+pub(crate) const SPEC_COMBINE_SYSTEM_PROMPT: &str = "You are consolidating multiple specification drafts into a single, cohesive project specification. Merge overlapping content, keep terminology consistent, and follow the supplied template. Preserve every security-relevant detail; when in doubt, include rather than summarize away content.";
 pub(crate) const SPEC_PROMPT_TEMPLATE: &str = "You have access to the source code inside the following locations:\n{project_locations}\n\nFocus on {target_label}.\nGenerate a security-focused project specification. Parallelize discovery when enumerating files and avoid spending time on tests, vendored dependencies, or build artefacts. Follow the template exactly and return only markdown.\n\nTemplate:\n{spec_template}\n";
+pub(crate) const CONVERT_CLASSIFICATION_TO_JSON_PROMPT_TEMPLATE: &str = r#"
+Read the project specification below and extract a normalized Data Classification list.
+
+<specification>
+{spec_markdown}
+</specification>
+
+# Goal
+Produce newline-delimited JSON (NDJSON), one object per classified data type with keys:
+- data_type (string — e.g., PII, PHI, PCI, credentials, secrets, telemetry)
+- sensitivity (exactly one of: high, medium, low)
+- storage_location (string)
+- retention (short policy or duration)
+- encryption_at_rest (string; use "unknown" if not stated)
+- in_transit (string; use "unknown" if not stated)
+- accessed_by (string describing services/roles/users)
+
+# Guidance
+- Prefer the specification's Data Classification section; infer from context when necessary.
+- Merge duplicate data types, choosing the strictest sensitivity.
+- Keep values concise and human-readable.
+
+# Output
+Emit only NDJSON lines. Each JSON object must contain exactly the keys listed above (no arrays, extra keys, or prose).
+"#;
 pub(crate) const MARKDOWN_OUTPUT_GUARD: &str = "\n# Output Guard (strict)\n    - Output only the final markdown content requested.\n    - Do not include goal, analysis, planning, chain-of-thought, or step lists.\n    - Do not echo prompt sections like \"Task\", \"Steps\", \"Output\", or \"Important\".\n    - Do not include any XML/angle-bracket blocks (e.g., <...> inputs) in the output.\n    - Do not wrap the entire response in code fences; use code fences only for code snippets.\n    - Do not include apologies, disclaimers, or references to being an AI model.\n";
 pub(crate) const MARKDOWN_FIX_SYSTEM_PROMPT: &str = "You are a meticulous technical editor. Polish markdown formatting while preserving the original security analysis content. Focus on fixing numbering, bullet spacing, code fences, and diagram syntax without adding or removing information.";
-pub(crate) const SPEC_COMBINE_PROMPT_TEMPLATE: &str = "You previously generated specification drafts for the following code locations:\n{project_locations}\n\nDraft content:\n{spec_drafts}\n\nTask: merge these drafts into one comprehensive specification that describes the entire project. Remove duplication, keep terminology consistent, and ensure the final document reads as a single report. Follow the template exactly and return only markdown.\n\nTemplate:\n{combined_template}\n";
+pub(crate) const SPEC_COMBINE_PROMPT_TEMPLATE: &str = "You previously generated specification drafts for the following code locations:\n{project_locations}\n\nDraft content (each draft may include an \"API Entry Points\" section summarizing externally exposed interfaces):\n{spec_drafts}\n\nTask: merge these drafts into one comprehensive specification that describes the entire project. Remove duplication, keep terminology consistent, and ensure the final document reads as a single report that preserves API coverage. Follow the template exactly and return only markdown.\n\nNon-negotiable requirements:\n- Carry forward every concrete security-relevant fact, list, table, code block, and data classification entry from the drafts unless it is an exact duplicate.\n- When multiple drafts contribute to the same template section, include the union of their paragraphs and bullet points. If details differ, keep both and attribute them with inline labels such as `(from {location_label})` rather than dropping information.\n- Preserve API entry points verbatim (including tables) and incorporate them into the appropriate section without shortening columns.\n- Keep all identifiers (component names, queue names, environment variables, secrets, external services, metric names) exactly as written; do not rename or generalize.\n- Follow the template's structure exactly: populate every section, create the requested subsections, and include the explicit `Sources:` lines and bullet styles. Do not leave the instructional text in place or drop mandatory sections.\n- Populate the \"Relevant Source Files\" section with bullet points that reference each draft's location label and any concrete file paths mentioned in the drafts.\n- Ensure the \"Data Classification\" section exists even when the drafts were sparse; aggregate and preserve every classification detail there.\n- If multiple drafts contain tabular data (APIs, components, data classification), merge rows from all drafts and maintain duplicates when the sources disagree so the consumer can reconcile manually.\n- Do not introduce new speculation or remove nuance from mitigations, caveats, or risk descriptions provided in the drafts. Err on the side of length; the final document should be at least as detailed as the most verbose draft.\n\n# Available tools\n- READ: respond with `READ: <relative path>#Lstart-Lend` (range optional) to open code or draft files. Use paths relative to the repository root.\n- GREP_FILES: respond with `GREP_FILES: {\"pattern\": \"...\", \"include\": \"*.rs\", \"path\": \"subdir\", \"limit\": 200}` to list files whose contents match.\nEmit at most one tool command in a single message and wait for the tool output before continuing. Prefer READ for prose context; SEARCH is not available during this step.\n\nTemplate:\n{combined_template}\n";
 pub(crate) const SPEC_DIR_FILTER_SYSTEM_PROMPT: &str = r#"
 You triage directories for a security review specification. Only choose directories that hold core product or security-relevant code.
 - Prefer application source directories (services, packages, libs).
@@ -70,8 +97,45 @@ You triage directories for a security review specification. Only choose director
 - Limit the selection to the most critical directories (ideally 3-8).
 Respond with a newline-separated list containing only the directory paths chosen from the provided list. Respond with `ALL` if every directory should be included. Do not add quotes or extra commentary.
 "#;
-pub(crate) const SPEC_MARKDOWN_TEMPLATE: &str = "# Project Specification\n- Location: {target_label}\n- Prepared by: {model_name}\n- Date: {date}\n- In-scope paths:\n```\n{project_locations}\n```\n\n## Overview\nSummarize the product or service, primary users, and the business problem it solves. Highlight the most security relevant entry points.\n\n## Architecture Summary\nDescribe the high-level system architecture, major services, data stores, and external integrations. Include a concise mermaid flowchart when it improves clarity.\n\n## Components\nList 5-8 major components. For each, note the role, responsibilities, key dependencies, and security-critical behavior.\n\n## Business Flows\nDocument up to 5 important flows (CRUD, external integrations, workflow orchestration). For each flow capture triggers, main steps, data touched, and security notes. Include a short mermaid sequence diagram if helpful.\n\n## Authentication\nExplain how principals authenticate, token lifecycles, libraries used, and how secrets are managed.\n\n## Authorization\nDescribe the authorization model, enforcement points, privileged roles, and escalation paths.\n\n## Data Classification\nIdentify sensitive data types handled by the project and where they are stored or transmitted.\n\n## Infrastructure and Deployment\nSummarize infrastructure-as-code, runtime platforms, and configuration or secret handling that affects security posture.\n";
-pub(crate) const SPEC_COMBINED_MARKDOWN_TEMPLATE: &str = "# Project Specification\n## Executive Overview\nProvide a concise overview of the system, its primary entry points, and the highest-value assets.\n\n## Architecture\nDescribe the overall architecture, including diagrams (mermaid flowchart) where they add clarity. Call out trust boundaries and external dependencies.\n\n## Components\nSummarize each major component grouped by domain (frontend, API, workers, data stores, external integrations). For each component include responsibilities, key dependencies, and notable security considerations.\n\n## Business Flows\nDocument 3-6 critical flows (CRUD, integrations, orchestrations). Explain inputs, key steps, data touched, and defensive controls. Include concise mermaid sequence diagrams when useful.\n\n## Authentication\nDocument authentication methods, token lifecycles, libraries, and secret storage.\n\n## Authorization\nDescribe the authorization model, enforcement mechanisms, privilege boundaries, and escalation paths.\n\n## Data Classification\nSummarize sensitive data handled by the system and where it resides.\n\n## Infrastructure and Deployment\nHighlight infrastructure-as-code, runtime platforms, and configuration or secret delivery mechanisms that influence security posture.\n";
+pub(crate) const SPEC_MARKDOWN_TEMPLATE: &str = "# Project Specification\n- Location: {target_label}\n- Prepared by: {model_name}\n- Date: {date}\n- In-scope paths:\n```\n{project_locations}\n```\n\n## Overview\nSummarize the product or service, primary users, and the business problem it solves. Highlight the most security relevant entry points.\n\n## Architecture Summary\nDescribe the high-level system architecture, major services, data stores, and external integrations. Include a concise mermaid flowchart when it improves clarity.\n\n## Components\nList 5-8 major components. For each, note the role, responsibilities, key dependencies, and security-critical behavior.\n\n## Business Flows\nDocument up to 5 important flows (CRUD, external integrations, workflow orchestration). For each flow capture triggers, main steps, data touched, and security notes. Include a short mermaid sequence diagram if helpful.\n\n## Tech Stack\nCapture languages, frameworks, and infrastructure used by each major component. Tabulate runtimes, key libraries, storage technologies, and deployment targets.\n\n## Authentication\nExplain how principals authenticate, token lifecycles, libraries used, and how secrets are managed.\n\n## Authorization\nDescribe the authorization model, enforcement points, privileged roles, and escalation paths.\n\n## Data Classification\nIdentify sensitive data types handled by the project and where they are stored or transmitted.\n\n## Infrastructure and Deployment\nSummarize infrastructure-as-code, runtime platforms, and configuration or secret handling that affects security posture.\n\n## API Entry Points\nList externally reachable interfaces (HTTP/gRPC endpoints, message queues, CLIs, SDK methods) and how they handle security.\n\n### Server APIs\nProvide a markdown table with the exact columns:\n- endpoint path\n- authN method\n- authZ type\n- request parameters\n- example request (params, body, or method)\n- code location\n- parsing/validation logic\nIf the project exposes no server APIs, write `- None identified.` instead of a table.\n\n### Client APIs (optional)\nInclude a markdown table when the project ships an SDK, CLI, or other callable client surface. Columns:\n- api name (module.func or Class.method)\n- module/package\n- summary\n- parameters (omit if noisy)\n- returns (omit if noisy)\n- stability (public/official/internal)\n- code location\nIf there is no public client surface, state `- None.`\n";
+pub(crate) const SPEC_COMBINED_MARKDOWN_TEMPLATE: &str = r#"# Project Specification
+Provide a 2–3 sentence executive overview summarizing the system's purpose, primary users, and the highest-value assets or flows that matter for security.
+
+## Relevant Source Files
+List bullet points for the key files and directories covered by the drafts. Use inline code formatting for paths (for example, `src/service.rs`) and briefly note what each covers. Ensure every draft's location label appears at least once.
+
+## Architecture Components and Flow
+Provide a concise overview of how control and data move through the system, highlighting major services, external dependencies, and trust boundaries.
+Include exactly one overarching mermaid diagram here that captures the end-to-end flow (no per-component or sequence diagrams in this section).
+Move any detailed or per-component diagrams to the relevant component subsections below.
+End with a `Sources:` line enumerating the files or modules that support this description.
+
+## Core Components
+Create `### <Component name>` subsections for the 4–8 major components, using sensible parent folder or service names (for example, `service-a/`, `packages/foo`, or `cometset-gateway/cometset_gateway`). Avoid file- or module-level subsections and do not title components after specific file paths. Do not create separate subsections for generic concepts like "Data Models" or individual routers/controllers; fold such details into the relevant component's bullets if truly necessary.
+Within each subsection, provide bullet points covering:
+- Role or responsibility
+- Key dependencies and integrations
+- Security-relevant behavior or controls
+Place any detailed flows or sequence diagrams for that component here (not in the Architecture section) when they clarify behavior.
+End every subsection with a line that starts with `Sources:` referencing the supporting directories (prefer directories over individual file paths).
+
+## External Interfaces
+Detail HTTP/gRPC endpoints, CLI commands, message queues, or other integration points. Use markdown tables when listing multiple endpoints and note required authentication/authorization and input validation.
+Include a `Sources:` line referencing the defining modules.
+
+## Data Classification
+Summarize sensitive data types, storage locations, retention policies, and encryption/transport guarantees. Prefer markdown tables that consolidate the drafts' entries when possible.
+Include a `Sources:` line showing where each data entry was documented.
+
+## Security Controls
+Organize subsections as `### Authentication`, `### Authorization`, `### Secrets`, and `### Auditing & Observability` when applicable. For each, explain mechanisms, critical libraries, enforcement points, and failure handling.
+Each subsection must end with a `Sources:` line citing the relevant files.
+
+## Operational Considerations
+Discuss deployment topology, runtime dependencies, background jobs, scaling, resiliency patterns, and monitoring or alerting hooks. Call out infrastructure-as-code or runtime configuration that affects security posture.
+Include a `Sources:` line referencing infrastructure or operational files.
+
+"#;
 
 // Threat model prompts
 pub(crate) const THREAT_MODEL_SYSTEM_PROMPT: &str = "You are a senior application security engineer preparing a threat model. Use the provided architecture specification and repository summary to enumerate realistic threats, prioritised by risk.";
@@ -90,6 +154,8 @@ Evaluate the project for concrete, exploitable security vulnerabilities. Prefer 
 
 Follow these rules:
 - Read this file in full and review the provided context to understand intended behavior before judging safety.
+- Start locally: prefer `READ` to open the current file and its immediate neighbors (imports, same directory/module, referenced configs) before using `GREP_FILES`. Use `GREP_FILES` only when you need to locate unknown files across the repository.
+- When you reference a function, method, or class, look up its definition and usages across files: search by the identifier, then open the definition and a few call sites to verify behavior end-to-end.
 - Use the search tools below to inspect additional in-scope files when tracing data flows or confirming a hypothesis; cite the relevant variables, functions, and any validation or sanitization steps you discover.
 - Trace attacker-controlled inputs through the call graph to the ultimate sink. Highlight any sanitization or missing validation along the way.
 - Ignore unit tests, example scripts, or tooling unless they ship to production in this repo.
@@ -97,8 +163,9 @@ Follow these rules:
 - Quote code snippets and locations using GitHub-style ranges (e.g. `src/service.rs#L10-L24`). Include git blame details when you have them: `<short-sha> <author> <YYYY-MM-DD> L<start>-L<end>`.
 - Keep all output in markdown and avoid generic disclaimers.
 - If you need more repository context, request it explicitly while staying within the provided scope:
-  - Emit `GREP_FILES: {"pattern":"needle","include":"*.rs","path":"subdir","limit":200}` to list files whose contents match, ordered by modification time. Prefer searching for meaningful identifiers.
-  - If you need a specific file by path, prefer `READ: <relative path>` directly.
+  - Prefer `READ: <relative path>` to inspect specific files (start with the current file and immediate neighbors).
+  - Use `SEARCH: literal:<identifier>` or `SEARCH: regex:<pattern>` to locate definitions and call sites across files; then `READ` the most relevant results to confirm the dataflow.
+  - Use `GREP_FILES: {"pattern":"needle","include":"*.rs","path":"subdir","limit":200}` to discover candidate locations across the repository; prefer meaningful identifiers over generic terms.
 
 # Output format
 For each vulnerability, emit a markdown block:

@@ -388,9 +388,21 @@ impl App {
                 mode,
                 include_paths,
                 scope_prompt,
+                force_new,
+            } => {
+                self.chat_widget.start_security_review(
+                    mode,
+                    include_paths,
+                    scope_prompt,
+                    force_new,
+                );
+            }
+            AppEvent::ResumeSecurityReview {
+                output_root,
+                metadata,
             } => {
                 self.chat_widget
-                    .start_security_review(mode, include_paths, scope_prompt);
+                    .resume_security_review(output_root, metadata);
             }
             AppEvent::SecurityReviewAutoScopeConfirm {
                 mode,

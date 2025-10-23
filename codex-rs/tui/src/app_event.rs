@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
 use crate::security_review::SecurityReviewFailure;
+use crate::security_review::SecurityReviewMetadata;
 use crate::security_review::SecurityReviewMode;
 use crate::security_review::SecurityReviewResult;
 
@@ -114,6 +115,13 @@ pub(crate) enum AppEvent {
         mode: SecurityReviewMode,
         include_paths: Vec<String>,
         scope_prompt: Option<String>,
+        force_new: bool,
+    },
+
+    /// Resume a previously generated security review from disk.
+    ResumeSecurityReview {
+        output_root: PathBuf,
+        metadata: SecurityReviewMetadata,
     },
 
     /// Prompt the user to confirm auto-detected scope selections.

@@ -72,6 +72,8 @@ pub(crate) struct BottomPane {
     status: Option<StatusIndicatorWidget>,
     /// Queued user messages to show under the status indicator.
     queued_user_messages: Vec<String>,
+    /// Recent log messages shown beneath the status header.
+    status_logs: Vec<String>,
     context_window_percent: Option<u8>,
 }
 
@@ -104,6 +106,7 @@ impl BottomPane {
             ctrl_c_quit_hint: false,
             status: None,
             queued_user_messages: Vec::new(),
+            status_logs: Vec::new(),
             esc_backtrack_hint: false,
             context_window_percent: None,
         }
@@ -295,10 +298,18 @@ impl BottomPane {
     }
 
     pub(crate) fn update_status_snapshot(&mut self, snapshot: StatusSnapshot) {
+        self.status_logs = snapshot.logs.clone();
         if let Some(status) = self.status.as_mut() {
             status.update_snapshot(snapshot);
         } else {
             self.update_status_header(snapshot.header);
+        }
+    }
+
+    pub(crate) fn update_status_logs(&mut self, logs: Vec<String>) {
+        self.status_logs = logs.clone();
+        if let Some(status) = self.status.as_mut() {
+            status.set_logs(logs);
         }
     }
 
@@ -345,6 +356,7 @@ impl BottomPane {
 
         if running {
             if self.status.is_none() {
+                self.status_logs.clear();
                 self.status = Some(StatusIndicatorWidget::new(
                     self.app_event_tx.clone(),
                     self.frame_requester.clone(),
@@ -352,11 +364,13 @@ impl BottomPane {
             }
             if let Some(status) = self.status.as_mut() {
                 status.set_queued_messages(self.queued_user_messages.clone());
+                status.set_logs(self.status_logs.clone());
             }
             self.request_redraw();
         } else {
             // Hide the status indicator when a task completes, but keep other modal views.
             self.hide_status_indicator();
+            self.status_logs.clear();
         }
     }
 

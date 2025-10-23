@@ -17,6 +17,7 @@ use codex_core::config::GPT_5_CODEX_MEDIUM_MODEL;
 use codex_core::default_retry_backoff;
 use codex_core::git_info::collect_git_info;
 use codex_core::git_info::get_git_repo_root;
+use codex_core::protocol::TokenUsage;
 use futures::stream::FuturesUnordered;
 use futures::stream::StreamExt;
 use pathdiff::diff_paths;
@@ -74,17 +75,22 @@ const MAX_FILE_ANALYSIS_ATTEMPTS: usize = 2;
 // Number of full passes over the triaged files during bug finding.
 // Not related to per-file search/tool attempts. Defaults to 3.
 const BUG_FINDING_PASSES: usize = 1;
+const BUG_POLISH_CONCURRENCY: usize = 8;
 const COMMAND_PREVIEW_MAX_LINES: usize = 2;
 const COMMAND_PREVIEW_MAX_GRAPHEMES: usize = 96;
 const MODEL_REASONING_LOG_MAX_GRAPHEMES: usize = 240;
 const AUTO_SCOPE_MODEL: &str = "gpt-5-codex";
 const SPEC_GENERATION_MODEL: &str = "gpt-5-codex";
+const THREAT_MODEL_MODEL: &str = "gpt-5-codex";
+const CLASSIFICATION_PROMPT_SPEC_LIMIT: usize = 16_000;
 // prompts moved to `security_prompts.rs`
 const BUG_RERANK_CHUNK_SIZE: usize = 1;
 const BUG_RERANK_MAX_CONCURRENCY: usize = 32;
 const BUG_RERANK_CONTEXT_MAX_CHARS: usize = 2000;
 const BUG_RERANK_MAX_TOOL_ROUNDS: usize = 4;
 const BUG_RERANK_MAX_COMMAND_ERRORS: usize = 5;
+const SPEC_COMBINE_MAX_TOOL_ROUNDS: usize = 6;
+const SPEC_COMBINE_MAX_COMMAND_ERRORS: usize = 5;
 // see BUG_RERANK_PROMPT_TEMPLATE in security_prompts
 const SPEC_DIR_FILTER_TARGET: usize = 8;
 // see SPEC_DIR_FILTER_SYSTEM_PROMPT in security_prompts
@@ -92,6 +98,7 @@ const SPEC_DIR_FILTER_TARGET: usize = 8;
 const AUTO_SCOPE_MAX_PATHS: usize = 20;
 const AUTO_SCOPE_MAX_KEYWORDS: usize = 6;
 const AUTO_SCOPE_MAX_AGENT_STEPS: usize = 10;
+const AUTO_SCOPE_INITIAL_KEYWORD_PROBES: usize = 4;
 const AUTO_SCOPE_DEFAULT_READ_WINDOW: usize = 120;
 const AUTO_SCOPE_KEYWORD_STOPWORDS: &[&str] = &[
     "the", "and", "for", "with", "that", "this", "from", "into", "when", "where", "which", "while",
@@ -144,7 +151,7 @@ static EXCLUDED_DIR_NAMES: [&str; 13] = [
     "target",
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) enum SecurityReviewMode {
     #[default]
     Full,
@@ -173,6 +180,7 @@ impl SecurityReviewMode {
 pub(crate) struct SecurityReviewRequest {
     pub repo_path: PathBuf,
     pub include_paths: Vec<PathBuf>,
+    pub scope_display_paths: Vec<String>,
     pub output_root: PathBuf,
     pub mode: SecurityReviewMode,
     pub include_spec_in_bug_analysis: bool,
@@ -195,13 +203,31 @@ pub(crate) struct SecurityReviewResult {
     pub report_path: Option<PathBuf>,
     pub report_html_path: Option<PathBuf>,
     pub snapshot_path: PathBuf,
+    pub metadata_path: PathBuf,
+    pub api_overview_path: Option<PathBuf>,
+    pub classification_json_path: Option<PathBuf>,
+    pub classification_table_path: Option<PathBuf>,
     pub logs: Vec<String>,
+    pub token_usage: TokenUsage,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct SecurityReviewFailure {
     pub message: String,
     pub logs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct SecurityReviewMetadata {
+    pub mode: SecurityReviewMode,
+    #[serde(default)]
+    pub scope_paths: Vec<String>,
+}
+
+pub(crate) fn read_security_review_metadata(path: &Path) -> Result<SecurityReviewMetadata, String> {
+    let bytes = fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    serde_json::from_slice::<SecurityReviewMetadata>(&bytes)
+        .map_err(|e| format!("Failed to parse {}: {e}", path.display()))
 }
 
 #[derive(Clone)]
@@ -235,6 +261,13 @@ struct ReviewMetrics {
     read_calls: AtomicUsize,
     git_blame_calls: AtomicUsize,
     command_seq: AtomicU64,
+
+    // Aggregated token usage across all model calls
+    input_tokens: std::sync::atomic::AtomicU64,
+    cached_input_tokens: std::sync::atomic::AtomicU64,
+    output_tokens: std::sync::atomic::AtomicU64,
+    reasoning_output_tokens: std::sync::atomic::AtomicU64,
+    total_tokens: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy)]
@@ -313,6 +346,46 @@ impl ReviewMetrics {
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1)
     }
+
+    fn record_usage(&self, usage: &TokenUsage) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.input_tokens.fetch_add(usage.input_tokens, Relaxed);
+        self.cached_input_tokens
+            .fetch_add(usage.cached_input_tokens, Relaxed);
+        self.output_tokens.fetch_add(usage.output_tokens, Relaxed);
+        self.reasoning_output_tokens
+            .fetch_add(usage.reasoning_output_tokens, Relaxed);
+        self.total_tokens.fetch_add(usage.total_tokens, Relaxed);
+    }
+
+    fn record_usage_raw(
+        &self,
+        input_tokens: u64,
+        cached_input_tokens: u64,
+        output_tokens: u64,
+        reasoning_output_tokens: u64,
+        total_tokens: u64,
+    ) {
+        let usage = TokenUsage {
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_output_tokens,
+            total_tokens,
+        };
+        self.record_usage(&usage);
+    }
+
+    fn snapshot_usage(&self) -> TokenUsage {
+        use std::sync::atomic::Ordering::Relaxed;
+        TokenUsage {
+            input_tokens: self.input_tokens.load(Relaxed),
+            cached_input_tokens: self.cached_input_tokens.load(Relaxed),
+            output_tokens: self.output_tokens.load(Relaxed),
+            reasoning_output_tokens: self.reasoning_output_tokens.load(Relaxed),
+            total_tokens: self.total_tokens.load(Relaxed),
+        }
+    }
 }
 
 struct FileBugResult {
@@ -352,18 +425,41 @@ struct FileTriageChunkResult {
 struct SpecEntry {
     location_label: String,
     markdown: String,
+    raw_path: PathBuf,
+    api_markdown: Option<String>,
+}
+
+#[derive(Clone)]
+struct ApiEntry {
+    location_label: String,
+    markdown: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DataClassificationRow {
+    data_type: String,
+    sensitivity: String,
+    storage_location: String,
+    retention: String,
+    encryption_at_rest: String,
+    in_transit: String,
+    accessed_by: String,
 }
 
 struct SpecGenerationOutcome {
     combined_markdown: String,
     locations: Vec<String>,
     logs: Vec<String>,
+    api_entries: Vec<ApiEntry>,
+    classification_rows: Vec<DataClassificationRow>,
+    classification_table: Option<String>,
 }
 
 struct AutoScopeSelection {
     abs_path: PathBuf,
     display_path: String,
     reason: Option<String>,
+    is_dir: bool,
 }
 
 fn truncate_auto_scope_selections(
@@ -373,9 +469,66 @@ fn truncate_auto_scope_selections(
     if selections.len() > AUTO_SCOPE_MAX_PATHS {
         selections.truncate(AUTO_SCOPE_MAX_PATHS);
         logs.push(format!(
-            "Auto scope limited to the first {AUTO_SCOPE_MAX_PATHS} directories returned by the model."
+            "Auto scope limited to the first {AUTO_SCOPE_MAX_PATHS} paths returned by the model."
         ));
     }
+}
+
+fn prune_auto_scope_parent_child_overlaps(
+    selections: &mut Vec<AutoScopeSelection>,
+    logs: &mut Vec<String>,
+) {
+    if selections.len() <= 1 {
+        return;
+    }
+
+    // Only prune parent directories when a child directory is already included.
+    let mut directory_indices: Vec<usize> = selections
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, sel)| sel.is_dir.then_some(idx))
+        .collect();
+    if directory_indices.len() <= 1 {
+        return;
+    }
+
+    directory_indices.sort_by(|&a, &b| {
+        let da = selections[a].abs_path.components().count();
+        let db = selections[b].abs_path.components().count();
+        db.cmp(&da)
+    });
+
+    let mut kept_dirs: Vec<PathBuf> = Vec::new();
+    let mut pruned_indices: HashSet<usize> = HashSet::new();
+
+    for idx in directory_indices {
+        let current = &selections[idx];
+        if kept_dirs
+            .iter()
+            .any(|kept| kept.starts_with(current.abs_path.as_path()))
+        {
+            pruned_indices.insert(idx);
+        } else {
+            kept_dirs.push(current.abs_path.clone());
+        }
+    }
+
+    if pruned_indices.is_empty() {
+        return;
+    }
+
+    let pruned = pruned_indices.len();
+    let mut filtered: Vec<AutoScopeSelection> = Vec::with_capacity(selections.len() - pruned);
+    for (idx, sel) in selections.drain(..).enumerate() {
+        if pruned_indices.contains(&idx) {
+            continue;
+        }
+        filtered.push(sel);
+    }
+    *selections = filtered;
+    logs.push(format!(
+        "Auto scope pruned {pruned} parent directories due to overlap."
+    ));
 }
 
 fn summarize_top_level(repo_root: &Path) -> String {
@@ -693,8 +846,6 @@ async fn run_grep_files(
     }
 }
 
-// SEARCH_FILES is deprecated; map to content search earlier.
-
 async fn execute_auto_scope_read(
     repo_root: &Path,
     command_path: &Path,
@@ -870,6 +1021,10 @@ struct PersistedArtifacts {
     snapshot_path: PathBuf,
     report_path: Option<PathBuf>,
     report_html_path: Option<PathBuf>,
+    metadata_path: PathBuf,
+    api_overview_path: Option<PathBuf>,
+    classification_json_path: Option<PathBuf>,
+    classification_table_path: Option<PathBuf>,
 }
 
 struct BugCommandPlan {
@@ -996,7 +1151,7 @@ fn build_bug_records(
     (bugs, snapshots)
 }
 
-fn render_bug_sections(snapshots: &[BugSnapshot]) -> String {
+fn render_bug_sections(snapshots: &[BugSnapshot], git_link_info: Option<&GitLinkInfo>) -> String {
     let mut sections: Vec<String> = Vec::new();
     for snapshot in snapshots {
         let base = snapshot.original_markdown.trim();
@@ -1006,10 +1161,10 @@ fn render_bug_sections(snapshots: &[BugSnapshot]) -> String {
         let mut composed = String::new();
         let anchor_snippet = format!("<a id=\"bug-{}\"", snapshot.bug.summary_id);
         if base.contains(&anchor_snippet) {
-            composed.push_str(base);
+            composed.push_str(&linkify_file_lines(base, git_link_info));
         } else {
             composed.push_str(&format!("<a id=\"bug-{}\"></a>\n", snapshot.bug.summary_id));
-            composed.push_str(base);
+            composed.push_str(&linkify_file_lines(base, git_link_info));
         }
         if !matches!(snapshot.bug.validation.status, BugValidationStatus::Pending) {
             composed.push_str("\n\n#### Validation\n");
@@ -1053,6 +1208,134 @@ fn render_bug_sections(snapshots: &[BugSnapshot]) -> String {
         sections.push(composed);
     }
     sections.join("\n\n")
+}
+
+fn linkify_file_lines(markdown: &str, git_link_info: Option<&GitLinkInfo>) -> String {
+    if git_link_info.is_none() {
+        return markdown.to_string();
+    }
+    let info = git_link_info.unwrap();
+    let mut out_lines: Vec<String> = Vec::new();
+    for raw in markdown.lines() {
+        let trimmed = raw.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("- **File & Lines:**") {
+            let value = rest.trim().trim_matches('`');
+            if value.is_empty() {
+                out_lines.push(raw.to_string());
+                continue;
+            }
+            let pairs = parse_location_item(value, info);
+            if pairs.is_empty() {
+                out_lines.push(raw.to_string());
+                continue;
+            }
+            // If ranges exist for a path, drop the bare link for that path
+            let filtered = filter_location_pairs(pairs);
+            let mut links: Vec<String> = Vec::new();
+            for (rel, frag) in filtered {
+                let mut url = format!("{}{}", info.github_prefix, rel);
+                let mut text = rel;
+                if let Some(f) = frag.as_ref() {
+                    url.push('#');
+                    url.push_str(f);
+                    text.push('#');
+                    text.push_str(f);
+                }
+                links.push(format!("[{text}]({url})"));
+            }
+            let rebuilt = format!("- **File & Lines:** {}", links.join(", "));
+            // Preserve original indentation
+            let indent_len = raw.len().saturating_sub(trimmed.len());
+            let indent = &raw[..indent_len];
+            out_lines.push(format!("{indent}{rebuilt}"));
+        } else {
+            out_lines.push(raw.to_string());
+        }
+    }
+    out_lines.join("\n")
+}
+
+async fn polish_bug_markdowns(
+    client: &Client,
+    provider: &ModelProviderInfo,
+    auth: &Option<CodexAuth>,
+    summaries: &mut [BugSummary],
+    details: &mut [BugDetail],
+    metrics: Arc<ReviewMetrics>,
+) -> Result<Vec<String>, String> {
+    if summaries.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut detail_index: HashMap<usize, usize> = HashMap::new();
+    for (idx, detail) in details.iter().enumerate() {
+        detail_index.insert(detail.summary_id, idx);
+    }
+
+    struct BugPolishUpdate {
+        id: usize,
+        markdown: String,
+        logs: Vec<String>,
+    }
+
+    let mut updates: HashMap<usize, BugPolishUpdate> = HashMap::new();
+    let mut combined_logs: Vec<String> = Vec::new();
+
+    let work_items: Vec<(usize, String)> = summaries
+        .iter()
+        .map(|summary| (summary.id, summary.markdown.clone()))
+        .collect();
+
+    let mut stream = futures::stream::iter(work_items.into_iter().map(|(bug_id, content)| {
+        let metrics = metrics.clone();
+        async move {
+            if content.trim().is_empty() {
+                return Ok(BugPolishUpdate {
+                    id: bug_id,
+                    markdown: content,
+                    logs: Vec::new(),
+                });
+            }
+            let outcome = polish_markdown_block(client, provider, auth, metrics, &content, None)
+                .await
+                .map_err(|err| format!("Bug {bug_id}: {err}"))?;
+            let polished = fix_mermaid_blocks(&outcome.text);
+            let logs = outcome
+                .reasoning_logs
+                .into_iter()
+                .map(|line| format!("Bug {bug_id}: {line}"))
+                .collect();
+            Ok(BugPolishUpdate {
+                id: bug_id,
+                markdown: polished,
+                logs,
+            })
+        }
+    }))
+    .buffer_unordered(BUG_POLISH_CONCURRENCY);
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(update) => {
+                combined_logs.extend(update.logs.iter().cloned());
+                updates.insert(update.id, update);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    drop(stream);
+
+    for summary in summaries.iter_mut() {
+        if let Some(update) = updates.get(&summary.id) {
+            summary.markdown = update.markdown.clone();
+            if let Some(&idx) = detail_index.get(&summary.id) {
+                details[idx].original_markdown = update.markdown.clone();
+            }
+        }
+    }
+
+    Ok(combined_logs)
 }
 
 fn snapshot_bugs(snapshot: &SecurityReviewSnapshot) -> Vec<SecurityReviewBug> {
@@ -1111,6 +1394,7 @@ pub(crate) async fn run_security_review(
     let metrics = Arc::new(ReviewMetrics::default());
     let client = Client::new();
     let overall_start = Instant::now();
+
     let mut record = |line: String| {
         if let Some(tx) = progress_sender.as_ref() {
             tx.send(AppEvent::SecurityReviewLog(line.clone()));
@@ -1177,11 +1461,13 @@ pub(crate) async fn run_security_review(
                             abs_path,
                             display_path,
                             reason,
+                            is_dir,
                         } = selection;
+                        let kind = if is_dir { "directory" } else { "file" };
                         let message = if let Some(reason) = reason.as_ref() {
-                            format!("Auto scope included {display_path} — {reason}")
+                            format!("Auto scope included {kind} {display_path} — {reason}")
                         } else {
-                            format!("Auto scope included {display_path}")
+                            format!("Auto scope included {kind} {display_path}")
                         };
                         record(message);
                         resolved_paths.push(abs_path);
@@ -1456,7 +1742,7 @@ pub(crate) async fn run_security_review(
                 &client,
                 &request.provider,
                 &request.auth,
-                &request.model,
+                THREAT_MODEL_MODEL,
                 &repository_summary,
                 &request.repo_path,
                 spec,
@@ -1710,6 +1996,39 @@ pub(crate) async fn run_security_review(
             record(msg.clone());
             aggregated_logs.push(msg);
         }
+
+        normalize_bug_identifiers(&mut all_summaries, &mut all_details);
+    }
+
+    if !all_summaries.is_empty() {
+        let polish_message = format!(
+            "Polishing markdown for {} bug finding(s).",
+            all_summaries.len()
+        );
+        record(polish_message.clone());
+        aggregated_logs.push(polish_message);
+        let polish_logs = match polish_bug_markdowns(
+            &client,
+            &request.provider,
+            &request.auth,
+            &mut all_summaries,
+            &mut all_details,
+            metrics.clone(),
+        )
+        .await
+        {
+            Ok(logs) => logs,
+            Err(err) => {
+                return Err(SecurityReviewFailure {
+                    message: format!("Failed to polish bug markdown: {err}"),
+                    logs: logs.clone(),
+                });
+            }
+        };
+        for line in polish_logs {
+            record(line.clone());
+            aggregated_logs.push(line);
+        }
     }
 
     let allowed_paths: HashSet<PathBuf> = all_summaries
@@ -1759,46 +2078,6 @@ pub(crate) async fn run_security_review(
         bugs_markdown = format!("{table}\n\n{bugs_markdown}");
     }
     bugs_markdown = fix_mermaid_blocks(&bugs_markdown);
-    if !bugs_markdown.trim().is_empty() {
-        record("Polishing bug markdown formatting.".to_string());
-        let fix_prompt = build_fix_markdown_prompt(&bugs_markdown, None);
-        let polished_response = match call_model(
-            &client,
-            &request.provider,
-            &request.auth,
-            MARKDOWN_FIX_MODEL,
-            MARKDOWN_FIX_SYSTEM_PROMPT,
-            &fix_prompt,
-            metrics.clone(),
-            0.0,
-        )
-        .await
-        {
-            Ok(output) => {
-                if let Some(reasoning) = output.reasoning.as_ref() {
-                    for line in reasoning
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                    {
-                        let truncated = truncate_text(line, MODEL_REASONING_LOG_MAX_GRAPHEMES);
-                        let msg = format!("Model reasoning: {truncated}");
-                        record(msg.clone());
-                    }
-                }
-                output.text
-            }
-            Err(err) => {
-                let message = format!("Failed to polish bug markdown: {err}");
-                record(message.clone());
-                return Err(SecurityReviewFailure {
-                    message,
-                    logs: logs.clone(),
-                });
-            }
-        };
-        bugs_markdown = fix_mermaid_blocks(&polished_response);
-    }
 
     let mut report_sections_prefix: Vec<String> = Vec::new();
     if matches!(request.mode, SecurityReviewMode::Full) {
@@ -1822,7 +2101,7 @@ pub(crate) async fn run_security_review(
     } else {
         Some(format!("# Security Findings\n\n{}", bugs_markdown.trim()))
     };
-    let mut report_markdown = match request.mode {
+    let report_markdown = match request.mode {
         SecurityReviewMode::Full => {
             let mut sections = report_sections_prefix.clone();
             if let Some(section) = findings_section.clone() {
@@ -1850,47 +2129,6 @@ pub(crate) async fn run_security_review(
         }
     };
 
-    if let Some(current) = report_markdown.clone() {
-        record("Polishing final report markdown formatting.".to_string());
-        let fix_prompt = build_fix_markdown_prompt(&current, None);
-        let polished_response = match call_model(
-            &client,
-            &request.provider,
-            &request.auth,
-            MARKDOWN_FIX_MODEL,
-            MARKDOWN_FIX_SYSTEM_PROMPT,
-            &fix_prompt,
-            metrics.clone(),
-            0.0,
-        )
-        .await
-        {
-            Ok(output) => {
-                if let Some(reasoning) = output.reasoning.as_ref() {
-                    for line in reasoning
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty())
-                    {
-                        let truncated = truncate_text(line, MODEL_REASONING_LOG_MAX_GRAPHEMES);
-                        let msg = format!("Model reasoning: {truncated}");
-                        record(msg.clone());
-                    }
-                }
-                output.text
-            }
-            Err(err) => {
-                let message = format!("Failed to polish final security report: {err}");
-                record(message.clone());
-                return Err(SecurityReviewFailure {
-                    message,
-                    logs: logs.clone(),
-                });
-            }
-        };
-        report_markdown = Some(fix_mermaid_blocks(&polished_response));
-    }
-
     let snapshot = SecurityReviewSnapshot {
         generated_at: OffsetDateTime::now_utc(),
         findings_summary: findings_summary.clone(),
@@ -1899,10 +2137,29 @@ pub(crate) async fn run_security_review(
     };
 
     // Intentionally avoid logging the output path pre-write to keep logs concise.
+    let metadata = SecurityReviewMetadata {
+        mode: request.mode,
+        scope_paths: request.scope_display_paths.clone(),
+    };
+    let api_entries_for_persist = spec_generation
+        .as_ref()
+        .map(|spec| spec.api_entries.clone())
+        .unwrap_or_default();
+    let classification_rows_for_persist = spec_generation
+        .as_ref()
+        .map(|spec| spec.classification_rows.clone())
+        .unwrap_or_default();
+    let classification_table_for_persist = spec_generation
+        .as_ref()
+        .and_then(|spec| spec.classification_table.clone());
     let artifacts = match persist_artifacts(
         &request.output_root,
         &request.repo_path,
+        &metadata,
         &bugs_markdown,
+        &api_entries_for_persist,
+        &classification_rows_for_persist,
+        classification_table_for_persist.as_deref(),
         report_markdown.as_deref(),
         &snapshot,
     )
@@ -1948,7 +2205,12 @@ pub(crate) async fn run_security_review(
         report_path: artifacts.report_path,
         report_html_path: artifacts.report_html_path,
         snapshot_path: artifacts.snapshot_path,
+        metadata_path: artifacts.metadata_path,
+        api_overview_path: artifacts.api_overview_path,
+        classification_json_path: artifacts.classification_json_path,
+        classification_table_path: artifacts.classification_table_path,
         logs,
+        token_usage: metrics.snapshot_usage(),
     })
 }
 
@@ -2127,6 +2389,22 @@ async fn triage_files_for_bug_analysis(
     let mut remaining = chunk_requests.into_iter();
     let total_chunks = total.div_ceil(FILE_TRIAGE_CHUNK_SIZE.max(1));
     let concurrency = FILE_TRIAGE_CONCURRENCY.min(total_chunks.max(1));
+
+    // Emit a brief, on-screen preview of the parallel task and sample tool calls.
+    if let Some(tx) = progress_sender.as_ref() {
+        tx.send(AppEvent::SecurityReviewLog(format!(
+            "  └ Launching parallel file triage ({concurrency} workers)"
+        )));
+        tx.send(AppEvent::SecurityReviewLog(
+            "    Sample tool calls (simulated):".to_string(),
+        ));
+        tx.send(AppEvent::SecurityReviewLog(
+            "  └ SEARCH literal:'auth'".to_string(),
+        ));
+        tx.send(AppEvent::SecurityReviewLog(
+            "    GREP_FILES: {\"pattern\": \"token|password\", \"include\": \"*.rs\"}".to_string(),
+        ));
+    }
 
     for _ in 0..concurrency {
         if let Some(request) = remaining.next() {
@@ -2434,6 +2712,11 @@ async fn generate_specs(
     {
         Ok(result) => result,
         Err(err) => {
+            if let Some(tx) = progress_sender.as_ref() {
+                for line in &err.logs {
+                    tx.send(AppEvent::SecurityReviewLog(line.clone()));
+                }
+            }
             logs.extend(err.logs);
             let message = format!(
                 "Directory filter failed; using all directories. {}",
@@ -2475,6 +2758,7 @@ async fn generate_specs(
     let specs_root = output_root.join("specs");
     let raw_dir = specs_root.join("raw");
     let combined_dir = specs_root.join("combined");
+    let apis_dir = specs_root.join("apis");
 
     tokio_fs::create_dir_all(&raw_dir)
         .await
@@ -2486,6 +2770,12 @@ async fn generate_specs(
         .await
         .map_err(|e| SecurityReviewFailure {
             message: format!("Failed to create {}: {e}", combined_dir.display()),
+            logs: Vec::new(),
+        })?;
+    tokio_fs::create_dir_all(&apis_dir)
+        .await
+        .map_err(|e| SecurityReviewFailure {
+            message: format!("Failed to create {}: {e}", apis_dir.display()),
             logs: Vec::new(),
         })?;
 
@@ -2527,24 +2817,132 @@ async fn generate_specs(
         return Ok(None);
     }
 
+    let mut api_entries: Vec<ApiEntry> = Vec::new();
+    for entry in spec_entries.iter_mut() {
+        let location_label = entry.location_label.clone();
+        if let Some(markdown) = entry
+            .api_markdown
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+        {
+            let slug = slugify_label(&location_label);
+            let api_path = apis_dir.join(format!("{slug}_apis.md"));
+            match tokio_fs::write(&api_path, markdown.as_bytes()).await {
+                Ok(()) => {
+                    let msg = format!(
+                        "API entry points for {location_label} saved to {}.",
+                        api_path.display()
+                    );
+                    if let Some(tx) = progress_sender.as_ref() {
+                        tx.send(AppEvent::SecurityReviewLog(msg.clone()));
+                    }
+                    logs.push(msg);
+                    api_entries.push(ApiEntry {
+                        location_label,
+                        markdown,
+                    });
+                }
+                Err(err) => {
+                    let msg = format!(
+                        "Failed to write API entry points for {location_label} to {}: {err}",
+                        api_path.display()
+                    );
+                    if let Some(tx) = progress_sender.as_ref() {
+                        tx.send(AppEvent::SecurityReviewLog(msg.clone()));
+                    }
+                    logs.push(msg);
+                }
+            }
+        } else {
+            let msg =
+                format!("Specification for {location_label} did not include API entry points.");
+            if let Some(tx) = progress_sender.as_ref() {
+                tx.send(AppEvent::SecurityReviewLog(msg.clone()));
+            }
+            logs.push(msg);
+        }
+    }
+
     let combined_path = combined_dir.join("combined_specification.md");
-    let (combined_markdown, mut combine_logs) = combine_spec_markdown(
+    let (mut combined_markdown, mut combine_logs) = combine_spec_markdown(
         client,
         provider,
         auth,
         &display_locations,
         &spec_entries,
         &combined_path,
+        repo_root,
         progress_sender.clone(),
-        metrics,
+        metrics.clone(),
     )
     .await?;
     logs.append(&mut combine_logs);
+
+    let mut classification_rows: Vec<DataClassificationRow> = Vec::new();
+    let mut classification_table: Option<String> = None;
+    match extract_data_classification(client, provider, auth, &combined_markdown, metrics.clone())
+        .await
+    {
+        Ok(Some(extraction)) => {
+            for line in extraction.reasoning_logs {
+                if let Some(tx) = progress_sender.as_ref() {
+                    tx.send(AppEvent::SecurityReviewLog(line.clone()));
+                }
+                logs.push(line);
+            }
+            classification_rows = extraction.rows.clone();
+            classification_table = Some(extraction.table_markdown.clone());
+            let injected =
+                inject_data_classification_section(&combined_markdown, &extraction.table_markdown);
+            combined_markdown = fix_mermaid_blocks(&injected);
+            let msg = format!(
+                "Injected data classification table with {} entr{} into combined specification.",
+                extraction.rows.len(),
+                if extraction.rows.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            );
+            if let Some(tx) = progress_sender.as_ref() {
+                tx.send(AppEvent::SecurityReviewLog(msg.clone()));
+            }
+            logs.push(msg);
+            if let Err(err) = tokio_fs::write(&combined_path, combined_markdown.as_bytes()).await {
+                let warn = format!(
+                    "Failed to update combined specification with data classification table: {err}"
+                );
+                if let Some(tx) = progress_sender.as_ref() {
+                    tx.send(AppEvent::SecurityReviewLog(warn.clone()));
+                }
+                logs.push(warn);
+            }
+        }
+        Ok(None) => {
+            let msg = "Data classification extraction produced no entries.".to_string();
+            if let Some(tx) = progress_sender.as_ref() {
+                tx.send(AppEvent::SecurityReviewLog(msg.clone()));
+            }
+            logs.push(msg);
+        }
+        Err(err) => {
+            let msg = format!("Failed to extract data classification: {err}");
+            if let Some(tx) = progress_sender.as_ref() {
+                tx.send(AppEvent::SecurityReviewLog(msg.clone()));
+            }
+            logs.push(msg);
+        }
+    }
 
     Ok(Some(SpecGenerationOutcome {
         combined_markdown,
         locations: display_locations,
         logs,
+        api_entries,
+        classification_rows,
+        classification_table,
     }))
 }
 
@@ -2952,9 +3350,90 @@ async fn auto_detect_scope(
         }
     }
 
-    let repo_overview = summarize_top_level(repo_root);
     let mut conversation: Vec<String> = Vec::new();
     let mut tool_rounds = 0usize;
+
+    if !keywords.is_empty() {
+        let mut initial_search_count = 0usize;
+        for keyword in keywords.iter().take(AUTO_SCOPE_INITIAL_KEYWORD_PROBES) {
+            let trimmed = keyword.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let term = trimmed.to_string();
+            initial_search_count += 1;
+            logs.push(format!(
+                "Auto scope executing initial SEARCH literal:{term}."
+            ));
+            conversation.push(format!("Assistant:\nSEARCH: literal:{term}"));
+            let (log_line, output) =
+                execute_auto_scope_search_content(repo_root, &term, SearchMode::Literal, &metrics)
+                    .await;
+            logs.push(log_line);
+            conversation.push(format!("Tool SEARCH `{term}`:\n{output}"));
+            let preview = command_preview_snippets(&output);
+            if !preview.is_empty() {
+                logs.push(format!(
+                    "Auto scope SEARCH literal:{term} preview:\n{}",
+                    preview.join("\n")
+                ));
+            }
+
+            let pattern_str = term.clone();
+            let grep_limit = Some(200usize);
+            let grep_args = GrepFilesArgs {
+                pattern: pattern_str.clone(),
+                include: None,
+                path: None,
+                limit: grep_limit,
+            };
+            let mut shown = serde_json::json!({ "pattern": pattern_str });
+            if let Some(limit) = grep_limit {
+                shown["limit"] = serde_json::Value::Number(serde_json::Number::from(limit as u64));
+            }
+            let shown_text = shown.to_string();
+            logs.push(format!(
+                "Auto scope executing initial GREP_FILES {shown_text}."
+            ));
+            conversation.push(format!("Assistant:\nGREP_FILES: {shown_text}"));
+            let (grep_log, grep_output) =
+                match run_grep_files(repo_root, &grep_args, &metrics).await {
+                    SearchResult::Matches(out) => (
+                        format!("Auto scope file search `{term}` returned matching files."),
+                        out,
+                    ),
+                    SearchResult::NoMatches => (
+                        format!("Auto scope file search `{term}` returned no matches."),
+                        "No matches found.".to_string(),
+                    ),
+                    SearchResult::Error(err) => (
+                        format!("Auto scope file search `{term}` failed: {err}"),
+                        format!("Search error: {err}"),
+                    ),
+                };
+            logs.push(grep_log);
+            conversation.push(format!("Tool GREP_FILES {shown_text}:\n{grep_output}"));
+            let preview = command_preview_snippets(&grep_output);
+            if !preview.is_empty() {
+                logs.push(format!(
+                    "Auto scope GREP_FILES {shown_text} preview:\n{}",
+                    preview.join("\n")
+                ));
+            }
+        }
+        if initial_search_count > 0 {
+            let label = if initial_search_count == 1 {
+                "search"
+            } else {
+                "searches"
+            };
+            logs.push(format!(
+                "Auto scope seeded the agent loop with {initial_search_count} initial keyword {label} (content + file matches)."
+            ));
+        }
+    }
+
+    let repo_overview = summarize_top_level(repo_root);
 
     loop {
         if tool_rounds >= AUTO_SCOPE_MAX_AGENT_STEPS {
@@ -3105,6 +3584,7 @@ async fn auto_detect_scope(
                         display_path: display_path_for(&canonical, repo_root),
                         abs_path: canonical,
                         reason: Some("LLM requested full repository".to_string()),
+                        is_dir: true,
                     }],
                     logs,
                 ));
@@ -3133,9 +3613,17 @@ async fn auto_detect_scope(
                         Ok(path) => path,
                         Err(_) => continue,
                     };
-                    if !canonical.starts_with(repo_root) || !canonical.is_dir() {
+                    if !canonical.starts_with(repo_root) {
                         continue;
                     }
+                    let metadata = match fs::metadata(&canonical) {
+                        Ok(metadata) => metadata,
+                        Err(_) => continue,
+                    };
+                    if !(metadata.is_dir() || metadata.is_file()) {
+                        continue;
+                    }
+                    let is_dir = metadata.is_dir();
                     if !seen.insert(canonical.clone()) {
                         continue;
                     }
@@ -3143,6 +3631,7 @@ async fn auto_detect_scope(
                         display_path: display_path_for(&canonical, repo_root),
                         abs_path: canonical,
                         reason: raw.reason,
+                        is_dir,
                     });
                 }
 
@@ -3153,11 +3642,135 @@ async fn auto_detect_scope(
                     });
                 }
 
+                // Prefer specific children over broad parents, then cap to max.
+                prune_auto_scope_parent_child_overlaps(&mut selections, &mut logs);
                 truncate_auto_scope_selections(&mut selections, &mut logs);
 
                 return Ok((selections, logs));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod data_classification_tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn build_table_sorts_by_sensitivity_then_name() {
+        let rows = vec![
+            DataClassificationRow {
+                data_type: "Session Tokens".to_string(),
+                sensitivity: "high".to_string(),
+                storage_location: "redis".to_string(),
+                retention: "7 days".to_string(),
+                encryption_at_rest: "aes-256".to_string(),
+                in_transit: "tls 1.3".to_string(),
+                accessed_by: "web app".to_string(),
+            },
+            DataClassificationRow {
+                data_type: "API Keys".to_string(),
+                sensitivity: "high".to_string(),
+                storage_location: "secrets manager".to_string(),
+                retention: "rotate quarterly".to_string(),
+                encryption_at_rest: "kms".to_string(),
+                in_transit: "tls 1.3".to_string(),
+                accessed_by: "deployment pipeline".to_string(),
+            },
+            DataClassificationRow {
+                data_type: "Audit Logs".to_string(),
+                sensitivity: "medium".to_string(),
+                storage_location: "s3".to_string(),
+                retention: "13 months".to_string(),
+                encryption_at_rest: "aes-256".to_string(),
+                in_transit: "tls".to_string(),
+                accessed_by: "security team".to_string(),
+            },
+        ];
+
+        let table = build_data_classification_table(&rows).expect("expected table output");
+        let expected = ["## Data Classification",
+            "",
+            "| Data Type | Sensitivity | Storage Location | Retention | Encryption At Rest | In Transit | Accessed By |",
+            "|---|---|---|---|---|---|---|",
+            "| API Keys | high | secrets manager | rotate quarterly | kms | tls 1.3 | deployment pipeline |",
+            "| Session Tokens | high | redis | 7 days | aes-256 | tls 1.3 | web app |",
+            "| Audit Logs | medium | s3 | 13 months | aes-256 | tls | security team |",
+            ""]
+        .join("\n");
+        assert_eq!(table, expected);
+
+        assert_eq!(build_data_classification_table(&[]), None);
+    }
+
+    #[test]
+    fn inject_replaces_existing_section() {
+        let spec = "\
+# Project Specification
+
+## Data Classification
+Legacy content to be replaced.
+
+## Authentication
+Existing auth details.
+";
+        let table_markdown = "\
+## Data Classification
+
+| Data Type | Sensitivity | Storage Location | Retention | Encryption At Rest | In Transit | Accessed By |
+|---|---|---|---|---|---|---|
+| Customer PII | high | postgres | 90 days | aes-256 | tls 1.2+ | support portal |
+
+";
+
+        let updated = inject_data_classification_section(spec, table_markdown);
+        let expected = "\
+# Project Specification
+
+## Data Classification
+
+| Data Type | Sensitivity | Storage Location | Retention | Encryption At Rest | In Transit | Accessed By |
+|---|---|---|---|---|---|---|
+| Customer PII | high | postgres | 90 days | aes-256 | tls 1.2+ | support portal |
+
+
+## Authentication
+Existing auth details.";
+        assert_eq!(updated, expected);
+    }
+
+    #[test]
+    fn inject_appends_section_when_missing() {
+        let spec = "\
+# Project Specification
+
+## Overview
+System overview text.
+";
+        let table_markdown = "\
+## Data Classification
+
+| Data Type | Sensitivity | Storage Location | Retention | Encryption At Rest | In Transit | Accessed By |
+|---|---|---|---|---|---|---|
+| Billing Data | high | stripe | 7 years | provider-managed | tls 1.2+ | finance team |
+
+";
+        let updated = inject_data_classification_section(spec, table_markdown);
+        let expected = "\
+# Project Specification
+
+## Overview
+System overview text.
+
+## Data Classification
+
+| Data Type | Sensitivity | Storage Location | Retention | Encryption At Rest | In Transit | Accessed By |
+|---|---|---|---|---|---|---|
+| Billing Data | high | stripe | 7 years | provider-managed | tls 1.2+ | finance team |
+
+";
+        assert_eq!(updated, expected);
     }
 }
 
@@ -3427,7 +4040,29 @@ async fn generate_spec_for_location(
             logs.push(msg);
         }
     }
-    let sanitized = fix_mermaid_blocks(&response.text);
+    let mut sanitized = fix_mermaid_blocks(&response.text);
+
+    if !sanitized.trim().is_empty() {
+        let polish_message = format!("Polishing specification markdown for {location_label}.");
+        if let Some(tx) = progress_sender.as_ref() {
+            tx.send(AppEvent::SecurityReviewLog(polish_message.clone()));
+        }
+        logs.push(polish_message);
+        let outcome =
+            polish_markdown_block(&client, &provider, &auth, metrics.clone(), &sanitized, None)
+                .await
+                .map_err(|err| SecurityReviewFailure {
+                    message: format!("Failed to polish specification for {location_label}: {err}"),
+                    logs: Vec::new(),
+                })?;
+        if let Some(tx) = progress_sender.as_ref() {
+            for line in &outcome.reasoning_logs {
+                tx.send(AppEvent::SecurityReviewLog(line.clone()));
+            }
+        }
+        logs.extend(outcome.reasoning_logs.clone());
+        sanitized = fix_mermaid_blocks(&outcome.text);
+    }
 
     let slug = slugify_label(&location_label);
     let file_path = raw_dir.join(format!("{slug}.md"));
@@ -3448,10 +4083,14 @@ async fn generate_spec_for_location(
     }
     logs.push(done_message);
 
+    let api_markdown = extract_api_markdown(&sanitized);
+
     Ok((
         SpecEntry {
             location_label,
             markdown: sanitized,
+            raw_path: file_path,
+            api_markdown,
         },
         logs,
     ))
@@ -3603,6 +4242,39 @@ async fn generate_threat_model(
         }
     }
 
+    if !sanitized_response.trim().is_empty() {
+        let polish_message = "Polishing threat model markdown formatting.".to_string();
+        if let Some(tx) = progress_sender.as_ref() {
+            tx.send(AppEvent::SecurityReviewLog(polish_message.clone()));
+        }
+        logs.push(polish_message);
+        let outcome = match polish_markdown_block(
+            client,
+            provider,
+            auth,
+            metrics.clone(),
+            &sanitized_response,
+            None,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                return Err(SecurityReviewFailure {
+                    message: format!("Failed to polish threat model: {err}"),
+                    logs: logs.clone(),
+                });
+            }
+        };
+        if let Some(tx) = progress_sender.as_ref() {
+            for line in &outcome.reasoning_logs {
+                tx.send(AppEvent::SecurityReviewLog(line.clone()));
+            }
+        }
+        logs.extend(outcome.reasoning_logs.clone());
+        sanitized_response = fix_mermaid_blocks(&outcome.text);
+    }
+
     let threat_file = threats_dir.join("threat_model.md");
     tokio_fs::write(&threat_file, sanitized_response.as_bytes())
         .await
@@ -3636,6 +4308,7 @@ async fn combine_spec_markdown(
     project_locations: &[String],
     specs: &[SpecEntry],
     combined_path: &Path,
+    repo_root: &Path,
     progress_sender: Option<AppEventSender>,
     metrics: Arc<ReviewMetrics>,
 ) -> Result<(String, Vec<String>), SecurityReviewFailure> {
@@ -3649,44 +4322,237 @@ async fn combine_spec_markdown(
     }
     logs.push(message);
 
-    let prompt = build_combine_specs_prompt(project_locations, specs);
-    let response = match call_model(
-        client,
-        provider,
-        auth,
-        SPEC_GENERATION_MODEL,
-        SPEC_COMBINE_SYSTEM_PROMPT,
-        &prompt,
-        metrics.clone(),
-        0.1,
-    )
-    .await
-    {
-        Ok(output) => {
-            if let Some(reasoning) = output.reasoning.as_ref() {
-                for line in reasoning
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                {
-                    let truncated = truncate_text(line, MODEL_REASONING_LOG_MAX_GRAPHEMES);
-                    let msg = format!("Model reasoning: {truncated}");
-                    if let Some(tx) = progress_sender.as_ref() {
-                        tx.send(AppEvent::SecurityReviewLog(msg.clone()));
-                    }
-                    logs.push(msg);
-                }
-            }
-            output.text
-        }
-        Err(err) => {
+    let base_prompt = build_combine_specs_prompt(project_locations, specs);
+    let mut conversation: Vec<String> = Vec::new();
+    let mut seen_search_requests: HashSet<String> = HashSet::new();
+    let mut seen_read_requests: HashSet<String> = HashSet::new();
+    let mut tool_rounds = 0usize;
+    let mut command_error_count = 0usize;
+
+    let combined_raw = loop {
+        if tool_rounds > SPEC_COMBINE_MAX_TOOL_ROUNDS {
             return Err(SecurityReviewFailure {
-                message: format!("Failed to combine specifications: {err}"),
+                message: format!("Spec merge exceeded {SPEC_COMBINE_MAX_TOOL_ROUNDS} tool rounds."),
                 logs,
             });
         }
+
+        let mut prompt = base_prompt.clone();
+        if !conversation.is_empty() {
+            prompt.push_str("\n\n# Conversation history\n");
+            prompt.push_str(&conversation.join("\n\n"));
+        }
+
+        let response = match call_model(
+            client,
+            provider,
+            auth,
+            SPEC_GENERATION_MODEL,
+            SPEC_COMBINE_SYSTEM_PROMPT,
+            &prompt,
+            metrics.clone(),
+            0.0,
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => {
+                return Err(SecurityReviewFailure {
+                    message: format!("Failed to combine specifications: {err}"),
+                    logs,
+                });
+            }
+        };
+
+        if let Some(reasoning) = response.reasoning.as_ref() {
+            for line in reasoning
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+            {
+                let truncated = truncate_text(line, MODEL_REASONING_LOG_MAX_GRAPHEMES);
+                let msg = format!("Spec merge reasoning: {truncated}");
+                if let Some(tx) = progress_sender.as_ref() {
+                    tx.send(AppEvent::SecurityReviewLog(msg.clone()));
+                }
+                logs.push(msg);
+            }
+        }
+
+        let assistant_reply = response.text.trim().to_string();
+        if assistant_reply.is_empty() {
+            conversation.push("Assistant:".to_string());
+        } else {
+            conversation.push(format!("Assistant:\n{assistant_reply}"));
+        }
+
+        let (after_read, read_requests) = extract_read_requests(&response.text);
+        let (cleaned_text, search_requests) = parse_search_requests(&after_read);
+
+        let mut executed_command = false;
+
+        for request in read_requests {
+            let key = request.dedupe_key();
+            if !seen_read_requests.insert(key) {
+                let msg = format!(
+                    "Spec merge READ `{}` skipped (already provided).",
+                    request.path.display()
+                );
+                logs.push(msg.clone());
+                conversation.push(format!(
+                    "Tool READ `{}` already provided earlier.",
+                    request.path.display()
+                ));
+                executed_command = true;
+                continue;
+            }
+
+            executed_command = true;
+            match execute_auto_scope_read(
+                repo_root,
+                &request.path,
+                request.start,
+                request.end,
+                metrics.as_ref(),
+            )
+            .await
+            {
+                Ok(output) => {
+                    logs.push(format!(
+                        "Spec merge READ `{}` returned content.",
+                        request.path.display()
+                    ));
+                    conversation.push(format!(
+                        "Tool READ `{}`:\n{}",
+                        request.path.display(),
+                        output
+                    ));
+                }
+                Err(err) => {
+                    logs.push(format!(
+                        "Spec merge READ `{}` failed: {err}",
+                        request.path.display()
+                    ));
+                    conversation.push(format!(
+                        "Tool READ `{}` error: {err}",
+                        request.path.display()
+                    ));
+                    command_error_count += 1;
+                }
+            }
+        }
+
+        for request in search_requests {
+            let key = request.dedupe_key();
+            if !seen_search_requests.insert(key) {
+                match &request {
+                    ToolRequest::Content { term, mode, .. } => {
+                        let display_term = summarize_search_term(term, 80);
+                        let msg = format!(
+                            "Spec merge SEARCH `{display_term}` ({}) skipped (already provided).",
+                            mode.as_str()
+                        );
+                        logs.push(msg.clone());
+                        conversation.push(format!(
+                            "Tool SEARCH `{display_term}` ({}) already provided earlier.",
+                            mode.as_str()
+                        ));
+                    }
+                    ToolRequest::GrepFiles { args, .. } => {
+                        let mut shown = serde_json::json!({ "pattern": args.pattern });
+                        if let Some(ref inc) = args.include {
+                            shown["include"] = serde_json::Value::String(inc.clone());
+                        }
+                        if let Some(ref path) = args.path {
+                            shown["path"] = serde_json::Value::String(path.clone());
+                        }
+                        if let Some(limit) = args.limit {
+                            shown["limit"] =
+                                serde_json::Value::Number(serde_json::Number::from(limit as u64));
+                        }
+                        let msg =
+                            format!("Spec merge GREP_FILES {shown} skipped (already provided).");
+                        logs.push(msg.clone());
+                        conversation
+                            .push(format!("Tool GREP_FILES {shown} already provided earlier."));
+                    }
+                }
+                executed_command = true;
+                continue;
+            }
+
+            executed_command = true;
+            match request {
+                ToolRequest::Content { term, mode, .. } => {
+                    let display_term = summarize_search_term(&term, 80);
+                    let msg = format!(
+                        "Spec merge SEARCH `{display_term}` ({}) skipped; SEARCH is disabled for this step.",
+                        mode.as_str()
+                    );
+                    logs.push(msg);
+                    conversation.push(format!(
+                        "Tool SEARCH `{display_term}` ({}) error: SEARCH is disabled during spec merge. Use READ (and optionally GREP_FILES) to gather context.",
+                        mode.as_str()
+                    ));
+                }
+                ToolRequest::GrepFiles { args, .. } => {
+                    let mut shown = serde_json::json!({ "pattern": args.pattern });
+                    if let Some(ref inc) = args.include {
+                        shown["include"] = serde_json::Value::String(inc.clone());
+                    }
+                    if let Some(ref path) = args.path {
+                        shown["path"] = serde_json::Value::String(path.clone());
+                    }
+                    if let Some(limit) = args.limit {
+                        shown["limit"] =
+                            serde_json::Value::Number(serde_json::Number::from(limit as u64));
+                    }
+                    logs.push(format!("Spec merge GREP_FILES {shown} executing."));
+                    match run_grep_files(repo_root, &args, &metrics).await {
+                        SearchResult::Matches(output) => {
+                            conversation.push(format!("Tool GREP_FILES {shown}:\n{output}"));
+                        }
+                        SearchResult::NoMatches => {
+                            let message = "No matches found.".to_string();
+                            logs.push(format!(
+                                "Spec merge GREP_FILES {shown} returned no matches."
+                            ));
+                            conversation.push(format!("Tool GREP_FILES {shown}:\n{message}"));
+                        }
+                        SearchResult::Error(err) => {
+                            logs.push(format!("Spec merge GREP_FILES {shown} failed: {err}"));
+                            conversation.push(format!("Tool GREP_FILES {shown} error: {err}"));
+                            command_error_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if command_error_count >= SPEC_COMBINE_MAX_COMMAND_ERRORS {
+            return Err(SecurityReviewFailure {
+                message: format!("Spec merge hit {SPEC_COMBINE_MAX_COMMAND_ERRORS} tool errors."),
+                logs,
+            });
+        }
+
+        if executed_command {
+            tool_rounds = tool_rounds.saturating_add(1);
+            continue;
+        }
+
+        let final_text = cleaned_text.trim();
+        if final_text.is_empty() {
+            return Err(SecurityReviewFailure {
+                message: "Spec merge produced an empty response.".to_string(),
+                logs,
+            });
+        }
+
+        break final_text.to_string();
     };
-    let sanitized = fix_mermaid_blocks(&response);
+
+    let sanitized = fix_mermaid_blocks(&combined_raw);
 
     let polish_message = "Polishing combined specification markdown formatting.".to_string();
     if let Some(tx) = progress_sender.as_ref() {
@@ -3715,7 +4581,7 @@ async fn combine_spec_markdown(
                     .filter(|line| !line.is_empty())
                 {
                     let truncated = truncate_text(line, MODEL_REASONING_LOG_MAX_GRAPHEMES);
-                    let msg = format!("Model reasoning: {truncated}");
+                    let msg = format!("Spec merge polish reasoning: {truncated}");
                     if let Some(tx) = progress_sender.as_ref() {
                         tx.send(AppEvent::SecurityReviewLog(msg.clone()));
                     }
@@ -3779,6 +4645,28 @@ fn build_spec_prompt_text(
         .replace("{project_locations}", &locations_block)
         .replace("{target_label}", target_label)
         .replace("{spec_template}", &template_body)
+}
+
+fn extract_api_markdown(spec_markdown: &str) -> Option<String> {
+    let heading = "## API Entry Points";
+    let start = spec_markdown.find(heading)?;
+    let after_heading = &spec_markdown[start + heading.len()..];
+    let after_trimmed = after_heading.trim_start_matches(['\n', '\r']);
+    if after_trimmed.is_empty() {
+        return None;
+    }
+    let next_heading_offset = after_trimmed.find("\n## ");
+    let content = if let Some(idx) = next_heading_offset {
+        &after_trimmed[..idx]
+    } else {
+        after_trimmed
+    };
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn build_combine_specs_prompt(project_locations: &[String], specs: &[SpecEntry]) -> String {
@@ -3848,6 +4736,261 @@ Some common issues to fix:\n\
     prompt
 }
 
+fn clamp_prompt_text(input: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(input.len().min(max_chars) + 32);
+    let mut count = 0usize;
+    for ch in input.chars() {
+        if count >= max_chars {
+            out.push_str("\n… (truncated)");
+            break;
+        }
+        out.push(ch);
+        count += 1;
+    }
+    if count < input.chars().count() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
+#[derive(Clone)]
+struct ClassificationExtraction {
+    rows: Vec<DataClassificationRow>,
+    table_markdown: String,
+    reasoning_logs: Vec<String>,
+}
+
+fn build_data_classification_prompt(spec_markdown: &str) -> String {
+    CONVERT_CLASSIFICATION_TO_JSON_PROMPT_TEMPLATE.replace("{spec_markdown}", spec_markdown)
+}
+
+fn sensitivity_rank(value: &str) -> usize {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "high" => 0,
+        "medium" => 1,
+        "low" => 2,
+        _ => 3,
+    }
+}
+
+fn build_data_classification_table(rows: &[DataClassificationRow]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut sorted = rows.to_vec();
+    sorted.sort_by(|a, b| {
+        let rank_a = sensitivity_rank(&a.sensitivity);
+        let rank_b = sensitivity_rank(&b.sensitivity);
+        rank_a.cmp(&rank_b).then_with(|| {
+            a.data_type
+                .to_ascii_lowercase()
+                .cmp(&b.data_type.to_ascii_lowercase())
+        })
+    });
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push("## Data Classification".to_string());
+    lines.push(String::new());
+    lines.push("| Data Type | Sensitivity | Storage Location | Retention | Encryption At Rest | In Transit | Accessed By |".to_string());
+    lines.push("|---|---|---|---|---|---|---|".to_string());
+    for row in &sorted {
+        lines.push(format!(
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            row.data_type,
+            row.sensitivity,
+            row.storage_location,
+            row.retention,
+            row.encryption_at_rest,
+            row.in_transit,
+            row.accessed_by
+        ));
+    }
+    lines.push(String::new());
+    Some(lines.join("\n"))
+}
+
+fn inject_data_classification_section(spec_markdown: &str, table_markdown: &str) -> String {
+    let lines: Vec<&str> = spec_markdown.lines().collect();
+    let mut output: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    let mut replaced = false;
+    while i < lines.len() {
+        let line = lines[i];
+        if line
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("## data classification")
+        {
+            replaced = true;
+            output.push(table_markdown.to_string());
+            i += 1;
+            while i < lines.len() {
+                let candidate = lines[i];
+                if candidate.starts_with("## ")
+                    && !candidate
+                        .trim()
+                        .eq_ignore_ascii_case("## Data Classification")
+                {
+                    break;
+                }
+                if candidate.starts_with("# ")
+                    && !candidate
+                        .trim()
+                        .eq_ignore_ascii_case("# Project Specification")
+                {
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        output.push(line.to_string());
+        i += 1;
+    }
+
+    if !replaced {
+        if let Some(last) = output.last()
+            && !last.trim().is_empty()
+        {
+            output.push(String::new());
+        }
+        output.push(table_markdown.to_string());
+    }
+
+    output.join("\n")
+}
+
+async fn extract_data_classification(
+    client: &Client,
+    provider: &ModelProviderInfo,
+    auth: &Option<CodexAuth>,
+    spec_markdown: &str,
+    metrics: Arc<ReviewMetrics>,
+) -> Result<Option<ClassificationExtraction>, String> {
+    let trimmed = spec_markdown.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let truncated_spec = clamp_prompt_text(trimmed, CLASSIFICATION_PROMPT_SPEC_LIMIT);
+    let prompt = build_data_classification_prompt(&truncated_spec);
+
+    let output = call_model(
+        client,
+        provider,
+        auth,
+        SPEC_GENERATION_MODEL,
+        SPEC_SYSTEM_PROMPT,
+        &prompt,
+        metrics,
+        0.0,
+    )
+    .await?;
+
+    let mut reasoning_logs: Vec<String> = Vec::new();
+    if let Some(reasoning) = output.reasoning.as_ref() {
+        for line in reasoning
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let truncated = truncate_text(line, MODEL_REASONING_LOG_MAX_GRAPHEMES);
+            reasoning_logs.push(format!("Model reasoning: {truncated}"));
+        }
+    }
+
+    let mut rows: Vec<DataClassificationRow> = Vec::new();
+    for raw in output.text.lines() {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<DataClassificationRow>(trimmed) {
+            Ok(mut row) => {
+                row.sensitivity = row.sensitivity.trim().to_ascii_lowercase();
+                if row.sensitivity != "high"
+                    && row.sensitivity != "medium"
+                    && row.sensitivity != "low"
+                {
+                    row.sensitivity = "unknown".to_string();
+                }
+                rows.push(row);
+            }
+            Err(err) => {
+                reasoning_logs.push(format!(
+                    "Skipping invalid classification line: {trimmed} ({err})"
+                ));
+            }
+        }
+    }
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let table_markdown = match build_data_classification_table(&rows) {
+        Some(table) => table,
+        None => return Ok(None),
+    };
+
+    Ok(Some(ClassificationExtraction {
+        rows,
+        table_markdown,
+        reasoning_logs,
+    }))
+}
+
+struct MarkdownPolishOutcome {
+    text: String,
+    reasoning_logs: Vec<String>,
+}
+
+async fn polish_markdown_block(
+    client: &Client,
+    provider: &ModelProviderInfo,
+    auth: &Option<CodexAuth>,
+    metrics: Arc<ReviewMetrics>,
+    original_content: &str,
+    template_hint: Option<&str>,
+) -> Result<MarkdownPolishOutcome, String> {
+    if original_content.trim().is_empty() {
+        return Ok(MarkdownPolishOutcome {
+            text: original_content.to_string(),
+            reasoning_logs: Vec::new(),
+        });
+    }
+
+    let fix_prompt = build_fix_markdown_prompt(original_content, template_hint);
+    let output = call_model(
+        client,
+        provider,
+        auth,
+        MARKDOWN_FIX_MODEL,
+        MARKDOWN_FIX_SYSTEM_PROMPT,
+        &fix_prompt,
+        metrics,
+        0.0,
+    )
+    .await?;
+
+    let mut reasoning_logs: Vec<String> = Vec::new();
+    if let Some(reasoning) = output.reasoning.as_ref() {
+        for line in reasoning
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let truncated = truncate_text(line, MODEL_REASONING_LOG_MAX_GRAPHEMES);
+            reasoning_logs.push(format!("Model reasoning: {truncated}"));
+        }
+    }
+
+    Ok(MarkdownPolishOutcome {
+        text: output.text,
+        reasoning_logs,
+    })
+}
+
 async fn analyze_files_individually(
     client: &Client,
     provider: &ModelProviderInfo,
@@ -3872,6 +5015,20 @@ async fn analyze_files_individually(
     let mut completed_files: usize = 0;
 
     let concurrency = MAX_CONCURRENT_FILE_ANALYSIS.min(snippets.len());
+    if let Some(tx) = progress_sender.as_ref() {
+        tx.send(AppEvent::SecurityReviewLog(format!(
+            "  └ Launching parallel bug analysis ({concurrency} workers)"
+        )));
+        tx.send(AppEvent::SecurityReviewLog(
+            "    Sample tool calls (simulated):".to_string(),
+        ));
+        tx.send(AppEvent::SecurityReviewLog(
+            "  └ READ: src/main.rs#L1-L120".to_string(),
+        ));
+        tx.send(AppEvent::SecurityReviewLog(
+            "    SEARCH regex:'(?i)api_key|secret|token'".to_string(),
+        ));
+    }
     for _ in 0..concurrency {
         if let Some((index, snippet)) = remaining.next() {
             in_flight.push(analyze_single_file(
@@ -3933,6 +5090,11 @@ async fn analyze_files_individually(
                 }
             }
             Err(failure) => {
+                if let Some(tx) = progress_sender.as_ref() {
+                    for line in &failure.logs {
+                        tx.send(AppEvent::SecurityReviewLog(line.clone()));
+                    }
+                }
                 let mut combined_logs = aggregated_logs;
                 combined_logs.extend(failure.logs);
                 return Err(SecurityReviewFailure {
@@ -3976,6 +5138,11 @@ async fn analyze_files_individually(
     {
         let blame_logs =
             enrich_bug_summaries_with_blame(&mut bug_summaries, info, metrics.clone()).await;
+        if let Some(tx) = progress_sender.as_ref() {
+            for line in &blame_logs {
+                tx.send(AppEvent::SecurityReviewLog(line.clone()));
+            }
+        }
         aggregated_logs.extend(blame_logs);
     }
 
@@ -4123,6 +5290,8 @@ async fn analyze_files_individually(
                 if (before - after) == 1 { "" } else { "s" }
             ));
         }
+
+        normalize_bug_identifiers(&mut bug_summaries, &mut bug_details);
     }
 
     snippets_with_findings.sort_by_key(|(index, _)| *index);
@@ -4935,6 +6104,57 @@ fn dedupe_bug_summaries(
     (summaries, new_details, removed)
 }
 
+fn bug_summary_cmp(a: &BugSummary, b: &BugSummary) -> CmpOrdering {
+    match (a.risk_rank, b.risk_rank) {
+        (Some(ra), Some(rb)) => ra.cmp(&rb),
+        (Some(_), None) => CmpOrdering::Less,
+        (None, Some(_)) => CmpOrdering::Greater,
+        _ => severity_rank(&a.severity)
+            .cmp(&severity_rank(&b.severity))
+            .then_with(|| a.id.cmp(&b.id)),
+    }
+}
+
+fn normalize_bug_identifiers(summaries: &mut Vec<BugSummary>, details: &mut Vec<BugDetail>) {
+    if summaries.is_empty() {
+        details.clear();
+        return;
+    }
+
+    let mut sorted: Vec<BugSummary> = std::mem::take(summaries);
+    sorted.sort_by(bug_summary_cmp);
+
+    let mut detail_lookup: HashMap<usize, String> = details
+        .iter()
+        .map(|detail| (detail.summary_id, detail.original_markdown.clone()))
+        .collect();
+    let mut new_details: Vec<BugDetail> = Vec::with_capacity(sorted.len());
+
+    for (index, summary) in sorted.iter_mut().enumerate() {
+        let new_id = index + 1;
+        let old_id = summary.id;
+        summary.id = new_id;
+        if let Some(updated) =
+            rewrite_bug_markdown_heading_id(summary.markdown.as_str(), summary.id)
+        {
+            summary.markdown = updated;
+        }
+
+        let base_markdown = detail_lookup
+            .remove(&old_id)
+            .unwrap_or_else(|| summary.markdown.clone());
+        let normalized_detail = rewrite_bug_markdown_heading_id(base_markdown.as_str(), summary.id)
+            .unwrap_or(base_markdown);
+        new_details.push(BugDetail {
+            summary_id: summary.id,
+            original_markdown: normalized_detail,
+        });
+    }
+
+    *summaries = sorted;
+    *details = new_details;
+}
+
 fn format_findings_summary(findings: usize, files_with_findings: usize) -> String {
     if findings == 0 {
         return "No findings identified.".to_string();
@@ -5017,8 +6237,8 @@ fn make_bug_summary_table(bugs: &[BugSummary]) -> Option<String> {
     });
 
     let mut table = String::new();
-    table.push_str("| # | Severity | Title | Validation | Impact | Recommendation |\n");
-    table.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    table.push_str("| # | Severity | Title | Validation | Impact |\n");
+    table.push_str("| --- | --- | --- | --- | --- |\n");
     for (display_idx, bug) in ordered.iter().enumerate() {
         let id = display_idx + 1;
         let anchor_id = bug.id;
@@ -5048,12 +6268,11 @@ fn make_bug_summary_table(bugs: &[BugSummary]) -> Option<String> {
         }
         let validation = validation_display(&bug.validation);
         table.push_str(&format!(
-            "| {id} | {} | {} | {} | {} | {} |\n",
+            "| {id} | {} | {} | {} | {} |\n",
             sanitize_table_field(&bug.severity),
             title_cell,
             sanitize_table_field(&validation),
             sanitize_table_field(&bug.impact),
-            sanitize_table_field(&bug.recommendation),
         ));
     }
     Some(table)
@@ -5074,8 +6293,8 @@ fn make_bug_summary_table_from_bugs(bugs: &[SecurityReviewBug]) -> Option<String
     });
 
     let mut table = String::new();
-    table.push_str("| # | Severity | Title | Validation | Impact | Recommendation |\n");
-    table.push_str("| --- | --- | --- | --- | --- | --- |\n");
+    table.push_str("| # | Severity | Title | Validation | Impact |\n");
+    table.push_str("| --- | --- | --- | --- | --- |\n");
     for (display_idx, bug) in ordered.iter().enumerate() {
         let id = display_idx + 1;
         let anchor_id = bug.summary_id;
@@ -5105,12 +6324,11 @@ fn make_bug_summary_table_from_bugs(bugs: &[SecurityReviewBug]) -> Option<String
         }
         let validation = validation_display(&bug.validation);
         table.push_str(&format!(
-            "| {id} | {} | {} | {} | {} | {} |\n",
+            "| {id} | {} | {} | {} | {} |\n",
             sanitize_table_field(&bug.severity),
             title_cell,
             sanitize_table_field(&validation),
             sanitize_table_field(&bug.impact),
-            sanitize_table_field(&bug.recommendation),
         ));
     }
     Some(table)
@@ -6861,7 +8079,7 @@ pub(crate) fn build_follow_up_user_prompt(
     };
 
     format!(
-        "{SECURITY_REVIEW_FOLLOW_UP_MARKER}\nSecurity review follow-up context:\n- Mode: {mode_label}\n- Scope: {scope_summary}\n- {label}: {report_display}\n\nInstructions:\n- Consider the question first, then skim the report for relevant sections before reading in full.\n- Prefer quoting short report excerpts; consult in-scope code using `rg`, `read_file`, or shell commands when needed.\n- Do not modify files or run destructive commands; you are only answering questions.\n- Keep answers concise and in Markdown.\n\nQuestion:\n{question}\n"
+        "{SECURITY_REVIEW_FOLLOW_UP_MARKER}\nSecurity review follow-up context:\n- Mode: {mode_label}\n- Scope: {scope_summary}\n- {label}: {report_display}\n\nInstructions:\n- Consider the question first, then skim the report for relevant sections before reading in full.\n- Explore the scoped code paths (see Scope above), not just the report: use `rg` to locate definitions/usages and `read_file` to open the relevant files and nearby call sites.\n- Quote short report excerpts as supporting context, but ground confirmations and clarifications in the in-scope code.\n- Do not modify files or run destructive commands; you are only answering questions.\n- Keep answers concise and in Markdown.\n\nQuestion:\n{question}\n"
     )
 }
 
@@ -6881,7 +8099,11 @@ pub(crate) fn parse_follow_up_question(message: &str) -> Option<String> {
 async fn persist_artifacts(
     output_root: &Path,
     repo_path: &Path,
+    metadata: &SecurityReviewMetadata,
     bugs_markdown: &str,
+    api_entries: &[ApiEntry],
+    classification_rows: &[DataClassificationRow],
+    classification_table: Option<&str>,
     report_markdown: Option<&str>,
     snapshot: &SecurityReviewSnapshot,
 ) -> Result<PersistedArtifacts, String> {
@@ -6902,6 +8124,52 @@ async fn persist_artifacts(
     tokio_fs::write(&snapshot_path, snapshot_bytes)
         .await
         .map_err(|e| format!("Failed to write {}: {e}", snapshot_path.display()))?;
+
+    let mut api_overview_path: Option<PathBuf> = None;
+    if !api_entries.is_empty() {
+        let mut content = String::new();
+        for entry in api_entries {
+            if entry.markdown.trim().is_empty() {
+                continue;
+            }
+            content.push_str(&format!("## {}\n\n", entry.location_label));
+            content.push_str(entry.markdown.trim());
+            content.push_str("\n\n");
+        }
+        if !content.trim().is_empty() {
+            let path = context_dir.join("apis.md");
+            tokio_fs::write(&path, fix_mermaid_blocks(&content).as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+            api_overview_path = Some(path);
+        }
+    }
+
+    let mut classification_json_path: Option<PathBuf> = None;
+    let mut classification_table_path: Option<PathBuf> = None;
+    if !classification_rows.is_empty() {
+        let mut json_lines: Vec<String> = Vec::with_capacity(classification_rows.len());
+        for row in classification_rows {
+            let line = serde_json::to_string(row)
+                .map_err(|e| format!("Failed to serialize classification row: {e}"))?;
+            json_lines.push(line);
+        }
+        let json_path = context_dir.join("classification.jsonl");
+        tokio_fs::write(&json_path, json_lines.join("\n").as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write {}: {e}", json_path.display()))?;
+        classification_json_path = Some(json_path);
+
+        if let Some(table) = classification_table
+            && !table.trim().is_empty()
+        {
+            let table_path = context_dir.join("classification.md");
+            tokio_fs::write(&table_path, table.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write {}: {e}", table_path.display()))?;
+            classification_table_path = Some(table_path);
+        }
+    }
 
     let mut report_html_path = None;
     let sanitized_report = report_markdown.map(fix_mermaid_blocks);
@@ -6926,11 +8194,22 @@ async fn persist_artifacts(
         None
     };
 
+    let metadata_path = output_root.join("metadata.json");
+    let metadata_bytes = serde_json::to_vec_pretty(metadata)
+        .map_err(|e| format!("Failed to serialize metadata: {e}"))?;
+    tokio_fs::write(&metadata_path, metadata_bytes)
+        .await
+        .map_err(|e| format!("Failed to write {}: {e}", metadata_path.display()))?;
+
     Ok(PersistedArtifacts {
         bugs_path,
         snapshot_path,
         report_path,
         report_html_path,
+        metadata_path,
+        api_overview_path,
+        classification_json_path,
+        classification_table_path,
     })
 }
 
@@ -6966,14 +8245,14 @@ fn summarize_process_output(success: bool, stdout: &str, stderr: &str) -> String
 
 fn build_bugs_markdown(
     snapshot: &SecurityReviewSnapshot,
-    _git_link_info: Option<&GitLinkInfo>,
+    git_link_info: Option<&GitLinkInfo>,
 ) -> String {
     let bugs = snapshot_bugs(snapshot);
     let mut sections: Vec<String> = Vec::new();
     if let Some(table) = make_bug_summary_table_from_bugs(&bugs) {
         sections.push(table);
     }
-    let details = render_bug_sections(&snapshot.bugs);
+    let details = render_bug_sections(&snapshot.bugs, git_link_info);
     if !details.trim().is_empty() {
         sections.push(details);
     }
@@ -7297,6 +8576,7 @@ async fn call_model(
             system_prompt,
             user_prompt,
             temperature,
+            metrics.clone(),
         )
         .await
         {
@@ -7330,6 +8610,7 @@ async fn call_model_attempt(
     system_prompt: &str,
     user_prompt: &str,
     temperature: f32,
+    metrics: Arc<ReviewMetrics>,
 ) -> Result<ModelCallOutput, String> {
     match provider.wire_api {
         WireApi::Responses => {
@@ -7379,17 +8660,19 @@ async fn call_model_attempt(
                         system_prompt,
                         user_prompt,
                         temperature,
+                        metrics.clone(),
                     )
                     .await;
                 }
                 return Err(format!("Model request failed with status {status}: {body}"));
             }
 
-            match parse_responses_stream_output(&body) {
+            match parse_responses_stream_output(&body, &metrics) {
                 Ok(output) => Ok(output),
                 Err(err) => {
                     let snippet = truncate_text(&body, 400);
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+                        // parse_responses_output may not include usage; nothing extra to record here.
                         parse_responses_output(value).map_err(|fallback_err| {
                             format!(
                                 "{err}; fallback parse failed: {fallback_err}. Response snippet: {snippet}"
@@ -7412,6 +8695,7 @@ async fn call_model_attempt(
                 system_prompt,
                 user_prompt,
                 temperature,
+                metrics,
             )
             .await
         }
@@ -7426,6 +8710,7 @@ async fn send_chat_request(
     system_prompt: &str,
     user_prompt: &str,
     temperature: f32,
+    metrics: Arc<ReviewMetrics>,
 ) -> Result<ModelCallOutput, String> {
     let builder = provider
         .create_request_builder(client, auth)
@@ -7469,6 +8754,61 @@ async fn send_chat_request(
         }
     };
 
+    // Try to record token usage if present in chat response
+    if let Some(usage) = value.get("usage") {
+        let input_tokens = usage
+            .get("input_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .unwrap_or(0);
+        let cached_input_tokens = usage
+            .get("input_tokens_details")
+            .and_then(|d| d.get("cached_tokens").and_then(serde_json::Value::as_u64))
+            .or_else(|| {
+                usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens").and_then(serde_json::Value::as_u64))
+            })
+            .unwrap_or(0);
+        let output_tokens = usage
+            .get("output_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                usage
+                    .get("completion_tokens")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .unwrap_or(0);
+        let reasoning_output_tokens = usage
+            .get("output_tokens_details")
+            .and_then(|d| {
+                d.get("reasoning_tokens")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .or_else(|| {
+                usage.get("completion_tokens_details").and_then(|d| {
+                    d.get("reasoning_tokens")
+                        .and_then(serde_json::Value::as_u64)
+                })
+            })
+            .unwrap_or(0);
+        let total_tokens = usage
+            .get("total_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(input_tokens.saturating_add(output_tokens));
+        metrics.record_usage_raw(
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_output_tokens,
+            total_tokens,
+        );
+    }
+
     parse_chat_output(value).map_err(|err| {
         let snippet = truncate_text(&body_text, 400);
         format!("{err}; response snippet: {snippet}")
@@ -7484,7 +8824,10 @@ fn sanitize_model_error(error: &str) -> String {
     trimmed.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn parse_responses_stream_output(body: &str) -> Result<ModelCallOutput, String> {
+fn parse_responses_stream_output(
+    body: &str,
+    metrics: &ReviewMetrics,
+) -> Result<ModelCallOutput, String> {
     let mut combined = String::new();
     let mut reasoning = String::new();
     let mut fallback: Option<serde_json::Value> = None;
@@ -7509,6 +8852,7 @@ fn parse_responses_stream_output(body: &str) -> Result<ModelCallOutput, String> 
                 &mut fallback,
                 &mut failed_error,
                 &mut last_parse_error,
+                metrics,
             );
             data_buffer.clear();
         }
@@ -7522,6 +8866,7 @@ fn parse_responses_stream_output(body: &str) -> Result<ModelCallOutput, String> 
             &mut fallback,
             &mut failed_error,
             &mut last_parse_error,
+            metrics,
         );
     }
 
@@ -7554,6 +8899,7 @@ fn handle_responses_event(
     fallback: &mut Option<serde_json::Value>,
     failed_error: &mut Option<String>,
     last_parse_error: &mut Option<String>,
+    metrics: &ReviewMetrics,
 ) {
     let trimmed = data.trim();
     if trimmed.is_empty() || trimmed == "[DONE]" {
@@ -7599,6 +8945,61 @@ fn handle_responses_event(
                 "response.completed" => {
                     if let Some(resp) = event.get("response") {
                         *fallback = Some(resp.clone());
+                        if let Some(usage) = resp.get("usage")
+                            && let Some(input_tokens) = usage
+                                .get("input_tokens")
+                                .and_then(serde_json::Value::as_u64)
+                                .or_else(|| {
+                                    usage
+                                        .get("prompt_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                })
+                        {
+                            let cached_input_tokens = usage
+                                .get("input_tokens_details")
+                                .and_then(|d| {
+                                    d.get("cached_tokens").and_then(serde_json::Value::as_u64)
+                                })
+                                .or_else(|| {
+                                    usage.get("prompt_tokens_details").and_then(|d| {
+                                        d.get("cached_tokens").and_then(serde_json::Value::as_u64)
+                                    })
+                                })
+                                .unwrap_or(0);
+                            let output_tokens = usage
+                                .get("output_tokens")
+                                .and_then(serde_json::Value::as_u64)
+                                .or_else(|| {
+                                    usage
+                                        .get("completion_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                })
+                                .unwrap_or(0);
+                            let reasoning_output_tokens = usage
+                                .get("output_tokens_details")
+                                .and_then(|d| {
+                                    d.get("reasoning_tokens")
+                                        .and_then(serde_json::Value::as_u64)
+                                })
+                                .or_else(|| {
+                                    usage.get("completion_tokens_details").and_then(|d| {
+                                        d.get("reasoning_tokens")
+                                            .and_then(serde_json::Value::as_u64)
+                                    })
+                                })
+                                .unwrap_or(0);
+                            let total_tokens = usage
+                                .get("total_tokens")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(input_tokens.saturating_add(output_tokens));
+                            metrics.record_usage_raw(
+                                input_tokens,
+                                cached_input_tokens,
+                                output_tokens,
+                                reasoning_output_tokens,
+                                total_tokens,
+                            );
+                        }
                     }
                 }
                 "response.failed" => {

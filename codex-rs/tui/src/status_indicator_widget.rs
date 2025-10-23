@@ -26,6 +26,7 @@ pub(crate) struct StatusSnapshot {
     pub(crate) progress: Option<f32>,
     pub(crate) thinking: Vec<String>,
     pub(crate) tool_calls: Vec<String>,
+    pub(crate) logs: Vec<String>,
 }
 
 pub(crate) struct StatusIndicatorWidget {
@@ -37,6 +38,8 @@ pub(crate) struct StatusIndicatorWidget {
     thinking_lines: Vec<String>,
     /// Labels of in-flight tool calls.
     tool_calls: Vec<String>,
+    /// Recent log messages emitted by long-running tasks.
+    logs: Vec<String>,
     /// Queued user messages to display under the status line.
     queued_messages: Vec<String>,
 
@@ -71,6 +74,7 @@ impl StatusIndicatorWidget {
             progress: None,
             thinking_lines: Vec::new(),
             tool_calls: Vec::new(),
+            logs: Vec::new(),
             queued_messages: Vec::new(),
             elapsed_running: Duration::ZERO,
             last_resume_at: Instant::now(),
@@ -88,11 +92,12 @@ impl StatusIndicatorWidget {
         let mut total: u16 = 1; // status line
         total = total.saturating_add(self.thinking_lines.len().saturating_sub(1) as u16);
         total = total.saturating_add(self.tool_calls.len().saturating_sub(1) as u16);
-        if !self.queued_messages.is_empty() {
-            total = total.saturating_add(1); // blank line between supplemental and queued messages
-        }
         let text_width = inner_width.saturating_sub(3); // account for " ↳ " prefix
         if text_width > 0 {
+            for log in &self.logs {
+                let wrapped = textwrap::wrap(log, text_width);
+                total = total.saturating_add(wrapped.len() as u16);
+            }
             for q in &self.queued_messages {
                 let wrapped = textwrap::wrap(q, text_width);
                 let lines = wrapped.len().min(3) as u16;
@@ -105,8 +110,14 @@ impl StatusIndicatorWidget {
                 total = total.saturating_add(1); // keybind hint line
             }
         } else {
+            total = total.saturating_add(self.logs.len() as u16);
             // At least one line per message if width is extremely narrow
             total = total.saturating_add(self.queued_messages.len() as u16);
+        }
+        if !self.logs.is_empty() && !self.queued_messages.is_empty() {
+            total = total.saturating_add(1); // blank line between logs and queued messages
+        } else if !self.queued_messages.is_empty() {
+            total = total.saturating_add(1); // blank line between supplemental and queued messages
         }
         total.saturating_add(1) // spacer line
     }
@@ -132,6 +143,7 @@ impl StatusIndicatorWidget {
         self.progress = snapshot.progress;
         self.thinking_lines = snapshot.thinking;
         self.tool_calls = snapshot.tool_calls;
+        self.logs = snapshot.logs;
         self.frame_requester.schedule_frame();
     }
 
@@ -139,6 +151,11 @@ impl StatusIndicatorWidget {
     pub(crate) fn set_queued_messages(&mut self, queued: Vec<String>) {
         self.queued_messages = queued;
         // Ensure a redraw so changes are visible.
+        self.frame_requester.schedule_frame();
+    }
+
+    pub(crate) fn set_logs(&mut self, logs: Vec<String>) {
+        self.logs = logs;
         self.frame_requester.schedule_frame();
     }
 
@@ -246,11 +263,26 @@ impl WidgetRef for StatusIndicatorWidget {
                 lines.push(vec![" ↳ ".cyan(), call.clone().cyan()].into());
             }
         }
+        let text_width = area.width.saturating_sub(3); // " ↳ " prefix
+        if !self.logs.is_empty() {
+            if text_width > 0 {
+                for log in &self.logs {
+                    let wrapped = textwrap::wrap(log, text_width as usize);
+                    for (i, piece) in wrapped.iter().enumerate() {
+                        let prefix = if i == 0 { " ↳ ".dim() } else { "   ".dim() };
+                        lines.push(vec![prefix, piece.to_string().into()].into());
+                    }
+                }
+            } else {
+                for log in &self.logs {
+                    lines.push(vec![" ↳ ".dim(), log.clone().into()].into());
+                }
+            }
+        }
         if !self.queued_messages.is_empty() {
             lines.push(Line::from(""));
         }
         // Wrap queued messages using textwrap and show up to the first 3 lines per message.
-        let text_width = area.width.saturating_sub(3); // " ↳ " prefix
         for q in &self.queued_messages {
             let wrapped = textwrap::wrap(q, text_width as usize);
             for (i, piece) in wrapped.iter().take(3).enumerate() {

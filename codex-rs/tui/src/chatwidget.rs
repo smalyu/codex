@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::env;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -50,6 +53,7 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use dirs::home_dir;
 use rand::Rng;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
@@ -94,10 +98,12 @@ use crate::history_cell::PlainHistoryCell;
 use crate::markdown::append_markdown;
 use crate::security_review::SECURITY_REVIEW_FOLLOW_UP_MARKER;
 use crate::security_review::SecurityReviewFailure;
+use crate::security_review::SecurityReviewMetadata;
 use crate::security_review::SecurityReviewMode;
 use crate::security_review::SecurityReviewRequest;
 use crate::security_review::SecurityReviewResult;
 use crate::security_review::build_follow_up_user_prompt;
+use crate::security_review::read_security_review_metadata;
 use crate::security_review::run_security_review;
 use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
@@ -112,7 +118,6 @@ use self::agent::spawn_agent_from_existing;
 mod session_header;
 use self::session_header::SessionHeader;
 use crate::streaming::controller::StreamController;
-use std::path::Path;
 
 use chrono::Local;
 use codex_common::approval_presets::ApprovalPreset;
@@ -338,6 +343,148 @@ fn annotate_scope_prompt(prompt: &str) -> String {
     )
 }
 
+fn strip_progress_prefix(text: &str) -> &str {
+    let trimmed = text.trim_start();
+    let mut parts = trimmed.splitn(3, ' ');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    let rest = parts.next();
+
+    if let (Some(second), Some(rest)) = (second, rest)
+        && let Some(digits) = first.strip_suffix('%')
+        && !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && second.chars().all(|c| c == '█' || c == '░')
+    {
+        return rest.trim_start();
+    }
+
+    text
+}
+
+fn parse_progress_suffix(text: &str) -> Option<(u8, &str)> {
+    let trimmed = text.trim();
+    let trimmed = trimmed.strip_suffix('.').unwrap_or(trimmed);
+    let idx = trimmed.rfind(" - ")?;
+    let tail = trimmed[idx + 3..].trim();
+    let percent_str = tail.strip_suffix('%')?;
+    if percent_str.is_empty() || !percent_str.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let percent = percent_str.parse::<u16>().ok()?.min(100) as u8;
+    let core = trimmed[..idx].trim_end();
+    Some((percent, core))
+}
+
+fn build_percent_prefix(percent: u8) -> String {
+    let pct = percent.min(100);
+    let width = 10usize;
+    let filled = usize::from(pct) * width / 100;
+    let mut bar = String::with_capacity(width);
+    if filled > 0 {
+        bar.push_str(&"█".repeat(filled));
+    }
+    if width > filled {
+        bar.push_str(&"░".repeat(width - filled));
+    }
+    format!("{pct}% {bar} ")
+}
+
+#[derive(Clone)]
+struct SecurityReviewResumeCandidate {
+    folder_name: String,
+    output_root: PathBuf,
+    metadata: SecurityReviewMetadata,
+}
+
+fn sanitize_repo_slug(repo_path: &Path) -> String {
+    let raw = repo_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| repo_path.to_string_lossy().into_owned());
+    let mut slug = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else if matches!(ch, '-' | '_') {
+            '-'
+        } else {
+            '-'
+        };
+        if mapped == '-' {
+            if !slug.ends_with('-') {
+                slug.push(mapped);
+            }
+        } else {
+            slug.push(mapped);
+        }
+    }
+    let trimmed = slug.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "repository".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn security_review_storage_root(repo_path: &Path) -> PathBuf {
+    let base = env::var_os("CODEXHOME")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|dir| dir.join(".codex")))
+        .unwrap_or_else(|| repo_path.to_path_buf());
+    base.join("appsec_review")
+        .join(sanitize_repo_slug(repo_path))
+}
+
+fn latest_security_review_candidate(storage_root: &Path) -> Option<SecurityReviewResumeCandidate> {
+    let entries = fs::read_dir(storage_root).ok()?;
+    let mut candidates: Vec<(String, SecurityReviewResumeCandidate)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let metadata_path = path.join("metadata.json");
+        let snapshot_path = path.join("context").join("bugs_snapshot.json");
+        if !metadata_path.exists() || !snapshot_path.exists() {
+            continue;
+        }
+        let metadata = match read_security_review_metadata(&metadata_path) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        let folder_name = entry.file_name().into_string().unwrap_or_else(|_| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("latest")
+                .to_string()
+        });
+        candidates.push((
+            folder_name.clone(),
+            SecurityReviewResumeCandidate {
+                folder_name,
+                output_root: path,
+                metadata,
+            },
+        ));
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut candidate = candidates.into_iter().next().map(|(_, c)| c)?;
+    if candidate.folder_name.is_empty() {
+        candidate.folder_name = candidate
+            .output_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("latest")
+            .to_string();
+    }
+    Some(candidate)
+}
+
 struct SecurityReviewContext {
     mode: SecurityReviewMode,
     include_paths: Vec<String>,
@@ -348,6 +495,8 @@ struct SecurityReviewContext {
     started_at: Instant,
     last_log: Option<String>,
     thinking_lines: Vec<String>,
+    log_lines: Vec<String>,
+    progress_percent: Option<u8>,
 }
 
 struct SecurityReviewFollowUpState {
@@ -365,6 +514,10 @@ struct SecurityReviewArtifactsState {
     bugs_path: PathBuf,
     report_path: Option<PathBuf>,
     report_html_path: Option<PathBuf>,
+    metadata_path: PathBuf,
+    api_overview_path: Option<PathBuf>,
+    classification_json_path: Option<PathBuf>,
+    classification_table_path: Option<PathBuf>,
 }
 
 impl ChatWidget {
@@ -376,6 +529,181 @@ impl ChatWidget {
         } else {
             None
         }
+    }
+
+    fn prompt_security_review_resume(
+        &mut self,
+        mode: SecurityReviewMode,
+        include_paths: Vec<String>,
+        scope_prompt: Option<String>,
+        candidate: SecurityReviewResumeCandidate,
+    ) {
+        let repo_path = self.config.cwd.clone();
+        let display_path = display_path_for(&candidate.output_root, &repo_path);
+        let scope_summary = if candidate.metadata.scope_paths.is_empty() {
+            "entire repository".to_string()
+        } else {
+            candidate.metadata.scope_paths.join(", ")
+        };
+
+        let mut items: Vec<SelectionItem> = Vec::new();
+        let resume_candidate = candidate;
+        items.push(SelectionItem {
+            name: format!("Resume latest review ({})", resume_candidate.folder_name),
+            description: Some(format!(
+                "Mode: {} • Scope: {}",
+                resume_candidate.metadata.mode.as_str(),
+                scope_summary
+            )),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::ResumeSecurityReview {
+                    output_root: resume_candidate.output_root.clone(),
+                    metadata: resume_candidate.metadata.clone(),
+                });
+            })],
+            dismiss_on_select: true,
+            search_value: Some(display_path.clone()),
+            ..Default::default()
+        });
+
+        let include_paths_for_retry = include_paths;
+        let scope_prompt_for_retry = scope_prompt;
+        items.push(SelectionItem {
+            name: "Start a new security review".to_string(),
+            description: Some("Create a fresh report".to_string()),
+            actions: vec![Box::new(move |tx: &AppEventSender| {
+                tx.send(AppEvent::StartSecurityReview {
+                    mode,
+                    include_paths: include_paths_for_retry.clone(),
+                    scope_prompt: scope_prompt_for_retry.clone(),
+                    force_new: true,
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Existing security review found".to_string()),
+            subtitle: Some(format!("Latest output at {display_path}")),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn resume_security_review(
+        &mut self,
+        output_root: PathBuf,
+        metadata: SecurityReviewMetadata,
+    ) {
+        if self.bottom_pane.is_task_running() || self.security_review_context.is_some() {
+            self.add_error_message(
+                "Cannot resume while a security review is running. Wait for it to finish first."
+                    .to_string(),
+            );
+            return;
+        }
+
+        let repo_path = self.config.cwd.clone();
+        if !output_root.exists() {
+            self.add_error_message(format!(
+                "Security review output path {} no longer exists.",
+                output_root.display()
+            ));
+            return;
+        }
+
+        let context_dir = output_root.join("context");
+        let bugs_path = context_dir.join("bugs.md");
+        let snapshot_path = context_dir.join("bugs_snapshot.json");
+        let metadata_path = output_root.join("metadata.json");
+
+        if !bugs_path.exists() {
+            self.add_error_message(format!(
+                "Cannot resume; expected bugs markdown missing at {}.",
+                bugs_path.display()
+            ));
+            return;
+        }
+        if !snapshot_path.exists() {
+            self.add_error_message(format!(
+                "Cannot resume; expected snapshot missing at {}.",
+                snapshot_path.display()
+            ));
+            return;
+        }
+        if !metadata_path.exists() {
+            self.add_error_message(format!(
+                "Cannot resume; expected metadata missing at {}.",
+                metadata_path.display()
+            ));
+            return;
+        }
+
+        let report_path = output_root.join("report.md");
+        let report_html_path = output_root.join("report.html");
+        let report_path = report_path.exists().then_some(report_path);
+        let report_html_path = report_html_path.exists().then_some(report_html_path);
+        let api_candidate = context_dir.join("apis.md");
+        let api_overview_path = api_candidate.exists().then_some(api_candidate);
+        let classification_json_candidate = context_dir.join("classification.jsonl");
+        let classification_json_path = classification_json_candidate
+            .exists()
+            .then_some(classification_json_candidate);
+        let classification_table_candidate = context_dir.join("classification.md");
+        let classification_table_path = classification_table_candidate
+            .exists()
+            .then_some(classification_table_candidate);
+
+        self.clear_security_review_follow_up();
+        self.security_review_task = None;
+        self.bottom_pane.set_task_running(false);
+        self.security_review_artifacts = Some(SecurityReviewArtifactsState {
+            repo_root: repo_path.clone(),
+            snapshot_path,
+            bugs_path: bugs_path.clone(),
+            report_path: report_path.clone(),
+            report_html_path: report_html_path.clone(),
+            metadata_path,
+            api_overview_path,
+            classification_json_path,
+            classification_table_path,
+        });
+
+        let follow_up_path = match metadata.mode {
+            SecurityReviewMode::Full => report_path
+                .clone()
+                .or(report_html_path.clone())
+                .unwrap_or(bugs_path),
+            SecurityReviewMode::Bugs => bugs_path,
+        };
+        let has_report = report_path.is_some() || report_html_path.is_some();
+        let follow_up_label = if metadata.mode == SecurityReviewMode::Full && has_report {
+            "Report".to_string()
+        } else {
+            "Bugs".to_string()
+        };
+
+        self.security_review_follow_up = Some(SecurityReviewFollowUpState {
+            repo_root: repo_path.clone(),
+            scope_paths: metadata.scope_paths.clone(),
+            mode: metadata.mode,
+            follow_up_path: follow_up_path.clone(),
+            follow_up_label,
+        });
+        self.bottom_pane
+            .set_placeholder_text("Ask a security review follow-up question".to_string());
+
+        let follow_up_display = display_path_for(&follow_up_path, &repo_path);
+        self.add_info_message(
+            format!(
+                "Resumed security review (mode: {}) — follow-up context loaded from {}.",
+                metadata.mode.as_str(),
+                follow_up_display
+            ),
+            None,
+        );
     }
 
     fn flush_answer_stream_with_separator(&mut self) {
@@ -424,6 +752,7 @@ impl ChatWidget {
             progress: self.status_progress,
             thinking: self.status_thinking_lines.clone(),
             tool_calls,
+            logs: Vec::new(),
         };
         self.bottom_pane.update_status_snapshot(snapshot);
     }
@@ -2280,6 +2609,7 @@ impl ChatWidget {
                     mode: SecurityReviewMode::Full,
                     include_paths: Vec::new(),
                     scope_prompt: None,
+                    force_new: false,
                 });
             })],
             dismiss_on_select: true,
@@ -2294,6 +2624,7 @@ impl ChatWidget {
                     mode: SecurityReviewMode::Bugs,
                     include_paths: Vec::new(),
                     scope_prompt: None,
+                    force_new: false,
                 });
             })],
             dismiss_on_select: true,
@@ -2336,6 +2667,7 @@ impl ChatWidget {
         mode: SecurityReviewMode,
         include_paths: Vec<String>,
         scope_prompt: Option<String>,
+        force_new: bool,
     ) {
         if self.bottom_pane.is_task_running() || self.security_review_context.is_some() {
             self.add_error_message(
@@ -2345,8 +2677,6 @@ impl ChatWidget {
             return;
         }
 
-        self.clear_security_review_follow_up();
-
         let repo_path = self.config.cwd.clone();
         if !repo_path.exists() {
             self.add_error_message(format!(
@@ -2355,6 +2685,14 @@ impl ChatWidget {
             ));
             return;
         }
+
+        let storage_root = security_review_storage_root(&repo_path);
+        if !force_new && let Some(candidate) = latest_security_review_candidate(&storage_root) {
+            self.prompt_security_review_resume(mode, include_paths, scope_prompt, candidate);
+            return;
+        }
+
+        self.clear_security_review_follow_up();
 
         let mut resolved_paths: Vec<PathBuf> = Vec::new();
         let mut display_paths: Vec<String> = Vec::new();
@@ -2399,8 +2737,29 @@ impl ChatWidget {
         let context_paths = display_paths.clone();
         // Do not echo the auto-scope prompt into the scope list; keep the header concise.
 
+        if let Err(err) = fs::create_dir_all(&storage_root) {
+            self.add_error_message(format!(
+                "Failed to prepare security review output directory {}: {err}",
+                storage_root.display()
+            ));
+            return;
+        }
+
         let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
-        let output_root = repo_path.join("appsec_review").join(timestamp);
+        let mut output_root = storage_root.join(&timestamp);
+        let mut collision_counter: usize = 1;
+        while output_root.exists() {
+            let candidate = format!("{timestamp}-{collision_counter:02}");
+            output_root = storage_root.join(candidate);
+            collision_counter = collision_counter.saturating_add(1);
+        }
+        if let Err(err) = fs::create_dir_all(&output_root) {
+            self.add_error_message(format!(
+                "Failed to create security review output directory {}: {err}",
+                output_root.display()
+            ));
+            return;
+        }
 
         self.bottom_pane.set_task_running(true);
         self.bottom_pane
@@ -2427,7 +2786,7 @@ impl ChatWidget {
 
         self.security_review_context = Some(SecurityReviewContext {
             mode,
-            include_paths: context_paths,
+            include_paths: context_paths.clone(),
             output_root: output_root.clone(),
             repo_path: repo_path.clone(),
             model: self.config.model.clone(),
@@ -2435,6 +2794,8 @@ impl ChatWidget {
             started_at: Instant::now(),
             last_log: None,
             thinking_lines: Vec::new(),
+            log_lines: Vec::new(),
+            progress_percent: Some(0),
         });
 
         let annotated_scope_prompt = if matches!(mode, SecurityReviewMode::Bugs) {
@@ -2448,6 +2809,7 @@ impl ChatWidget {
         let request = SecurityReviewRequest {
             repo_path,
             include_paths: resolved_paths,
+            scope_display_paths: context_paths,
             output_root,
             mode,
             include_spec_in_bug_analysis: true,
@@ -2527,6 +2889,7 @@ impl ChatWidget {
                     mode,
                     include_paths,
                     scope_prompt: scope_prompt_override,
+                    force_new: false,
                 });
             }),
         );
@@ -2556,36 +2919,40 @@ impl ChatWidget {
             if message.starts_with("Still waiting for bug analysis response from model") {
                 return;
             }
+            let previous_percent = ctx.progress_percent;
             // Extract trailing percent in the form " - NN%" and move it to the front.
             // Enhance with a small 10-slot progress bar.
             let mut percent_prefix = String::new();
             let mut core = message.as_str();
-            if let Some(idx) = message.rfind(" - ") {
-                let tail = &message[idx + 3..];
-                if let Some(no_dot) = tail
-                    .strip_suffix('.')
-                    .or_else(|| Some(tail).filter(|t| !t.is_empty()))
-                    && let Some(num_str) = no_dot.strip_suffix('%').filter(|s| !s.is_empty())
-                    && num_str.chars().all(|c| c.is_ascii_digit())
-                {
-                    let pct: usize = num_str.parse::<usize>().unwrap_or(0).min(100);
-                    let width = 10usize;
-                    let filled = (pct * width) / 100;
-                    let mut bar = String::new();
-                    if filled > 0 {
-                        bar.push_str(&"█".repeat(filled));
+            let progress_changed;
+            if let Some((percent, trimmed_core)) = parse_progress_suffix(message.as_str()) {
+                ctx.progress_percent = Some(percent);
+                percent_prefix = build_percent_prefix(percent);
+                core = trimmed_core;
+                progress_changed = previous_percent != Some(percent);
+            } else {
+                ctx.progress_percent = None;
+                progress_changed = previous_percent.is_some();
+            }
+
+            let mut added_to_log = false;
+            if !message.starts_with("Model reasoning:") {
+                let trimmed_message = strip_progress_prefix(message.as_str()).trim();
+                let is_explicit_progress = trimmed_message.starts_with("File triage progress:")
+                    || trimmed_message.starts_with("Bug analysis progress:");
+                if !trimmed_message.is_empty() && !is_explicit_progress {
+                    ctx.log_lines.push(truncate_text(trimmed_message, 160));
+                    if ctx.log_lines.len() > 5 {
+                        let excess = ctx.log_lines.len() - 5;
+                        ctx.log_lines.drain(0..excess);
                     }
-                    if width > filled {
-                        bar.push_str(&"░".repeat(width - filled));
-                    }
-                    percent_prefix = format!("{pct}% {bar} ");
-                    core = &message[..idx];
+                    added_to_log = true;
                 }
             }
 
             ctx.last_log = Some(message.clone());
             // Compact known progress messages: show counts succinctly.
-            let mut display_core = core.trim();
+            let mut display_core = strip_progress_prefix(core).trim();
             if let Some(rest) = display_core
                 .strip_prefix("File triage progress:")
                 .or_else(|| display_core.strip_prefix("Bug analysis progress:"))
@@ -2625,10 +2992,14 @@ impl ChatWidget {
                         progress: None,
                         thinking: ctx.thinking_lines.clone(),
                         tool_calls: Vec::new(),
+                        logs: ctx.log_lines.clone(),
                     },
                 );
             } else {
-                self.bottom_pane.update_status_header(header);
+                self.bottom_pane.update_status_logs(ctx.log_lines.clone());
+                if !added_to_log || !percent_prefix.is_empty() || progress_changed {
+                    self.bottom_pane.update_status_header(header);
+                }
             }
         }
     }
@@ -2647,16 +3018,30 @@ impl ChatWidget {
                 SecurityReviewCommandState::NoMatches => "no matches",
                 SecurityReviewCommandState::Error => "error",
             };
-            let mut text = summary;
+            let mut header_text = summary.clone();
             if let Some(first) = preview.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                text = format!("{text} — {first}");
+                header_text = format!("{header_text} — {first}");
             }
-            let truncated = truncate_text(&text, 96);
-            self.bottom_pane.update_status_header(format!(
-                "Security review ({}) — [{state_label}] {truncated}",
-                ctx.mode.as_str()
-            ));
-            ctx.last_log = Some(text);
+            let truncated = truncate_text(&header_text, 96);
+            // Also surface a sub-section under the status with the tool call and a few preview lines.
+            let mut tool_calls: Vec<String> = Vec::new();
+            tool_calls.push(format!("• {summary}"));
+            for line in &preview {
+                tool_calls.push(format!("  {line}"));
+            }
+            self.bottom_pane.update_status_snapshot(
+                crate::status_indicator_widget::StatusSnapshot {
+                    header: format!(
+                        "Security review ({}) — [{state_label}] {truncated}",
+                        ctx.mode.as_str()
+                    ),
+                    progress: None,
+                    thinking: ctx.thinking_lines.clone(),
+                    tool_calls,
+                    logs: ctx.log_lines.clone(),
+                },
+            );
+            ctx.last_log = Some(header_text);
         }
     }
 
@@ -2665,6 +3050,20 @@ impl ChatWidget {
         self.bottom_pane
             .update_status_header(String::from("Working"));
         self.security_review_task = None;
+
+        // Merge security review token usage into the session total so the
+        // CLI exit summary reflects it, matching regular Codex sessions.
+        if !result.token_usage.is_zero() {
+            if let Some(info) = self.token_info.as_mut() {
+                info.append_last_usage(&result.token_usage);
+            } else {
+                self.token_info = codex_core::protocol::TokenUsageInfo::new_or_append(
+                    &None,
+                    &Some(result.token_usage.clone()),
+                    self.config.model_context_window,
+                );
+            }
+        }
 
         let context = self.security_review_context.take();
         let (mode, scope_paths, _output_root, repo_path, model, provider, started_at, last_log) =
@@ -2727,6 +3126,13 @@ impl ChatWidget {
             ]
             .into(),
         );
+        if !result.token_usage.is_zero() {
+            let usage_line = format!(
+                "{}",
+                codex_core::protocol::FinalOutput::from(result.token_usage.clone())
+            );
+            summary_lines.push(vec!["  • ".into(), usage_line.into()].into());
+        }
         summary_lines.push(
             vec![
                 "  • ".into(),
@@ -2753,6 +3159,45 @@ impl ChatWidget {
             );
         }
         summary_lines.extend(artifact_lines);
+        if let Some(api_path) = result
+            .api_overview_path
+            .as_ref()
+            .map(|path| display_path_for(path, &repo_path))
+        {
+            summary_lines.push(
+                vec![
+                    "  • ".into(),
+                    format!("API entry points: {}", api_path.as_str()).into(),
+                ]
+                .into(),
+            );
+        }
+        if let Some(class_json) = result
+            .classification_json_path
+            .as_ref()
+            .map(|path| display_path_for(path, &repo_path))
+        {
+            summary_lines.push(
+                vec![
+                    "  • ".into(),
+                    format!("Data classification (JSONL): {}", class_json.as_str()).into(),
+                ]
+                .into(),
+            );
+        }
+        if let Some(class_table) = result
+            .classification_table_path
+            .as_ref()
+            .map(|path| display_path_for(path, &repo_path))
+        {
+            summary_lines.push(
+                vec![
+                    "  • ".into(),
+                    format!("Data classification (markdown): {}", class_table.as_str()).into(),
+                ]
+                .into(),
+            );
+        }
         if let Some(last_log) = last_log {
             summary_lines
                 .push(vec!["  • ".into(), format!("Last update: {last_log}").dim()].into());
@@ -2783,6 +3228,10 @@ impl ChatWidget {
             bugs_path: result.bugs_path.clone(),
             report_path: result.report_path.clone(),
             report_html_path: result.report_html_path.clone(),
+            metadata_path: result.metadata_path.clone(),
+            api_overview_path: result.api_overview_path.clone(),
+            classification_json_path: result.classification_json_path.clone(),
+            classification_table_path: result.classification_table_path.clone(),
         });
 
         let follow_up_path = match mode {

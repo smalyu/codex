@@ -897,7 +897,24 @@
       if (node.nodeType === 1) {
         const tag = node.tagName ? node.tagName.toLowerCase() : '';
         if (/^h[1-6]$/.test(tag)) break;
-        parts.push(node.innerText || node.textContent || '');
+        if (node.classList && node.classList.contains('ticket-box')) {
+          node = node.nextSibling;
+          continue;
+        }
+        if (tag === 'button' || tag === 'input' || tag === 'select' || tag === 'textarea') {
+          node = node.nextSibling;
+          continue;
+        }
+        if (tag === 'pre') {
+          const code = node.querySelector('code');
+          const codeText = code ? code.textContent || '' : node.textContent || '';
+          const trimmed = codeText.trimEnd();
+          if (trimmed) parts.push(trimmed);
+          node = node.nextSibling;
+          continue;
+        }
+        const text = (node.innerText || node.textContent || '').trim();
+        if (text) parts.push(text);
       } else if (node.nodeType === 3) {
         const t = (node.textContent || '').trim();
         if (t) parts.push(t);
