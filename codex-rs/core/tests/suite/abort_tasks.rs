@@ -105,7 +105,7 @@ async fn interrupt_tool_records_history_entries() {
     let fixture = test_codex().build(&server).await.unwrap();
     let codex = Arc::clone(&fixture.codex);
 
-    let wait_timeout = Duration::from_secs(0.1);
+    let wait_timeout = Duration::from_millis(100);
 
     codex
         .submit(Op::UserInput {

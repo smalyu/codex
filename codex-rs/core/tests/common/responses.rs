@@ -98,7 +98,8 @@ impl ResponsesRequest {
     /// If present, returns the `output` string of the `function_call_output`
     /// entry matching `call_id` in this request's `input`.
     pub fn function_call_output_text(&self, call_id: &str) -> Option<String> {
-        let item = self.input().iter().find(|item| {
+        let binding = self.input();
+        let item = binding.iter().find(|item| {
             item.get("type").and_then(Value::as_str) == Some("function_call_output")
                 && item.get("call_id").and_then(Value::as_str) == Some(call_id)
         })?;
