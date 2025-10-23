@@ -855,7 +855,7 @@ impl Session {
 
     /// Records input items: always append to conversation history and
     /// persist these response items to rollout.
-    async fn record_conversation_items(&self, items: &[ResponseItem]) {
+    pub(crate) async fn record_conversation_items(&self, items: &[ResponseItem]) {
         self.record_into_history(items).await;
         self.persist_rollout_response_items(items).await;
     }
@@ -1608,13 +1608,14 @@ pub(crate) async fn run_task(
                 let token_limit_reached = total_usage_tokens
                     .map(|tokens| tokens >= limit)
                     .unwrap_or(false);
-                let (responses, items_to_record_in_conversation_history) = process_items(
-                    processed_items,
-                    is_review_mode,
-                    &mut review_thread_history,
-                    &sess,
-                )
-                .await;
+                let (responses, items_to_record_in_conversation_history) =
+                    crate::response_processing::process_items(
+                        processed_items,
+                        is_review_mode,
+                        &mut review_thread_history,
+                        &sess,
+                    )
+                    .await;
 
                 if token_limit_reached {
                     if auto_compact_recently_attempted {
@@ -1656,7 +1657,7 @@ pub(crate) async fn run_task(
             Err(CodexErr::TurnAborted {
                 dangling_artifacts: processed_items,
             }) => {
-                let _ = process_items(
+                let _ = crate::response_processing::process_items(
                     processed_items,
                     is_review_mode,
                     &mut review_thread_history,
@@ -1695,107 +1696,6 @@ pub(crate) async fn run_task(
     }
 
     last_agent_message
-}
-
-async fn process_items(
-    processed_items: Vec<ProcessedResponseItem>,
-    is_review_mode: bool,
-    review_thread_history: &mut ConversationHistory,
-    sess: &Session,
-) -> (Vec<ResponseInputItem>, Vec<ResponseItem>) {
-    let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
-    let mut responses = Vec::<ResponseInputItem>::new();
-    for processed_response_item in processed_items {
-        let ProcessedResponseItem { item, response } = processed_response_item;
-        match (&item, &response) {
-            (ResponseItem::Message { role, .. }, None) if role == "assistant" => {
-                // If the model returned a message, we need to record it.
-                items_to_record_in_conversation_history.push(item);
-            }
-            (
-                ResponseItem::LocalShellCall { .. },
-                Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
-            ) => {
-                items_to_record_in_conversation_history.push(item);
-                items_to_record_in_conversation_history.push(ResponseItem::FunctionCallOutput {
-                    call_id: call_id.clone(),
-                    output: output.clone(),
-                });
-            }
-            (
-                ResponseItem::FunctionCall { .. },
-                Some(ResponseInputItem::FunctionCallOutput { call_id, output }),
-            ) => {
-                items_to_record_in_conversation_history.push(item);
-                items_to_record_in_conversation_history.push(ResponseItem::FunctionCallOutput {
-                    call_id: call_id.clone(),
-                    output: output.clone(),
-                });
-            }
-            (
-                ResponseItem::CustomToolCall { .. },
-                Some(ResponseInputItem::CustomToolCallOutput { call_id, output }),
-            ) => {
-                items_to_record_in_conversation_history.push(item);
-                items_to_record_in_conversation_history.push(ResponseItem::CustomToolCallOutput {
-                    call_id: call_id.clone(),
-                    output: output.clone(),
-                });
-            }
-            (
-                ResponseItem::FunctionCall { .. },
-                Some(ResponseInputItem::McpToolCallOutput { call_id, result }),
-            ) => {
-                items_to_record_in_conversation_history.push(item);
-                let output = match result {
-                    Ok(call_tool_result) => {
-                        convert_call_tool_result_to_function_call_output_payload(call_tool_result)
-                    }
-                    Err(err) => FunctionCallOutputPayload {
-                        content: err.clone(),
-                        success: Some(false),
-                    },
-                };
-                items_to_record_in_conversation_history.push(ResponseItem::FunctionCallOutput {
-                    call_id: call_id.clone(),
-                    output,
-                });
-            }
-            (
-                ResponseItem::Reasoning {
-                    id,
-                    summary,
-                    content,
-                    encrypted_content,
-                },
-                None,
-            ) => {
-                items_to_record_in_conversation_history.push(ResponseItem::Reasoning {
-                    id: id.clone(),
-                    summary: summary.clone(),
-                    content: content.clone(),
-                    encrypted_content: encrypted_content.clone(),
-                });
-            }
-            _ => {
-                warn!("Unexpected response item: {item:?} with response: {response:?}");
-            }
-        };
-        if let Some(response) = response {
-            responses.push(response);
-        }
-    }
-
-    // Only attempt to take the lock if there is something to record.
-    if !items_to_record_in_conversation_history.is_empty() {
-        if is_review_mode {
-            review_thread_history.record_items(items_to_record_in_conversation_history.iter());
-        } else {
-            sess.record_conversation_items(&items_to_record_in_conversation_history)
-                .await;
-        }
-    }
-    (responses, items_to_record_in_conversation_history)
 }
 
 /// Parse the review output; when not valid JSON, build a structured
@@ -2193,7 +2093,7 @@ pub(super) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -
         }
     })
 }
-fn convert_call_tool_result_to_function_call_output_payload(
+pub(crate) fn convert_call_tool_result_to_function_call_output_payload(
     call_tool_result: &CallToolResult,
 ) -> FunctionCallOutputPayload {
     let CallToolResult {

@@ -54,6 +54,7 @@ pub enum SandboxErr {
 
 #[derive(Error, Debug)]
 pub enum CodexErr {
+    // todo(aibrahim): git rid of this error carrying the dangling artifacts
     #[error("turn aborted")]
     TurnAborted {
         dangling_artifacts: Vec<ProcessedResponseItem>,

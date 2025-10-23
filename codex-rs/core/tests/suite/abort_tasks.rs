@@ -105,7 +105,7 @@ async fn interrupt_tool_records_history_entries() {
     let fixture = test_codex().build(&server).await.unwrap();
     let codex = Arc::clone(&fixture.codex);
 
-    let wait_timeout = Duration::from_secs(5);
+    let wait_timeout = Duration::from_secs(0.1);
 
     codex
         .submit(Op::UserInput {
@@ -150,42 +150,18 @@ async fn interrupt_tool_records_history_entries() {
 
     let requests = response_mock.requests();
     assert!(
-        requests.len() >= 2,
-        "expected at least two calls to the responses API"
+        requests.len() == 2,
+        "expected two calls to the responses API, got {}",
+        requests.len()
     );
 
-    let mut call_seen = false;
-    let mut abort_seen = false;
-
-    for request in requests {
-        let input = request.input();
-        for window in input.windows(2) {
-            let current = &window[0];
-            let next = &window[1];
-            if current.get("type").and_then(|v| v.as_str()) == Some("function_call")
-                && current.get("call_id").and_then(|v| v.as_str()) == Some(call_id)
-            {
-                call_seen = true;
-                if next.get("type").and_then(|v| v.as_str()) == Some("function_call_output")
-                    && next.get("call_id").and_then(|v| v.as_str()) == Some(call_id)
-                {
-                    let content_matches =
-                        next.get("output").and_then(serde_json::Value::as_str) == Some("aborted");
-                    if content_matches {
-                        abort_seen = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if call_seen && abort_seen {
-            break;
-        }
-    }
-
-    assert!(call_seen, "function call not recorded in responses payload");
     assert!(
-        abort_seen,
+        response_mock.saw_function_call(call_id),
+        "function call not recorded in responses payload"
+    );
+    assert_eq!(
+        response_mock.function_call_output_text(call_id).as_deref(),
+        Some("aborted"),
         "aborted function call output not recorded in responses payload"
     );
 }
