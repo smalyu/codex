@@ -543,8 +543,12 @@ pub struct ItemCompletedEvent {
     pub item: TurnItem,
 }
 
-impl ItemCompletedEvent {
-    pub fn to_legacy_events(&self, show_raw_agent_reasoning: bool) -> Vec<EventMsg> {
+pub trait HasLegacyEvent {
+    fn as_legacy_events(&self, show_raw_agent_reasoning: bool) -> Vec<EventMsg>;
+}
+
+impl HasLegacyEvent for ItemCompletedEvent {
+    fn as_legacy_events(&self, show_raw_agent_reasoning: bool) -> Vec<EventMsg> {
         self.item.as_legacy_events(show_raw_agent_reasoning)
     }
 }
@@ -557,11 +561,11 @@ pub struct AgentMessageContentDeltaEvent {
     pub delta: String,
 }
 
-impl AgentMessageContentDeltaEvent {
-    pub fn to_legacy_event(&self) -> EventMsg {
-        EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+impl HasLegacyEvent for AgentMessageContentDeltaEvent {
+    fn as_legacy_events(&self, _: bool) -> Vec<EventMsg> {
+        vec![EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
             delta: self.delta.clone(),
-        })
+        })]
     }
 }
 
@@ -573,11 +577,11 @@ pub struct ReasoningContentDeltaEvent {
     pub delta: String,
 }
 
-impl ReasoningContentDeltaEvent {
-    pub fn to_legacy_event(&self) -> EventMsg {
-        EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent {
+impl HasLegacyEvent for ReasoningContentDeltaEvent {
+    fn as_legacy_events(&self, _: bool) -> Vec<EventMsg> {
+        vec![EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent {
             delta: self.delta.clone(),
-        })
+        })]
     }
 }
 
@@ -589,11 +593,31 @@ pub struct ReasoningRawContentDeltaEvent {
     pub delta: String,
 }
 
-impl ReasoningRawContentDeltaEvent {
-    pub fn to_legacy_event(&self) -> EventMsg {
-        EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
-            delta: self.delta.clone(),
-        })
+impl HasLegacyEvent for ReasoningRawContentDeltaEvent {
+    fn as_legacy_events(&self, _: bool) -> Vec<EventMsg> {
+        vec![EventMsg::AgentReasoningRawContentDelta(
+            AgentReasoningRawContentDeltaEvent {
+                delta: self.delta.clone(),
+            },
+        )]
+    }
+}
+
+impl HasLegacyEvent for EventMsg {
+    fn as_legacy_events(&self, show_raw_agent_reasoning: bool) -> Vec<EventMsg> {
+        match self {
+            EventMsg::ItemCompleted(event) => event.as_legacy_events(show_raw_agent_reasoning),
+            EventMsg::AgentMessageContentDelta(event) => {
+                event.as_legacy_events(show_raw_agent_reasoning)
+            }
+            EventMsg::ReasoningContentDelta(event) => {
+                event.as_legacy_events(show_raw_agent_reasoning)
+            }
+            EventMsg::ReasoningRawContentDelta(event) => {
+                event.as_legacy_events(show_raw_agent_reasoning)
+            }
+            _ => Vec::new(),
+        }
     }
 }
 
