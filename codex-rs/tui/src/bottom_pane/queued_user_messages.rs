@@ -27,7 +27,7 @@ impl QueuedUserMessages {
             return Box::new(());
         }
 
-        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut lines = vec![];
 
         for message in &self.messages {
             let wrapped = word_wrap_lines(
