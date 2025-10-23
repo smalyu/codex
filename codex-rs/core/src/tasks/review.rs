@@ -4,12 +4,14 @@ use async_trait::async_trait;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::ReviewOutputEvent;
 use codex_protocol::protocol::TaskCompleteEvent;
 use tokio_util::sync::CancellationToken;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::codex_delegate::AgentEvent;
 use crate::codex_delegate::run_codex_conversation;
 // use crate::config::Config; // no longer needed directly; use session.base_config()
 use crate::review_format::format_review_findings_block;
@@ -46,25 +48,52 @@ impl SessionTask for ReviewTask {
                 Ok(r) => r,
                 Err(_) => return None,
             };
-        while let Ok(event) = receiver.recv().await {
-            session
-                .clone_session()
-                .send_event(ctx.as_ref(), event.clone())
-                .await;
-            if let EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) = event {
-                exit_review_mode(
-                    session.clone_session(),
-                    last_agent_message.as_deref().map(parse_review_output_event),
-                )
-                .await;
+        while let Ok(agent_event) = receiver.recv().await {
+            match agent_event {
+                AgentEvent::EventMsg(event) => {
+                    session
+                        .clone_session()
+                        .send_event(ctx.as_ref(), event.clone())
+                        .await;
+                    if let EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) = event
+                    {
+                        exit_review_mode(
+                            session.clone_session(),
+                            last_agent_message.as_deref().map(parse_review_output_event),
+                            ctx.clone(),
+                        )
+                        .await;
+                    }
+                }
+                AgentEvent::ExecApprovalRequest(event, tx) => {
+                    let decision = session
+                        .clone_session()
+                        .request_command_approval(
+                            ctx.as_ref(),
+                            event.call_id.clone(),
+                            event.command.clone(),
+                            event.cwd.clone(),
+                            event.reason.clone(),
+                        )
+                        .await;
+                    let _ = tx.send(decision);
+                }
+                AgentEvent::PatchApprovalRequest(event, tx) => {
+                    // For now, forward the request to the UI via EventMsg and deny by default if no response is wired here.
+                    session
+                        .clone_session()
+                        .send_event(ctx.as_ref(), EventMsg::ApplyPatchApprovalRequest(event))
+                        .await;
+                    let _ = tx.send(codex_protocol::protocol::ReviewDecision::Denied);
+                }
             }
         }
 
         Some("".to_string())
     }
 
-    async fn abort(&self, session: Arc<SessionTaskContext>, _ctx: Arc<TurnContext>) {
-        exit_review_mode(session.clone_session(), None).await;
+    async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
+        exit_review_mode(session.clone_session(), None, ctx).await;
     }
 }
 
@@ -73,11 +102,10 @@ impl SessionTask for ReviewTask {
 pub(crate) async fn exit_review_mode(
     session: Arc<Session>,
     review_output: Option<ReviewOutputEvent>,
+    ctx: Arc<TurnContext>,
 ) {
-    // ExitedReviewMode event can be emitted by the caller if needed.
-
     let mut user_message = String::new();
-    if let Some(out) = review_output {
+    if let Some(out) = review_output.clone() {
         let mut findings_str = String::new();
         let text = out.overall_explanation.trim();
         if !text.is_empty() {
@@ -113,6 +141,12 @@ pub(crate) async fn exit_review_mode(
             role: "user".to_string(),
             content: vec![ContentItem::InputText { text: user_message }],
         }])
+        .await;
+    session
+        .send_event(
+            ctx.as_ref(),
+            EventMsg::ExitedReviewMode(ExitedReviewModeEvent { review_output }),
+        )
         .await;
 }
 
