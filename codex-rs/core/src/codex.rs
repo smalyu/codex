@@ -10,6 +10,7 @@ use crate::function_tool::FunctionCallError;
 use crate::mcp::auth::McpAuthStatusEntry;
 use crate::parse_command::parse_command;
 use crate::parse_turn_item;
+use crate::response_processing::process_items;
 use crate::review_format::format_review_findings_block;
 use crate::terminal;
 use crate::user_notification::UserNotifier;
@@ -1608,14 +1609,13 @@ pub(crate) async fn run_task(
                 let token_limit_reached = total_usage_tokens
                     .map(|tokens| tokens >= limit)
                     .unwrap_or(false);
-                let (responses, items_to_record_in_conversation_history) =
-                    crate::response_processing::process_items(
-                        processed_items,
-                        is_review_mode,
-                        &mut review_thread_history,
-                        &sess,
-                    )
-                    .await;
+                let (responses, items_to_record_in_conversation_history) = process_items(
+                    processed_items,
+                    is_review_mode,
+                    &mut review_thread_history,
+                    &sess,
+                )
+                .await;
 
                 if token_limit_reached {
                     if auto_compact_recently_attempted {
@@ -1657,7 +1657,7 @@ pub(crate) async fn run_task(
             Err(CodexErr::TurnAborted {
                 dangling_artifacts: processed_items,
             }) => {
-                let _ = crate::response_processing::process_items(
+                let _ = process_items(
                     processed_items,
                     is_review_mode,
                     &mut review_thread_history,
