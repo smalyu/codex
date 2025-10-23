@@ -280,7 +280,7 @@ impl CodexAuth {
     }
 
     /// Loads the available auth information using an explicit credential store mode.
-    pub fn from_codex_home(
+    pub fn from_auth_storage(
         codex_home: &Path,
         store_mode: AuthCredentialsStoreMode,
     ) -> std::io::Result<Option<CodexAuth>> {
@@ -461,7 +461,8 @@ pub fn save_auth(
 }
 
 pub async fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> {
-    let Some(auth) = load_auth(&config.codex_home, true)? else {
+    let store_mode = config.auth_credentials_store_mode;
+    let Some(auth) = load_auth(&config.codex_home, true, store_mode)? else {
         return Ok(());
     };
 
@@ -480,7 +481,7 @@ pub async fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> 
         };
 
         if let Some(message) = method_violation {
-            return logout_with_message(&config.codex_home, message);
+            return logout_with_message(&config.codex_home, message, store_mode);
         }
     }
 
@@ -497,6 +498,7 @@ pub async fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> 
                     format!(
                         "Failed to load ChatGPT credentials while enforcing workspace restrictions: {err}. Logging out."
                     ),
+                    store_mode,
                 );
             }
         };
@@ -512,15 +514,19 @@ pub async fn enforce_login_restrictions(config: &Config) -> std::io::Result<()> 
                     "Login is restricted to workspace {expected_account_id}, but current credentials lack a workspace identifier. Logging out."
                 ),
             };
-            return logout_with_message(&config.codex_home, message);
+            return logout_with_message(&config.codex_home, message, store_mode);
         }
     }
 
     Ok(())
 }
 
-fn logout_with_message(codex_home: &Path, message: String) -> std::io::Result<()> {
-    match logout(codex_home) {
+fn logout_with_message(
+    codex_home: &Path,
+    message: String,
+    store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<()> {
+    match logout(codex_home, store_mode) {
         Ok(_) => Err(std::io::Error::other(message)),
         Err(err) => Err(std::io::Error::other(format!(
             "{message}. Failed to remove auth.json: {err}"
@@ -806,7 +812,8 @@ mod tests {
     #[test]
     fn missing_auth_json_returns_none() {
         let dir = tempdir().unwrap();
-        let auth = CodexAuth::from_codex_home(dir.path()).expect("call should succeed");
+        let auth = CodexAuth::from_auth_storage(dir.path(), AuthCredentialsStoreMode::File)
+            .expect("call should succeed");
         assert_eq!(auth, None);
     }
 
@@ -1210,7 +1217,7 @@ impl AuthManager {
             codex_home: PathBuf::new(),
             inner: RwLock::new(cached),
             enable_codex_api_key_env: false,
-            store_mode: AuthCredentialsStoreMode::Auto,
+            store_mode: AuthCredentialsStoreMode::File,
         })
     }
 
@@ -1270,5 +1277,16 @@ impl AuthManager {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Log out by deleting the on-disk auth.json and/or from keychain. Returns Ok(true)
+    /// if a file was removed, Ok(false) if no auth file existed. On success,
+    /// reloads the in‑memory auth cache so callers immediately observe the
+    /// unauthenticated state.
+    pub fn logout(&self) -> std::io::Result<bool> {
+        let removed = super::auth::logout(&self.codex_home, self.store_mode)?;
+        // Always reload to clear any cached auth (even if file absent).
+        self.reload();
+        Ok(removed)
     }
 }

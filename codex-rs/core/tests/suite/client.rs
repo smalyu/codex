@@ -1,4 +1,5 @@
 use codex_app_server_protocol::AuthMode;
+use codex_core::AuthCredentialsStoreMode;
 use codex_core::CodexAuth;
 use codex_core::ContentItem;
 use codex_core::ConversationManager;
@@ -524,11 +525,12 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
     let mut config = load_default_config_for_test(&codex_home);
     config.model_provider = model_provider;
 
-    let auth_manager = match CodexAuth::from_codex_home(codex_home.path()) {
-        Ok(Some(auth)) => codex_core::AuthManager::from_auth_for_testing(auth),
-        Ok(None) => panic!("No CodexAuth found in codex_home"),
-        Err(e) => panic!("Failed to load CodexAuth: {e}"),
-    };
+    let auth_manager =
+        match CodexAuth::from_auth_storage(codex_home.path(), AuthCredentialsStoreMode::File) {
+            Ok(Some(auth)) => codex_core::AuthManager::from_auth_for_testing(auth),
+            Ok(None) => panic!("No CodexAuth found in codex_home"),
+            Err(e) => panic!("Failed to load CodexAuth: {e}"),
+        };
     let conversation_manager = ConversationManager::new(auth_manager, SessionSource::Exec);
     let NewConversation {
         conversation: codex,
