@@ -974,6 +974,7 @@ struct BugSummary {
     validation: BugValidationState,
     source_path: PathBuf,
     markdown: String,
+    author_github: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -998,6 +999,7 @@ pub(crate) struct SecurityReviewBug {
     pub verification_types: Vec<String>,
     pub vulnerability_tag: Option<String>,
     pub validation: BugValidationState,
+    pub assignee_github: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1122,6 +1124,7 @@ fn build_bug_records(
             validation,
             source_path: _,
             markdown,
+            author_github,
         } = summary;
 
         let bug = SecurityReviewBug {
@@ -1139,6 +1142,7 @@ fn build_bug_records(
             verification_types,
             vulnerability_tag,
             validation,
+            assignee_github: author_github,
         };
         let original_markdown = detail_lookup.remove(&bug.summary_id).unwrap_or(markdown);
         snapshots.push(BugSnapshot {
@@ -1166,6 +1170,16 @@ fn render_bug_sections(snapshots: &[BugSnapshot], git_link_info: Option<&GitLink
             composed.push_str(&format!("<a id=\"bug-{}\"></a>\n", snapshot.bug.summary_id));
             composed.push_str(&linkify_file_lines(base, git_link_info));
         }
+        // If there is no explicit Assignee/Author/Owner line, and we have a GitHub handle extracted
+        // from blame metadata, add an Assignee line to help prepopulate the UI.
+        let lower = composed.to_ascii_lowercase();
+        let has_assignee =
+            lower.contains("assignee:") || lower.contains("author:") || lower.contains("owner:");
+        if !has_assignee
+            && let Some(handle) = snapshot.bug.assignee_github.as_ref() {
+                let line = format!("\n\nAssignee: {handle}\n");
+                composed.push_str(&line);
+            }
         if !matches!(snapshot.bug.validation.status, BugValidationStatus::Pending) {
             composed.push_str("\n\n#### Validation\n");
             let status_label = validation_status_label(&snapshot.bug.validation);
@@ -5872,6 +5886,7 @@ fn extract_bug_summaries(
                 validation: BugValidationState::default(),
                 source_path: source_path.to_path_buf(),
                 markdown: String::new(),
+                author_github: None,
             });
             current_lines.push(line.to_string());
             continue;
@@ -6490,6 +6505,7 @@ async fn enrich_bug_summaries_with_blame(
 
         let mut commit: Option<String> = None;
         let mut author: Option<String> = None;
+        let mut author_mail: Option<String> = None;
         let mut author_time: Option<OffsetDateTime> = None;
 
         for line in text.lines() {
@@ -6508,6 +6524,14 @@ async fn enrich_bug_summaries_with_blame(
                 let trimmed = rest.trim();
                 if !trimmed.is_empty() {
                     author = Some(trimmed.to_string());
+                }
+            }
+            if author_mail.is_none()
+                && let Some(rest) = line.strip_prefix("author-mail ")
+            {
+                let trimmed = rest.trim();
+                if !trimmed.is_empty() {
+                    author_mail = Some(trimmed.to_string());
                 }
             }
             if author_time.is_none()
@@ -6541,6 +6565,11 @@ async fn enrich_bug_summaries_with_blame(
         } else {
             format!("L{start}-L{end}")
         };
+        // Try to derive a GitHub handle from the author-mail if it uses the noreply pattern.
+        if let Some(mail) = author_mail.as_ref()
+            && let Some(handle) = github_handle_from_email(mail) {
+                summary.author_github = Some(handle);
+            }
         summary.blame = Some(format!("{short_sha} {author_name} {date} {range_display}"));
         logs.push(format!(
             "Git blame for bug #{id}: {short_sha} {author_name} {date} {range}",
@@ -6549,6 +6578,34 @@ async fn enrich_bug_summaries_with_blame(
         ));
     }
     logs
+}
+
+fn github_handle_from_email(email: &str) -> Option<String> {
+    let s = email
+        .trim()
+        .trim_matches('<')
+        .trim_matches('>')
+        .to_ascii_lowercase();
+    let at_pos = s.find('@')?;
+    let (local, domain) = s.split_at(at_pos);
+    let domain = domain.trim_start_matches('@');
+    if !domain.ends_with("users.noreply.github.com") {
+        return None;
+    }
+    // Patterns:
+    //  - 12345+handle@users.noreply.github.com
+    //  - handle@users.noreply.github.com
+    let handle = if let Some((_, h)) = local.split_once('+') {
+        h
+    } else {
+        local
+    };
+    let handle = handle.trim_matches('.').trim_matches('+').trim();
+    if handle.is_empty() {
+        None
+    } else {
+        Some(format!("@{handle}"))
+    }
 }
 
 #[derive(Debug)]
