@@ -630,9 +630,15 @@ pub(crate) fn fix_mermaid_blocks(input: &str) -> String {
             let block = lines[start..end].join("\n");
             out_lines.push(lint_and_wrap(block.trim_matches('\n')));
             idx = end;
-            if idx < lines.len() && lines[idx].trim().is_empty() {
-                out_lines.push(lines[idx].clone());
-                idx += 1;
+            // Always add a blank line separator after a mermaid block to avoid
+            // back-to-back fenced blocks which some renderers mishandle.
+            if idx < lines.len() {
+                if lines[idx].trim().is_empty() {
+                    out_lines.push(lines[idx].clone());
+                    idx += 1;
+                } else {
+                    out_lines.push(String::new());
+                }
             }
             continue;
         }

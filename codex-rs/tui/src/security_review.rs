@@ -1175,11 +1175,10 @@ fn render_bug_sections(snapshots: &[BugSnapshot], git_link_info: Option<&GitLink
         let lower = composed.to_ascii_lowercase();
         let has_assignee =
             lower.contains("assignee:") || lower.contains("author:") || lower.contains("owner:");
-        if !has_assignee
-            && let Some(handle) = snapshot.bug.assignee_github.as_ref() {
-                let line = format!("\n\nAssignee: {handle}\n");
-                composed.push_str(&line);
-            }
+        if !has_assignee && let Some(handle) = snapshot.bug.assignee_github.as_ref() {
+            let line = format!("\n\nAssignee: {handle}\n");
+            composed.push_str(&line);
+        }
         if !matches!(snapshot.bug.validation.status, BugValidationStatus::Pending) {
             composed.push_str("\n\n#### Validation\n");
             let status_label = validation_status_label(&snapshot.bug.validation);
@@ -6567,9 +6566,10 @@ async fn enrich_bug_summaries_with_blame(
         };
         // Try to derive a GitHub handle from the author-mail if it uses the noreply pattern.
         if let Some(mail) = author_mail.as_ref()
-            && let Some(handle) = github_handle_from_email(mail) {
-                summary.author_github = Some(handle);
-            }
+            && let Some(handle) = github_handle_from_email(mail)
+        {
+            summary.author_github = Some(handle);
+        }
         summary.blame = Some(format!("{short_sha} {author_name} {date} {range_display}"));
         logs.push(format!(
             "Git blame for bug #{id}: {short_sha} {author_name} {date} {range}",
