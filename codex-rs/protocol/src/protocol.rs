@@ -523,6 +523,10 @@ pub enum EventMsg {
 
     ItemStarted(ItemStartedEvent),
     ItemCompleted(ItemCompletedEvent),
+
+    AgentMessageContentDelta(AgentMessageContentDeltaEvent),
+    ReasoningContentDelta(ReasoningContentDeltaEvent),
+    ReasoningRawContentDelta(ReasoningRawContentDeltaEvent),
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
@@ -537,6 +541,60 @@ pub struct ItemCompletedEvent {
     pub thread_id: ConversationId,
     pub turn_id: String,
     pub item: TurnItem,
+}
+
+impl ItemCompletedEvent {
+    pub fn to_legacy_events(&self, show_raw_agent_reasoning: bool) -> Vec<EventMsg> {
+        self.item.as_legacy_events(show_raw_agent_reasoning)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct AgentMessageContentDeltaEvent {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub delta: String,
+}
+
+impl AgentMessageContentDeltaEvent {
+    pub fn to_legacy_event(&self) -> EventMsg {
+        EventMsg::AgentMessageDelta(AgentMessageDeltaEvent {
+            delta: self.delta.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct ReasoningContentDeltaEvent {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub delta: String,
+}
+
+impl ReasoningContentDeltaEvent {
+    pub fn to_legacy_event(&self) -> EventMsg {
+        EventMsg::AgentReasoningDelta(AgentReasoningDeltaEvent {
+            delta: self.delta.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct ReasoningRawContentDeltaEvent {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub delta: String,
+}
+
+impl ReasoningRawContentDeltaEvent {
+    pub fn to_legacy_event(&self) -> EventMsg {
+        EventMsg::AgentReasoningRawContentDelta(AgentReasoningRawContentDeltaEvent {
+            delta: self.delta.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

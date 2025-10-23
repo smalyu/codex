@@ -94,7 +94,6 @@ use crate::protocol::Submission;
 use crate::protocol::TokenCountEvent;
 use crate::protocol::TokenUsage;
 use crate::protocol::TurnDiffEvent;
-use crate::protocol::WebSearchBeginEvent;
 use crate::rollout::RolloutRecorder;
 use crate::rollout::RolloutRecorderParams;
 use crate::shell;
@@ -713,12 +712,7 @@ impl Session {
         .await;
     }
 
-    async fn emit_turn_item_completed(
-        &self,
-        turn_context: &TurnContext,
-        item: TurnItem,
-        emit_raw_agent_reasoning: bool,
-    ) {
+    async fn emit_turn_item_completed(&self, turn_context: &TurnContext, item: TurnItem) {
         self.send_event(
             turn_context,
             EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -728,28 +722,17 @@ impl Session {
             }),
         )
         .await;
-        self.emit_turn_item_legacy_events(turn_context, &item, emit_raw_agent_reasoning)
-            .await;
+        self.emit_turn_item_legacy_events(turn_context, &item).await;
     }
 
-    async fn emit_turn_item_started_completed(
-        &self,
-        turn_context: &TurnContext,
-        item: TurnItem,
-        emit_raw_agent_reasoning: bool,
-    ) {
+    async fn emit_turn_item_started_completed(&self, turn_context: &TurnContext, item: TurnItem) {
         self.emit_turn_item_started(turn_context, &item).await;
-        self.emit_turn_item_completed(turn_context, item, emit_raw_agent_reasoning)
-            .await;
+        self.emit_turn_item_completed(turn_context, item).await;
     }
 
-    async fn emit_turn_item_legacy_events(
-        &self,
-        turn_context: &TurnContext,
-        item: &TurnItem,
-        emit_raw_agent_reasoning: bool,
-    ) {
-        for event in item.as_legacy_events(emit_raw_agent_reasoning) {
+    async fn emit_turn_item_legacy_events(&self, turn_context: &TurnContext, item: &TurnItem) {
+        let show_raw_agent_reasoning = self.show_raw_agent_reasoning();
+        for event in item.as_legacy_events(show_raw_agent_reasoning) {
             self.send_event(turn_context, event).await;
         }
     }
@@ -1004,7 +987,7 @@ impl Session {
         let turn_item = parse_turn_item(&response_item);
 
         if let Some(item @ TurnItem::UserMessage(_)) = turn_item {
-            self.emit_turn_item_started_completed(turn_context, item, false)
+            self.emit_turn_item_started_completed(turn_context, item)
                 .await;
         }
     }
@@ -2027,6 +2010,8 @@ async fn try_run_turn(
             output.push_back(future::ready(Ok(response_item)).boxed());
         };
 
+        let mut current_turn_item: Option<TurnItem> = None;
+
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
@@ -2048,14 +2033,18 @@ async fn try_run_turn(
                         );
                     }
                     Ok(None) => {
-                        let response = handle_non_tool_response_item(
-                            sess.as_ref(),
-                            Arc::clone(&turn_context),
-                            item.clone(),
-                            sess.show_raw_agent_reasoning(),
-                        )
-                        .await?;
-                        add_completed(ProcessedResponseItem { item, response });
+                        let turn_item =
+                            handle_non_tool_response_item(&turn_context, item.clone()).await;
+
+                        if let Some(turn_item) = turn_item {
+                            sess.emit_turn_item_started_completed(turn_context.as_ref(), turn_item)
+                                .await;
+                        }
+
+                        add_completed(ProcessedResponseItem {
+                            item,
+                            response: None,
+                        });
                     }
                     Err(FunctionCallError::MissingLocalShellCallId) => {
                         let msg = "LocalShellCall without call_id or id";
@@ -2096,14 +2085,14 @@ async fn try_run_turn(
                     }
                 }
             }
-            ResponseEvent::WebSearchCallBegin { call_id } => {
-                let _ = sess
-                    .tx_event
-                    .send(Event {
-                        id: turn_context.sub_id.clone(),
-                        msg: EventMsg::WebSearchBegin(WebSearchBeginEvent { call_id }),
-                    })
-                    .await;
+            ResponseEvent::OutputItemAdded(item) => {
+                let turn_item = handle_non_tool_response_item(&turn_context, item.clone()).await;
+
+                if let Some(turn_item) = turn_item {
+                    sess.emit_turn_item_started(turn_context.as_ref(), &turn_item)
+                        .await;
+                    current_turn_item = Some(turn_item);
+                }
             }
             ResponseEvent::RateLimits(snapshot) => {
                 // Update internal state with latest rate limits, but defer sending until
@@ -2171,40 +2160,27 @@ async fn try_run_turn(
 }
 
 async fn handle_non_tool_response_item(
-    sess: &Session,
-    turn_context: Arc<TurnContext>,
+    turn_context: &TurnContext,
     item: ResponseItem,
-    show_raw_agent_reasoning: bool,
-) -> CodexResult<Option<ResponseInputItem>> {
+) -> Option<TurnItem> {
     debug!(?item, "Output item");
 
     match &item {
         ResponseItem::Message { .. }
         | ResponseItem::Reasoning { .. }
-        | ResponseItem::WebSearchCall { .. } => {
-            let turn_item = match &item {
-                ResponseItem::Message { .. } if turn_context.is_review_mode => {
-                    trace!("suppressing assistant Message in review mode");
-                    None
-                }
-                _ => parse_turn_item(&item),
-            };
-            if let Some(turn_item) = turn_item {
-                sess.emit_turn_item_started_completed(
-                    turn_context.as_ref(),
-                    turn_item,
-                    show_raw_agent_reasoning,
-                )
-                .await;
+        | ResponseItem::WebSearchCall { .. } => match &item {
+            ResponseItem::Message { .. } if turn_context.is_review_mode => {
+                trace!("suppressing assistant Message in review mode");
+                None
             }
-        }
+            _ => parse_turn_item(&item),
+        },
         ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. } => {
             debug!("unexpected tool output from stream");
+            None
         }
-        _ => {}
+        _ => None,
     }
-
-    Ok(None)
 }
 
 pub(super) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
