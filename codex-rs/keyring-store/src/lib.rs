@@ -35,6 +35,13 @@ impl std::error::Error for CredentialStoreError {}
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultKeyringStore;
 
+/// Shared credential store abstraction for keyring-backed implementations.
+pub trait KeyringStore: Send + Sync {
+    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError>;
+    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError>;
+    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError>;
+}
+
 impl DefaultKeyringStore {
     #[inline]
     pub fn load(
@@ -70,6 +77,20 @@ impl DefaultKeyringStore {
             Err(KeyringError::NoEntry) => Ok(false),
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+impl KeyringStore for DefaultKeyringStore {
+    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError> {
+        DefaultKeyringStore::load(self, service, account)
+    }
+
+    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError> {
+        DefaultKeyringStore::save(self, service, account, value)
+    }
+
+    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
+        DefaultKeyringStore::delete(self, service, account)
     }
 }
 
@@ -186,6 +207,33 @@ pub mod testing {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             guard.contains_key(account)
+        }
+    }
+
+    impl crate::KeyringStore for MockKeyringStore {
+        fn load(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<String>, crate::CredentialStoreError> {
+            Self::load(self, service, account)
+        }
+
+        fn save(
+            &self,
+            service: &str,
+            account: &str,
+            value: &str,
+        ) -> Result<(), crate::CredentialStoreError> {
+            Self::save(self, service, account, value)
+        }
+
+        fn delete(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<bool, crate::CredentialStoreError> {
+            Self::delete(self, service, account)
         }
     }
 }

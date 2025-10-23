@@ -2,6 +2,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_keyring_store::CredentialStoreError;
 use codex_keyring_store::DefaultKeyringStore;
+use codex_keyring_store::KeyringStore;
 use serde::Deserialize;
 use serde::Serialize;
 #[cfg(test)]
@@ -44,26 +45,6 @@ pub enum AuthCredentialsStoreMode {
 }
 
 const KEYRING_SERVICE: &str = "Codex CLI Auth";
-
-trait KeyringStore: Send + Sync {
-    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError>;
-    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError>;
-    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError>;
-}
-
-impl KeyringStore for DefaultKeyringStore {
-    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError> {
-        DefaultKeyringStore::load(self, service, account)
-    }
-
-    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError> {
-        DefaultKeyringStore::save(self, service, account, value)
-    }
-
-    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-        DefaultKeyringStore::delete(self, service, account)
-    }
-}
 
 // turns codex_home path into a stable, short key string
 fn compute_store_key(codex_home: &Path) -> std::io::Result<String> {
@@ -730,29 +711,6 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;
-
-    impl KeyringStore for MockKeyringStore {
-        fn load(
-            &self,
-            service: &str,
-            account: &str,
-        ) -> Result<Option<String>, CredentialStoreError> {
-            MockKeyringStore::load(self, service, account)
-        }
-
-        fn save(
-            &self,
-            service: &str,
-            account: &str,
-            value: &str,
-        ) -> Result<(), CredentialStoreError> {
-            MockKeyringStore::save(self, service, account, value)
-        }
-
-        fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-            MockKeyringStore::delete(self, service, account)
-        }
-    }
 
     const LAST_REFRESH: &str = "2025-08-06T20:41:36.232376Z";
 

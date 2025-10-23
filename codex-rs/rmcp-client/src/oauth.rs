@@ -20,6 +20,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_keyring_store::CredentialStoreError;
 use codex_keyring_store::DefaultKeyringStore;
+use codex_keyring_store::KeyringStore;
 use oauth2::AccessToken;
 use oauth2::EmptyExtraTokenFields;
 use oauth2::RefreshToken;
@@ -71,26 +72,6 @@ pub enum OAuthCredentialsStoreMode {
     File,
     /// Keyring when available, otherwise fail.
     Keyring,
-}
-
-trait KeyringStore {
-    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError>;
-    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError>;
-    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError>;
-}
-
-impl KeyringStore for DefaultKeyringStore {
-    fn load(&self, service: &str, account: &str) -> Result<Option<String>, CredentialStoreError> {
-        DefaultKeyringStore::load(self, service, account)
-    }
-
-    fn save(&self, service: &str, account: &str, value: &str) -> Result<(), CredentialStoreError> {
-        DefaultKeyringStore::save(self, service, account, value)
-    }
-
-    fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-        DefaultKeyringStore::delete(self, service, account)
-    }
 }
 
 /// Wrap OAuthTokenResponse to allow for partial equality comparison.
@@ -564,29 +545,6 @@ mod tests {
     use std::sync::OnceLock;
     use std::sync::PoisonError;
     use tempfile::tempdir;
-
-    impl KeyringStore for MockKeyringStore {
-        fn load(
-            &self,
-            service: &str,
-            account: &str,
-        ) -> Result<Option<String>, CredentialStoreError> {
-            MockKeyringStore::load(self, service, account)
-        }
-
-        fn save(
-            &self,
-            service: &str,
-            account: &str,
-            value: &str,
-        ) -> Result<(), CredentialStoreError> {
-            MockKeyringStore::save(self, service, account, value)
-        }
-
-        fn delete(&self, service: &str, account: &str) -> Result<bool, CredentialStoreError> {
-            MockKeyringStore::delete(self, service, account)
-        }
-    }
 
     struct TempCodexHome {
         _guard: MutexGuard<'static, ()>,
