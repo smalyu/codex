@@ -13,6 +13,43 @@ use crate::render::RectExt as _;
 pub trait Renderable {
     fn render(&self, area: Rect, buf: &mut Buffer);
     fn desired_height(&self, width: u16) -> u16;
+    fn cursor_pos(&self, _area: Rect) -> Option<(u16, u16)> {
+        None
+    }
+}
+
+pub enum RenderableItem<'a> {
+    Owned(Box<dyn Renderable + 'a>),
+    Borrowed(&'a dyn Renderable),
+}
+
+impl<'a> Renderable for RenderableItem<'a> {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        match self {
+            RenderableItem::Owned(child) => child.render(area, buf),
+            RenderableItem::Borrowed(child) => child.render(area, buf),
+        }
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        match self {
+            RenderableItem::Owned(child) => child.desired_height(width),
+            RenderableItem::Borrowed(child) => child.desired_height(width),
+        }
+    }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        match self {
+            RenderableItem::Owned(child) => child.cursor_pos(area),
+            RenderableItem::Borrowed(child) => child.cursor_pos(area),
+        }
+    }
+}
+
+impl<'a> From<Box<dyn Renderable + 'a>> for RenderableItem<'a> {
+    fn from(value: Box<dyn Renderable + 'a>) -> Self {
+        RenderableItem::Owned(value)
+    }
 }
 
 impl<R: Renderable + 'static> From<R> for Box<dyn Renderable> {
@@ -98,11 +135,11 @@ impl<R: Renderable> Renderable for Arc<R> {
     }
 }
 
-pub struct ColumnRenderable {
-    children: Vec<Box<dyn Renderable>>,
+pub struct ColumnRenderable<'a> {
+    children: Vec<RenderableItem<'a>>,
 }
 
-impl Renderable for ColumnRenderable {
+impl Renderable for ColumnRenderable<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let mut y = area.y;
         for child in &self.children {
@@ -121,29 +158,56 @@ impl Renderable for ColumnRenderable {
             .map(|child| child.desired_height(width))
             .sum()
     }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let mut y = area.y;
+        for child in &self.children {
+            let child_area = Rect::new(area.x, y, area.width, child.desired_height(area.width))
+                .intersection(area);
+            if !child_area.is_empty()
+                && let Some((px, py)) = child.cursor_pos(child_area)
+            {
+                return Some((px, py));
+            }
+            y += child_area.height;
+        }
+        None
+    }
 }
 
-impl ColumnRenderable {
+impl<'a> ColumnRenderable<'a> {
     pub fn new() -> Self {
-        Self::with(vec![])
+        Self { children: vec![] }
     }
 
-    pub fn with(children: impl IntoIterator<Item = Box<dyn Renderable>>) -> Self {
+    pub fn with<I, T>(children: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<RenderableItem<'a>>,
+    {
         Self {
-            children: children.into_iter().collect(),
+            children: children.into_iter().map(Into::into).collect(),
         }
     }
 
     pub fn push(&mut self, child: impl Into<Box<dyn Renderable>>) {
-        self.children.push(child.into());
+        self.children.push(RenderableItem::Owned(child.into()));
+    }
+
+    pub fn push_ref<R>(&mut self, child: &'a R)
+    where
+        R: Renderable + 'a,
+    {
+        self.children
+            .push(RenderableItem::Borrowed(child as &'a dyn Renderable));
     }
 }
 
-pub struct RowRenderable {
-    children: Vec<(u16, Box<dyn Renderable>)>,
+pub struct RowRenderable<'a> {
+    children: Vec<(u16, RenderableItem<'a>)>,
 }
 
-impl Renderable for RowRenderable {
+impl Renderable for RowRenderable<'_> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let mut x = area.x;
         for (width, child) in &self.children {
@@ -172,24 +236,49 @@ impl Renderable for RowRenderable {
         }
         max_height
     }
+
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        let mut x = area.x;
+        for (width, child) in &self.children {
+            let available_width = area.width.saturating_sub(x - area.x);
+            let child_area = Rect::new(x, area.y, (*width).min(available_width), area.height);
+            if !child_area.is_empty()
+                && let Some(pos) = child.cursor_pos(child_area)
+            {
+                return Some(pos);
+            }
+            x = x.saturating_add(*width);
+        }
+        None
+    }
 }
 
-impl RowRenderable {
+impl<'a> RowRenderable<'a> {
     pub fn new() -> Self {
         Self { children: vec![] }
     }
 
     pub fn push(&mut self, width: u16, child: impl Into<Box<dyn Renderable>>) {
-        self.children.push((width, child.into()));
+        self.children
+            .push((width, RenderableItem::Owned(child.into())));
+    }
+
+    #[allow(dead_code)]
+    pub fn push_ref<R>(&mut self, width: u16, child: &'a R)
+    where
+        R: Renderable + 'a,
+    {
+        self.children
+            .push((width, RenderableItem::Borrowed(child as &'a dyn Renderable)));
     }
 }
 
-pub struct InsetRenderable {
-    child: Box<dyn Renderable>,
+pub struct InsetRenderable<'a> {
+    child: RenderableItem<'a>,
     insets: Insets,
 }
 
-impl Renderable for InsetRenderable {
+impl<'a> Renderable for InsetRenderable<'a> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         self.child.render(area.inset(self.insets), buf);
     }
@@ -199,10 +288,13 @@ impl Renderable for InsetRenderable {
             + self.insets.top
             + self.insets.bottom
     }
+    fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        self.child.cursor_pos(area.inset(self.insets))
+    }
 }
 
-impl InsetRenderable {
-    pub fn new(child: impl Into<Box<dyn Renderable>>, insets: Insets) -> Self {
+impl<'a> InsetRenderable<'a> {
+    pub fn new(child: impl Into<RenderableItem<'a>>, insets: Insets) -> Self {
         Self {
             child: child.into(),
             insets,
@@ -210,15 +302,17 @@ impl InsetRenderable {
     }
 }
 
-pub trait RenderableExt {
-    fn inset(self, insets: Insets) -> Box<dyn Renderable>;
+pub trait RenderableExt<'a> {
+    fn inset(self, insets: Insets) -> RenderableItem<'a>;
 }
 
-impl<R: Into<Box<dyn Renderable>>> RenderableExt for R {
-    fn inset(self, insets: Insets) -> Box<dyn Renderable> {
-        Box::new(InsetRenderable {
-            child: self.into(),
-            insets,
-        })
+impl<'a, R> RenderableExt<'a> for R
+where
+    R: Renderable + 'a,
+{
+    fn inset(self, insets: Insets) -> RenderableItem<'a> {
+        let child: RenderableItem<'a> =
+            RenderableItem::Owned(Box::new(self) as Box<dyn Renderable + 'a>);
+        RenderableItem::Owned(Box::new(InsetRenderable { child, insets }))
     }
 }
