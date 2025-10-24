@@ -357,7 +357,12 @@ impl ConversationHistory {
                     output: truncated,
                 }
             }
-            _ => item.clone(),
+            ResponseItem::Message { .. }
+            | ResponseItem::Reasoning { .. }
+            | ResponseItem::LocalShellCall { .. }
+            | ResponseItem::FunctionCall { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::Other => item.clone(),
         }
     }
 }
