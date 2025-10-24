@@ -14,7 +14,7 @@ use std::time::Duration;
 use wiremock::matchers::any;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn interrupt_tool_records_history_entries() {
+async fn input_validation_should_fail_for_too_large_input() {
     let server = start_mock_server().await;
 
     let fixture = test_codex().build(&server).await.unwrap();
