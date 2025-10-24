@@ -22,12 +22,6 @@ pub(crate) const MODEL_FORMAT_HEAD_LINES: usize = MODEL_FORMAT_MAX_LINES / 2;
 pub(crate) const MODEL_FORMAT_TAIL_LINES: usize = MODEL_FORMAT_MAX_LINES - MODEL_FORMAT_HEAD_LINES; // 128
 pub(crate) const MODEL_FORMAT_HEAD_BYTES: usize = MODEL_FORMAT_MAX_BYTES / 2;
 
-// Telemetry preview limits: keep log events smaller than model budgets.
-pub(crate) const TELEMETRY_PREVIEW_MAX_BYTES: usize = 2 * 1024; // 2 KiB
-pub(crate) const TELEMETRY_PREVIEW_MAX_LINES: usize = 64; // lines
-pub(crate) const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str =
-    "[... telemetry preview truncated ...]";
-
 /// Format the combined exec output for sending back to the model.
 /// Includes exit code and duration metadata; truncates large bodies safely.
 pub fn format_exec_output_for_model(exec_output: &ExecToolCallOutput) -> String {

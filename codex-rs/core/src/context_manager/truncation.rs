@@ -7,14 +7,16 @@ pub(crate) struct TruncationConfig {
     pub truncation_notice: &'static str,
 }
 
-pub(crate) const CONTEXT_OUTPUT_MAX_BYTES: usize = 8 * 1024; // 8 KiB
-pub(crate) const CONTEXT_OUTPUT_MAX_LINES: usize = 256;
-pub(crate) const CONTEXT_OUTPUT_TRUNCATION_NOTICE: &str = "[... output truncated ...]";
+// Telemetry preview limits: keep log events smaller than model budgets.
+pub(crate) const TELEMETRY_PREVIEW_MAX_BYTES: usize = 2 * 1024; // 2 KiB
+pub(crate) const TELEMETRY_PREVIEW_MAX_LINES: usize = 64; // lines
+pub(crate) const TELEMETRY_PREVIEW_TRUNCATION_NOTICE: &str =
+    "[... telemetry preview truncated ...]";
 
 pub(crate) const CONTEXT_OUTPUT_TRUNCATION: TruncationConfig = TruncationConfig {
-    max_bytes: CONTEXT_OUTPUT_MAX_BYTES,
-    max_lines: CONTEXT_OUTPUT_MAX_LINES,
-    truncation_notice: CONTEXT_OUTPUT_TRUNCATION_NOTICE,
+    max_bytes: TELEMETRY_PREVIEW_MAX_BYTES,
+    max_lines: TELEMETRY_PREVIEW_MAX_LINES,
+    truncation_notice: TELEMETRY_PREVIEW_TRUNCATION_NOTICE,
 };
 
 pub(crate) fn truncate_with_config(content: &str, config: TruncationConfig) -> String {
@@ -106,5 +108,52 @@ mod tests {
         let truncated = truncate_with_config(content, config);
         assert!(truncated.lines().count() <= 3);
         assert!(truncated.contains("[notice]"));
+    }
+
+    #[test]
+    fn telemetry_preview_returns_original_within_limits() {
+        let content = "short output";
+        let config = TruncationConfig {
+            max_bytes: TELEMETRY_PREVIEW_MAX_BYTES,
+            max_lines: TELEMETRY_PREVIEW_MAX_LINES,
+            truncation_notice: TELEMETRY_PREVIEW_TRUNCATION_NOTICE,
+        };
+        assert_eq!(truncate_with_config(content, config), content);
+    }
+
+    #[test]
+    fn telemetry_preview_truncates_by_bytes() {
+        let config = TruncationConfig {
+            max_bytes: TELEMETRY_PREVIEW_MAX_BYTES,
+            max_lines: TELEMETRY_PREVIEW_MAX_LINES,
+            truncation_notice: TELEMETRY_PREVIEW_TRUNCATION_NOTICE,
+        };
+        let content = "x".repeat(TELEMETRY_PREVIEW_MAX_BYTES + 8);
+        let preview = truncate_with_config(&content, config);
+
+        assert!(preview.contains(TELEMETRY_PREVIEW_TRUNCATION_NOTICE));
+        assert!(
+            preview.len()
+                <= TELEMETRY_PREVIEW_MAX_BYTES + TELEMETRY_PREVIEW_TRUNCATION_NOTICE.len() + 1
+        );
+    }
+
+    #[test]
+    fn telemetry_preview_truncates_by_lines() {
+        let config = TruncationConfig {
+            max_bytes: TELEMETRY_PREVIEW_MAX_BYTES,
+            max_lines: TELEMETRY_PREVIEW_MAX_LINES,
+            truncation_notice: TELEMETRY_PREVIEW_TRUNCATION_NOTICE,
+        };
+        let content = (0..(TELEMETRY_PREVIEW_MAX_LINES + 5))
+            .map(|idx| format!("line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let preview = truncate_with_config(&content, config);
+        let lines: Vec<&str> = preview.lines().collect();
+
+        assert!(lines.len() <= TELEMETRY_PREVIEW_MAX_LINES + 1);
+        assert_eq!(lines.last(), Some(&TELEMETRY_PREVIEW_TRUNCATION_NOTICE));
     }
 }

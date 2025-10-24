@@ -390,8 +390,8 @@ fn is_api_message(message: &ResponseItem) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context_manager::truncation::CONTEXT_OUTPUT_MAX_BYTES;
-    use crate::context_manager::truncation::CONTEXT_OUTPUT_TRUNCATION_NOTICE;
+    use crate::context_manager::truncation::TELEMETRY_PREVIEW_MAX_BYTES;
+    use crate::context_manager::truncation::TELEMETRY_PREVIEW_TRUNCATION_NOTICE;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::LocalShellAction;
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn record_items_truncates_function_call_output() {
         let mut h = ContextManager::new();
-        let long_content = "a".repeat(CONTEXT_OUTPUT_MAX_BYTES + 32);
+        let long_content = "a".repeat(TELEMETRY_PREVIEW_MAX_BYTES + 32);
         let item = ResponseItem::FunctionCallOutput {
             call_id: "call-long".to_string(),
             output: FunctionCallOutputPayload {
@@ -484,7 +484,9 @@ mod tests {
             panic!("expected FunctionCallOutput variant");
         };
         assert!(
-            output.content.ends_with(CONTEXT_OUTPUT_TRUNCATION_NOTICE),
+            output
+                .content
+                .ends_with(TELEMETRY_PREVIEW_TRUNCATION_NOTICE),
             "truncated content should end with notice"
         );
         assert!(
@@ -496,7 +498,7 @@ mod tests {
     #[test]
     fn record_items_truncates_custom_tool_output() {
         let mut h = ContextManager::new();
-        let long_content = "b".repeat(CONTEXT_OUTPUT_MAX_BYTES + 64);
+        let long_content = "b".repeat(TELEMETRY_PREVIEW_MAX_BYTES + 64);
         let item = ResponseItem::CustomToolCallOutput {
             call_id: "custom-long".to_string(),
             output: long_content.clone(),
@@ -509,7 +511,7 @@ mod tests {
             panic!("expected CustomToolCallOutput variant");
         };
         assert!(
-            output.ends_with(CONTEXT_OUTPUT_TRUNCATION_NOTICE),
+            output.ends_with(TELEMETRY_PREVIEW_TRUNCATION_NOTICE),
             "truncated output should end with notice"
         );
         assert!(
