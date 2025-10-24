@@ -4,7 +4,7 @@ expression: "render_snapshot(&pane, area)"
 ---
                                                 
   ↳ Queued follow-up question                   
-    alt + ↑ edit                                
+    ⌥ + ↑ edit                                  
                                                 
                                                 
 › Ask Codex to do anything                      
