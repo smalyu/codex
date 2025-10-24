@@ -542,7 +542,7 @@ impl Session {
         );
 
         // Create the mutable state for the Session.
-        let state = SessionState::new(session_configuration.clone());
+        let state = SessionState::new(session_configuration.clone(), config.model_context_window);
 
         let services = SessionServices {
             mcp_connection_manager,
@@ -876,7 +876,7 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> CodexResult<Vec<ResponseItem>> {
-        let mut history = ConversationHistory::new();
+        let mut history = ConversationHistory::new(turn_context.client.get_model_context_window());
         for item in rollout_items {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
@@ -1543,7 +1543,8 @@ pub(crate) async fn run_task(
     // For normal turns, continue recording to the session history as before.
     let is_review_mode = turn_context.is_review_mode;
 
-    let mut review_thread_history: ConversationHistory = ConversationHistory::new();
+    let mut review_thread_history: ConversationHistory =
+        ConversationHistory::new(turn_context.client.get_model_context_window());
     if is_review_mode {
         // Seed review threads with environment context so the model knows the working directory.
         review_thread_history
@@ -2569,7 +2570,7 @@ mod tests {
             original_config_do_not_use: Arc::clone(&config),
         };
 
-        let state = SessionState::new(session_configuration.clone());
+        let state = SessionState::new(session_configuration.clone(), config.model_context_window);
 
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),
@@ -2637,7 +2638,7 @@ mod tests {
             original_config_do_not_use: Arc::clone(&config),
         };
 
-        let state = SessionState::new(session_configuration.clone());
+        let state = SessionState::new(session_configuration.clone(), config.model_context_window);
 
         let services = SessionServices {
             mcp_connection_manager: McpConnectionManager::default(),
@@ -2860,7 +2861,8 @@ mod tests {
         turn_context: &TurnContext,
     ) -> CodexResult<(Vec<RolloutItem>, Vec<ResponseItem>)> {
         let mut rollout_items = Vec::new();
-        let mut live_history = ConversationHistory::new();
+        let mut live_history =
+            ConversationHistory::new(turn_context.client.get_model_context_window());
 
         let initial_context = session.build_initial_context(turn_context);
         for item in &initial_context {

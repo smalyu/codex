@@ -1,14 +1,17 @@
+use std::sync::OnceLock;
+
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_utils_tokenizer::Tokenizer;
+use codex_utils_tokenizer::TokenizerError;
 use tracing::error;
 
 use crate::error::CodexErr;
 
 /// Transcript of conversation history
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct ConversationHistory {
     /// The oldest items are at the beginning of the vector.
     items: Vec<ResponseItem>,
@@ -16,11 +19,24 @@ pub(crate) struct ConversationHistory {
 }
 
 impl ConversationHistory {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(model_context_window: Option<i64>) -> Self {
+        let token_info = model_context_window.map(|context_window| TokenUsageInfo {
+            total_token_usage: TokenUsage::default(),
+            last_token_usage: TokenUsage::default(),
+            model_context_window: Some(context_window),
+        });
         Self {
             items: Vec::new(),
-            token_info: TokenUsageInfo::new_or_append(&None, &None, None),
+            token_info,
         }
+    }
+
+    fn tokenizer() -> Result<&'static Tokenizer, CodexErr> {
+        static TOKENIZER: OnceLock<Result<Tokenizer, TokenizerError>> = OnceLock::new();
+        let tokenizer = TOKENIZER.get_or_init(Tokenizer::try_default);
+        tokenizer
+            .as_ref()
+            .map_err(|e| CodexErr::InvalidInput(format!("tokenizer error: {e}")))
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
@@ -113,8 +129,7 @@ impl ConversationHistory {
             return Ok(());
         };
 
-        let tokenizer = Tokenizer::try_default()
-            .map_err(|e| CodexErr::InvalidInput(format!("tokenizer error: {e}")))?;
+        let tokenizer = Self::tokenizer()?;
 
         let mut input_tokens: i64 = 0;
         for item in content {
@@ -131,8 +146,8 @@ impl ConversationHistory {
             }
         }
 
-        let last_turn_total = info.last_token_usage.total_tokens;
-        let combined_tokens = input_tokens + last_turn_total;
+        let prior_total = info.total_token_usage.total_tokens;
+        let combined_tokens = prior_total.saturating_add(input_tokens);
         let threshold = context_window * 95 / 100;
         if combined_tokens > threshold {
             return Err(CodexErr::InvalidInput("input too large".to_string()));
@@ -394,6 +409,12 @@ impl ConversationHistory {
     }
 }
 
+impl Default for ConversationHistory {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
 #[inline]
 fn error_or_panic(message: String) {
     if cfg!(debug_assertions) || env!("CARGO_PKG_VERSION").contains("alpha") {
@@ -440,7 +461,7 @@ mod tests {
     }
 
     fn create_history_with_items(items: Vec<ResponseItem>) -> ConversationHistory {
-        let mut h = ConversationHistory::new();
+        let mut h = ConversationHistory::new(None);
         h.record_items(items.iter()).unwrap();
         h
     }
