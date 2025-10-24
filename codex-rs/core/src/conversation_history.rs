@@ -6,6 +6,13 @@ use codex_utils_string::take_bytes_at_char_boundary;
 use codex_utils_string::take_last_bytes_at_char_boundary;
 use tracing::error;
 
+// Model-formatting limits: clients get full streams; only content sent to the model is truncated.
+pub(crate) const MODEL_FORMAT_MAX_BYTES: usize = 10 * 1024; // 10 KiB
+pub(crate) const MODEL_FORMAT_MAX_LINES: usize = 256; // lines
+pub(crate) const MODEL_FORMAT_HEAD_LINES: usize = MODEL_FORMAT_MAX_LINES / 2;
+pub(crate) const MODEL_FORMAT_TAIL_LINES: usize = MODEL_FORMAT_MAX_LINES - MODEL_FORMAT_HEAD_LINES; // 128
+pub(crate) const MODEL_FORMAT_HEAD_BYTES: usize = MODEL_FORMAT_MAX_BYTES / 2;
+
 /// Transcript of conversation history
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ConversationHistory {
@@ -361,18 +368,12 @@ impl ConversationHistory {
             | ResponseItem::Reasoning { .. }
             | ResponseItem::LocalShellCall { .. }
             | ResponseItem::FunctionCall { .. }
+            | ResponseItem::WebSearchCall { .. }
             | ResponseItem::CustomToolCall { .. }
             | ResponseItem::Other => item.clone(),
         }
     }
 }
-
-// Model-formatting limits: clients get full streams; only content sent to the model is truncated.
-pub(crate) const MODEL_FORMAT_MAX_BYTES: usize = 10 * 1024; // 10 KiB
-pub(crate) const MODEL_FORMAT_MAX_LINES: usize = 256; // lines
-pub(crate) const MODEL_FORMAT_HEAD_LINES: usize = MODEL_FORMAT_MAX_LINES / 2;
-pub(crate) const MODEL_FORMAT_TAIL_LINES: usize = MODEL_FORMAT_MAX_LINES - MODEL_FORMAT_HEAD_LINES; // 128
-pub(crate) const MODEL_FORMAT_HEAD_BYTES: usize = MODEL_FORMAT_MAX_BYTES / 2;
 
 fn truncate_context_output(content: &str) -> String {
     format_exec_output(content)
