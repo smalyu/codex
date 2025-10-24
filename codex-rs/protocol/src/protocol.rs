@@ -575,7 +575,7 @@ pub struct TokenUsage {
     pub total_tokens: i64,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, Default)]
 pub struct TokenUsageInfo {
     /// The total token usage for the session. accumulated from all turns.
     pub total_token_usage: TokenUsage,

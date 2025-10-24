@@ -18,13 +18,10 @@ pub(crate) struct SessionState {
 
 impl SessionState {
     /// Create a new session state mirroring previous `State::default()` semantics.
-    pub(crate) fn new(
-        session_configuration: SessionConfiguration,
-        model_context_window: Option<i64>,
-    ) -> Self {
+    pub(crate) fn new(session_configuration: SessionConfiguration) -> Self {
         Self {
             session_configuration,
-            history: ConversationHistory::new(model_context_window),
+            history: ConversationHistory::new(),
             latest_rate_limits: None,
         }
     }

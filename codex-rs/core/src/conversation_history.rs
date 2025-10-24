@@ -17,12 +17,7 @@ pub(crate) struct ConversationHistory {
 }
 
 impl ConversationHistory {
-    pub(crate) fn new(model_context_window: Option<i64>) -> Self {
-        let token_info = model_context_window.map(|context_window| TokenUsageInfo {
-            total_token_usage: TokenUsage::default(),
-            last_token_usage: TokenUsage::default(),
-            model_context_window: Some(context_window),
-        });
+    pub(crate) fn new() -> Self {
         let tokenizer = match Tokenizer::try_default() {
             Ok(tokenizer) => Some(tokenizer),
             Err(error) => {
@@ -32,7 +27,7 @@ impl ConversationHistory {
         };
         Self {
             items: Vec::new(),
-            token_info,
+            token_info: Some(TokenUsageInfo::default()),
             tokenizer,
         }
     }
@@ -408,12 +403,6 @@ impl ConversationHistory {
     }
 }
 
-impl Default for ConversationHistory {
-    fn default() -> Self {
-        Self::new(None)
-    }
-}
-
 #[inline]
 fn error_or_panic(message: String) {
     if cfg!(debug_assertions) || env!("CARGO_PKG_VERSION").contains("alpha") {
@@ -460,7 +449,7 @@ mod tests {
     }
 
     fn create_history_with_items(items: Vec<ResponseItem>) -> ConversationHistory {
-        let mut h = ConversationHistory::new(None);
+        let mut h = ConversationHistory::new();
         h.record_items(items.iter()).unwrap();
         h
     }
@@ -477,7 +466,7 @@ mod tests {
 
     #[test]
     fn filters_non_api_messages() {
-        let mut h = ConversationHistory::default();
+        let mut h = ConversationHistory::new();
         // System message is not an API message; Other is ignored.
         let system = ResponseItem::Message {
             id: None,
