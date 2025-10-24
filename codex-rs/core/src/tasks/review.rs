@@ -6,7 +6,6 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::ReviewOutputEvent;
-use codex_protocol::protocol::TaskCompleteEvent;
 use tokio_util::sync::CancellationToken;
 
 use crate::codex::Session;
@@ -99,17 +98,64 @@ async fn handle_review_agent_event(
 ) {
     match agent_event {
         AgentEvent::EventMsg(event) => {
-            session
-                .clone_session()
-                .send_event(ctx.as_ref(), event.clone())
-                .await;
-            if let EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) = event {
-                exit_review_mode(
-                    session.clone_session(),
-                    last_agent_message.as_deref().map(parse_review_output_event),
-                    ctx.clone(),
-                )
-                .await;
+            match event {
+                EventMsg::AgentMessage(_) => {
+                    // The structured review output is surfaced through ExitedReviewMode.
+                    // Suppress the raw AgentMessage to avoid leaking implementation details.
+                }
+                EventMsg::TaskComplete(task_complete) => {
+                    let review_output = task_complete
+                        .last_agent_message
+                        .as_deref()
+                        .map(parse_review_output_event);
+                    exit_review_mode(session.clone_session(), review_output, ctx.clone()).await;
+                    session
+                        .clone_session()
+                        .send_event(ctx.as_ref(), EventMsg::TaskComplete(task_complete))
+                        .await;
+                }
+                EventMsg::AgentMessageDelta(_)
+                | EventMsg::TokenCount(_)
+                | EventMsg::Error(_)
+                | EventMsg::TaskStarted(_)
+                | EventMsg::UserMessage(_)
+                | EventMsg::AgentReasoning(_)
+                | EventMsg::AgentReasoningDelta(_)
+                | EventMsg::AgentReasoningRawContent(_)
+                | EventMsg::AgentReasoningRawContentDelta(_)
+                | EventMsg::AgentReasoningSectionBreak(_)
+                | EventMsg::SessionConfigured(_)
+                | EventMsg::McpToolCallBegin(_)
+                | EventMsg::McpToolCallEnd(_)
+                | EventMsg::WebSearchBegin(_)
+                | EventMsg::WebSearchEnd(_)
+                | EventMsg::ExecCommandBegin(_)
+                | EventMsg::ExecCommandOutputDelta(_)
+                | EventMsg::ExecCommandEnd(_)
+                | EventMsg::ViewImageToolCall(_)
+                | EventMsg::ExecApprovalRequest(_)
+                | EventMsg::ApplyPatchApprovalRequest(_)
+                | EventMsg::BackgroundEvent(_)
+                | EventMsg::StreamError(_)
+                | EventMsg::PatchApplyBegin(_)
+                | EventMsg::PatchApplyEnd(_)
+                | EventMsg::TurnDiff(_)
+                | EventMsg::GetHistoryEntryResponse(_)
+                | EventMsg::McpListToolsResponse(_)
+                | EventMsg::ListCustomPromptsResponse(_)
+                | EventMsg::PlanUpdate(_)
+                | EventMsg::TurnAborted(_)
+                | EventMsg::ShutdownComplete
+                | EventMsg::ConversationPath(_)
+                | EventMsg::EnteredReviewMode(_)
+                | EventMsg::ExitedReviewMode(_)
+                | EventMsg::ItemStarted(_)
+                | EventMsg::ItemCompleted(_) => {
+                    session
+                        .clone_session()
+                        .send_event(ctx.as_ref(), event)
+                        .await;
+                }
             }
         }
         AgentEvent::ExecApprovalRequest(event, tx) => {
