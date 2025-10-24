@@ -137,6 +137,7 @@ impl RolloutRecorder {
                         cli_version: env!("CARGO_PKG_VERSION").to_string(),
                         instructions,
                         source,
+                        model_provider: Some(config.model_provider_id.clone()),
                     }),
                 )
             }
