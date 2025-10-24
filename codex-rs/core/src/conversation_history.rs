@@ -2,7 +2,10 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_utils_tokenizer::Tokenizer;
 use tracing::error;
+
+use crate::error::CodexErr;
 
 /// Transcript of conversation history
 #[derive(Debug, Clone, Default)]
@@ -34,7 +37,7 @@ impl ConversationHistory {
     }
 
     /// `items` is ordered from oldest to newest.
-    pub(crate) fn record_items<I>(&mut self, items: I)
+    pub(crate) fn record_items<I>(&mut self, items: I) -> Result<(), CodexErr>
     where
         I: IntoIterator,
         I::Item: std::ops::Deref<Target = ResponseItem>,
@@ -43,9 +46,10 @@ impl ConversationHistory {
             if !is_api_message(&item) {
                 continue;
             }
-
+            self.validate_input(&item)?;
             self.items.push(item.clone());
         }
+        Ok(())
     }
 
     pub(crate) fn get_history(&mut self) -> Vec<ResponseItem> {
@@ -79,6 +83,62 @@ impl ConversationHistory {
     /// Returns a clone of the contents in the transcript.
     fn contents(&self) -> Vec<ResponseItem> {
         self.items.clone()
+    }
+
+    fn validate_input(&self, item: &ResponseItem) -> Result<(), CodexErr> {
+        match item {
+            ResponseItem::Message { content, .. } => {
+                self.validate_input_content_item(content)?;
+                Ok(())
+            }
+            ResponseItem::FunctionCall { .. }
+            | ResponseItem::FunctionCallOutput { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::CustomToolCallOutput { .. }
+            | ResponseItem::LocalShellCall { .. }
+            | ResponseItem::Reasoning { .. }
+            | ResponseItem::WebSearchCall { .. } => Ok(()),
+            ResponseItem::Other => Err(CodexErr::InvalidInput(format!("invalid input: {item:?}"))),
+        }
+    }
+
+    fn validate_input_content_item(
+        &self,
+        content: &[codex_protocol::models::ContentItem],
+    ) -> Result<(), CodexErr> {
+        let Some(info) = &self.token_info else {
+            return Ok(());
+        };
+        let Some(context_window) = info.model_context_window else {
+            return Ok(());
+        };
+
+        let tokenizer = Tokenizer::try_default()
+            .map_err(|e| CodexErr::InvalidInput(format!("tokenizer error: {e}")))?;
+
+        let mut input_tokens: i64 = 0;
+        for item in content {
+            match item {
+                codex_protocol::models::ContentItem::InputText { text } => {
+                    input_tokens += tokenizer.count(text);
+                }
+                codex_protocol::models::ContentItem::InputImage { .. } => {
+                    // no validation currently
+                }
+                codex_protocol::models::ContentItem::OutputText { .. } => {
+                    // no validation currently
+                }
+            }
+        }
+
+        let last_turn_total = info.last_token_usage.total_tokens;
+        let combined_tokens = input_tokens + last_turn_total;
+        let threshold = context_window * 95 / 100;
+        if combined_tokens > threshold {
+            return Err(CodexErr::InvalidInput("input too large".to_string()));
+        }
+
+        Ok(())
     }
 
     fn ensure_call_outputs_present(&mut self) {
@@ -381,7 +441,7 @@ mod tests {
 
     fn create_history_with_items(items: Vec<ResponseItem>) -> ConversationHistory {
         let mut h = ConversationHistory::new();
-        h.record_items(items.iter());
+        h.record_items(items.iter()).unwrap();
         h
     }
 
@@ -406,12 +466,12 @@ mod tests {
                 text: "ignored".to_string(),
             }],
         };
-        h.record_items([&system, &ResponseItem::Other]);
+        h.record_items([&system, &ResponseItem::Other]).unwrap();
 
         // User and assistant should be retained.
         let u = user_msg("hi");
         let a = assistant_msg("hello");
-        h.record_items([&u, &a]);
+        h.record_items([&u, &a]).unwrap();
 
         let items = h.contents();
         assert_eq!(

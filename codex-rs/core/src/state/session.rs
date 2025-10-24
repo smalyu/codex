@@ -4,6 +4,7 @@ use codex_protocol::models::ResponseItem;
 
 use crate::codex::SessionConfiguration;
 use crate::conversation_history::ConversationHistory;
+use crate::error::CodexErr;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
@@ -26,12 +27,13 @@ impl SessionState {
     }
 
     // History helpers
-    pub(crate) fn record_items<I>(&mut self, items: I)
+    pub(crate) fn record_items<I>(&mut self, items: I) -> Result<(), CodexErr>
     where
         I: IntoIterator,
         I::Item: std::ops::Deref<Target = ResponseItem>,
     {
-        self.history.record_items(items)
+        self.history.record_items(items)?;
+        Ok(())
     }
 
     pub(crate) fn history_snapshot(&mut self) -> Vec<ResponseItem> {
