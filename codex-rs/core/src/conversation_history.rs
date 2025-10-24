@@ -146,7 +146,7 @@ impl ConversationHistory {
             }
         }
 
-        let prior_total = info.total_token_usage.total_tokens;
+        let prior_total = info.last_token_usage.total_tokens;
         let combined_tokens = prior_total.saturating_add(input_tokens);
         let threshold = context_window * 95 / 100;
         if combined_tokens > threshold {
