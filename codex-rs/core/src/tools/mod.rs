@@ -9,6 +9,7 @@ pub mod runtimes;
 pub mod sandboxing;
 pub mod spec;
 
+use crate::conversation_history::format_exec_output;
 use crate::exec::ExecToolCallOutput;
 pub use router::ToolRouter;
 use serde::Serialize;
@@ -64,13 +65,15 @@ pub fn format_exec_output_str(exec_output: &ExecToolCallOutput) -> String {
 
     let content = aggregated_output.text.as_str();
 
-    if exec_output.timed_out {
-        let prefixed = format!(
+    let body = if exec_output.timed_out {
+        format!(
             "command timed out after {} milliseconds\n{content}",
             exec_output.duration.as_millis()
-        );
-        return prefixed;
-    }
+        )
+    } else {
+        content.to_string()
+    };
 
-    content.to_string()
+    // Truncate for model consumption before serialization.
+    format_exec_output(&body)
 }

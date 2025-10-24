@@ -2340,9 +2340,6 @@ mod tests {
         assert_eq!(expected, got);
     }
 
-    // Truncation tests have moved to conversation_history where
-    // the model-facing formatting now lives.
-
     #[test]
     fn includes_timed_out_message() {
         let exec = ExecToolCallOutput {
