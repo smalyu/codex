@@ -628,14 +628,6 @@ impl Session {
         state.session_configuration = state.session_configuration.apply(&updates);
     }
 
-    pub(crate) async fn base_config(&self) -> Arc<Config> {
-        let state = self.state.lock().await;
-        state
-            .session_configuration
-            .original_config_do_not_use
-            .clone()
-    }
-
     pub(crate) async fn new_turn(&self, updates: SessionSettingsUpdate) -> Arc<TurnContext> {
         let sub_id = self.next_internal_sub_id();
         self.new_turn_with_sub_id(sub_id, updates).await

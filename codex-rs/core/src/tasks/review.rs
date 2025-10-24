@@ -40,14 +40,18 @@ impl SessionTask for ReviewTask {
         // let sess = session.clone_session();
         // run_task(sess, ctx, input, TaskKind::Review, cancellation_token).await
 
-        let config = session.base_config().await.as_ref().clone();
-        let receiver =
-            match run_codex_conversation(config, session.auth_manager(), input, cancellation_token)
-                .await
-            {
-                Ok(r) => r,
-                Err(_) => return None,
-            };
+        let config = ctx.client.get_config().await;
+        let receiver = match run_codex_conversation(
+            config.as_ref().clone(),
+            session.auth_manager(),
+            input,
+            cancellation_token,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
         while let Ok(agent_event) = receiver.recv().await {
             match agent_event {
                 AgentEvent::EventMsg(event) => {
