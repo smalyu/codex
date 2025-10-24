@@ -853,7 +853,6 @@ dependencies = [
  "pretty_assertions",
  "serde",
  "serde_json",
- "serial_test",
  "tempfile",
  "tokio",
  "toml",
