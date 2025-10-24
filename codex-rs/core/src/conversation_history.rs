@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::OnceLock;
+
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
@@ -13,18 +16,13 @@ pub(crate) struct ConversationHistory {
     /// The oldest items are at the beginning of the vector.
     items: Vec<ResponseItem>,
     token_info: Option<TokenUsageInfo>,
-    tokenizer: Option<Tokenizer>,
+    tokenizer: Option<Arc<Tokenizer>>,
 }
 
 impl ConversationHistory {
     pub(crate) fn new() -> Self {
-        let tokenizer = match Tokenizer::try_default() {
-            Ok(tokenizer) => Some(tokenizer),
-            Err(error) => {
-                error!("failed to create tokenizer: {error}");
-                None
-            }
-        };
+        // load the tokenizer once and share it across all instances. It takes ~500 ms to load.
+        let tokenizer = shared_tokenizer();
         Self {
             items: Vec::new(),
             token_info: None,
@@ -123,7 +121,7 @@ impl ConversationHistory {
         let Some(context_window) = info.model_context_window else {
             return Ok(());
         };
-        let Some(tokenizer) = self.tokenizer.as_ref() else {
+        let Some(tokenizer) = self.tokenizer.as_deref() else {
             return Ok(());
         };
 
@@ -412,6 +410,20 @@ fn error_or_panic(message: String) {
     } else {
         error!("{message}");
     }
+}
+
+fn shared_tokenizer() -> Option<Arc<Tokenizer>> {
+    static TOKENIZER: OnceLock<Option<Arc<Tokenizer>>> = OnceLock::new();
+    TOKENIZER
+        .get_or_init(|| match Tokenizer::try_default() {
+            Ok(tokenizer) => Some(Arc::new(tokenizer)),
+            Err(error) => {
+                error!("failed to create tokenizer: {error}");
+                None
+            }
+        })
+        .as_ref()
+        .map(Arc::clone)
 }
 
 /// Anything that is not a system message or "reasoning" message is considered
