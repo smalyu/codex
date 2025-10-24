@@ -118,6 +118,8 @@ impl ConversationHistory {
         let Some(info) = &self.token_info else {
             return Ok(());
         };
+        // this will intentionally not check the context for the first turn before getting this information.
+        // it's acceptable tradeoff.
         let Some(context_window) = info.model_context_window else {
             return Ok(());
         };
