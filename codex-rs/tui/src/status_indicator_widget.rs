@@ -207,6 +207,26 @@ mod tests {
     }
 
     #[test]
+    fn renders_with_queued_messages() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut w = StatusIndicatorWidget::new(tx, crate::tui::FrameRequester::test_dummy());
+        w.set_queued_messages(vec!["first".to_string(), "second".to_string()]);
+
+        // Render into a fixed-size test terminal and snapshot the backend.
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("terminal");
+        terminal
+            .draw(|f| w.render_ref(f.area(), f.buffer_mut()))
+            .expect("draw");
+        #[cfg(target_os = "macos")]
+        insta::with_settings!({ snapshot_suffix => "macos" }, {
+            insta::assert_snapshot!(terminal.backend());
+        });
+        #[cfg(not(target_os = "macos"))]
+        insta::assert_snapshot!(terminal.backend());
+    }
+
+    #[test]
     fn timer_pauses_when_requested() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
