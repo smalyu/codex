@@ -579,7 +579,7 @@ pub struct TokenUsage {
 pub struct TokenUsageInfo {
     /// The total token usage for the session. accumulated from all turns.
     pub total_token_usage: TokenUsage,
-    /// The token usage for the last turn. Received from the API.
+    /// The token usage for the last turn. Received from the API. It's total tokens is the whole window size.
     pub last_token_usage: TokenUsage,
     #[ts(type = "number | null")]
     pub model_context_window: Option<i64>,
