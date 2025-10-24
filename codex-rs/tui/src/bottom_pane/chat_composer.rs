@@ -1576,12 +1576,14 @@ impl Renderable for ChatComposer {
         }
         let style = user_message_style();
         Block::default().style(style).render_ref(composer_rect, buf);
-        buf.set_span(
-            textarea_rect.x - LIVE_PREFIX_COLS,
-            textarea_rect.y,
-            &"›".bold(),
-            textarea_rect.width,
-        );
+        if !textarea_rect.is_empty() {
+            buf.set_span(
+                textarea_rect.x - LIVE_PREFIX_COLS,
+                textarea_rect.y,
+                &"›".bold(),
+                textarea_rect.width,
+            );
+        }
 
         let mut state = self.textarea_state.borrow_mut();
         StatefulWidgetRef::render_ref(&(&self.textarea), textarea_rect, buf, &mut state);
@@ -2254,7 +2256,7 @@ mod tests {
         // Type "/mo" humanlike so paste-burst doesn’t interfere.
         type_chars_humanlike(&mut composer, &['/', 'm', 'o']);
 
-        let mut terminal = match Terminal::new(TestBackend::new(60, 4)) {
+        let mut terminal = match Terminal::new(TestBackend::new(60, 5)) {
             Ok(t) => t,
             Err(e) => panic!("Failed to create terminal: {e}"),
         };

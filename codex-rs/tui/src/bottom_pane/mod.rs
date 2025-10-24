@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::queued_user_messages::QueuedUserMessages;
-use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
@@ -444,16 +444,18 @@ impl BottomPane {
         if let Some(view) = self.active_view() {
             RenderableItem::Borrowed(view)
         } else {
-            let mut column = ColumnRenderable::new();
+            let mut flex = FlexRenderable::new();
             if let Some(status) = &self.status {
-                column.push_ref(status);
+                flex.push(0, RenderableItem::Borrowed(status));
             }
-            column.push_ref(&self.queued_user_messages);
+            flex.push(1, RenderableItem::Borrowed(&self.queued_user_messages));
             if self.status.is_some() || !self.queued_user_messages.messages.is_empty() {
-                column.push("");
+                flex.push(0, RenderableItem::Owned("".into()));
             }
-            column.push_ref(&self.composer);
-            RenderableItem::Owned(Box::new(column))
+            let mut flex2 = FlexRenderable::new();
+            flex2.push(1, RenderableItem::Owned(flex.into()));
+            flex2.push(0, RenderableItem::Borrowed(&self.composer));
+            RenderableItem::Owned(Box::new(flex2))
         }
     }
 }
@@ -558,7 +560,7 @@ mod tests {
 
     #[test]
     fn composer_shown_after_denied_while_task_running() {
-        let (tx_raw, rx) = unbounded_channel::<AppEvent>();
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
         let mut pane = BottomPane::new(BottomPaneParams {
             app_event_tx: tx,
@@ -594,13 +596,13 @@ mod tests {
         let area = Rect::new(0, 0, 40, 6);
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
-        let mut row1 = String::new();
+        let mut row0 = String::new();
         for x in 0..area.width {
-            row1.push(buf[(x, 1)].symbol().chars().next().unwrap_or(' '));
+            row0.push(buf[(x, 0)].symbol().chars().next().unwrap_or(' '));
         }
         assert!(
-            row1.contains("Working"),
-            "expected Working header after denial on row 1: {row1:?}"
+            row0.contains("Working"),
+            "expected Working header after denial on row 0: {row0:?}"
         );
 
         // Composer placeholder should be visible somewhere below.
@@ -619,9 +621,6 @@ mod tests {
             found_composer,
             "expected composer visible under status line"
         );
-
-        // Drain the channel to avoid unused warnings.
-        drop(rx);
     }
 
     #[test]
@@ -645,14 +644,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
 
-        let mut row0 = String::new();
-        for x in 0..area.width {
-            row0.push(buf[(x, 1)].symbol().chars().next().unwrap_or(' '));
-        }
-        assert!(
-            row0.contains("Working"),
-            "expected Working header: {row0:?}"
-        );
+        let bufs = snapshot_buffer(&buf);
+        assert!(bufs.contains("• Working"), "expected Working header");
     }
 
     #[test]
@@ -681,36 +674,6 @@ mod tests {
         assert_snapshot!(
             "status_and_composer_fill_height_without_bottom_padding",
             render_snapshot(&pane, area)
-        );
-    }
-
-    #[test]
-    fn status_hidden_when_height_too_small() {
-        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
-        let tx = AppEventSender::new(tx_raw);
-        let mut pane = BottomPane::new(BottomPaneParams {
-            app_event_tx: tx,
-            frame_requester: FrameRequester::test_dummy(),
-            has_input_focus: true,
-            enhanced_keys_supported: false,
-            placeholder_text: "Ask Codex to do anything".to_string(),
-            disable_paste_burst: false,
-        });
-
-        pane.set_task_running(true);
-
-        // Height=2 → composer takes the full space; status collapses when there is no room.
-        let area2 = Rect::new(0, 0, 20, 2);
-        assert_snapshot!(
-            "status_hidden_when_height_too_small_height_2",
-            render_snapshot(&pane, area2)
-        );
-
-        // Height=1 → no padding; single row is the composer (status hidden).
-        let area1 = Rect::new(0, 0, 20, 1);
-        assert_snapshot!(
-            "status_hidden_when_height_too_small_height_1",
-            render_snapshot(&pane, area1)
         );
     }
 

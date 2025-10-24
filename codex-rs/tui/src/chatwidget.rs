@@ -85,6 +85,7 @@ use crate::history_cell::McpToolCallCell;
 use crate::markdown::append_markdown;
 use crate::render::Insets;
 use crate::render::renderable::ColumnRenderable;
+use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableExt;
 use crate::render::renderable::RenderableItem;
@@ -287,6 +288,15 @@ impl From<String> for UserMessage {
     fn from(text: String) -> Self {
         Self {
             text,
+            image_paths: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for UserMessage {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
             image_paths: Vec::new(),
         }
     }
@@ -1057,12 +1067,7 @@ impl ChatWidget {
                             text,
                             image_paths: self.bottom_pane.take_recent_submission_images(),
                         };
-                        if self.bottom_pane.is_task_running() {
-                            self.queued_user_messages.push_back(user_message);
-                            self.refresh_queued_user_messages();
-                        } else {
-                            self.submit_user_message(user_message);
-                        }
+                        self.queue_user_message(user_message);
                     }
                     InputResult::Command(cmd) => {
                         self.dispatch_command(cmd);
@@ -1131,7 +1136,7 @@ impl ChatWidget {
                     return;
                 }
                 const INIT_PROMPT: &str = include_str!("../prompt_for_init_command.md");
-                self.submit_text_message(INIT_PROMPT.to_string());
+                self.submit_user_message(INIT_PROMPT.to_string().into());
             }
             SlashCommand::Compact => {
                 self.clear_token_usage();
@@ -1265,6 +1270,15 @@ impl ChatWidget {
             self.needs_final_message_separator = true;
         }
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
+    }
+
+    fn queue_user_message(&mut self, user_message: UserMessage) {
+        if self.bottom_pane.is_task_running() {
+            self.queued_user_messages.push_back(user_message);
+            self.refresh_queued_user_messages();
+        } else {
+            self.submit_user_message(user_message);
+        }
     }
 
     fn submit_user_message(&mut self, user_message: UserMessage) {
@@ -2179,16 +2193,6 @@ impl ChatWidget {
         self.bottom_pane.show_view(Box::new(view));
     }
 
-    /// Programmatically submit a user text message as if typed in the
-    /// composer. The text will be added to conversation history and sent to
-    /// the agent.
-    pub(crate) fn submit_text_message(&mut self, text: String) {
-        if text.is_empty() {
-            return;
-        }
-        self.submit_user_message(text.into());
-    }
-
     pub(crate) fn token_usage(&self) -> TokenUsage {
         self.token_info
             .as_ref()
@@ -2215,10 +2219,13 @@ impl ChatWidget {
             Some(cell) => RenderableItem::Borrowed(cell).inset(Insets::tlbr(1, 0, 0, 0)),
             None => RenderableItem::Owned(Box::new(())),
         };
-        RenderableItem::Owned(Box::new(ColumnRenderable::with(vec![
-            active_cell_renderable,
+        let mut flex = FlexRenderable::new();
+        flex.push(1, active_cell_renderable);
+        flex.push(
+            0,
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(1, 0, 0, 0)),
-        ])))
+        );
+        RenderableItem::Owned(Box::new(flex))
     }
 }
 
