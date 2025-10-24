@@ -59,6 +59,7 @@ use crate::config::Config;
 use crate::config_types::McpServerTransportConfig;
 use crate::config_types::ShellEnvironmentPolicy;
 use crate::conversation_history::ConversationHistory;
+use crate::conversation_history::prefetch_tokenizer_in_background;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
@@ -159,6 +160,8 @@ impl Codex {
         conversation_history: InitialHistory,
         session_source: SessionSource,
     ) -> CodexResult<CodexSpawnOk> {
+        // Start loading the tokenizer in the background so we don't block later.
+        prefetch_tokenizer_in_background();
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 

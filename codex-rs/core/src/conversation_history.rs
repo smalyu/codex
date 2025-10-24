@@ -6,7 +6,10 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_utils_tokenizer::Tokenizer;
+use tokio::task;
 use tracing::error;
+
+static TOKENIZER: OnceLock<Option<Arc<Tokenizer>>> = OnceLock::new();
 
 use crate::error::CodexErr;
 
@@ -16,17 +19,13 @@ pub(crate) struct ConversationHistory {
     /// The oldest items are at the beginning of the vector.
     items: Vec<ResponseItem>,
     token_info: Option<TokenUsageInfo>,
-    tokenizer: Option<Arc<Tokenizer>>,
 }
 
 impl ConversationHistory {
     pub(crate) fn new() -> Self {
-        // load the tokenizer once and share it across all instances. It takes ~500 ms to load.
-        let tokenizer = shared_tokenizer();
         Self {
             items: Vec::new(),
             token_info: None,
-            tokenizer,
         }
     }
 
@@ -121,8 +120,9 @@ impl ConversationHistory {
         let Some(context_window) = info.model_context_window else {
             return Ok(());
         };
-        let Some(tokenizer) = self.tokenizer.as_deref() else {
-            return Ok(());
+        let tokenizer = match shared_tokenizer() {
+            Some(t) => t,
+            None => return Ok(()),
         };
 
         let mut input_tokens: i64 = 0;
@@ -413,17 +413,33 @@ fn error_or_panic(message: String) {
 }
 
 fn shared_tokenizer() -> Option<Arc<Tokenizer>> {
-    static TOKENIZER: OnceLock<Option<Arc<Tokenizer>>> = OnceLock::new();
-    TOKENIZER
-        .get_or_init(|| match Tokenizer::try_default() {
-            Ok(tokenizer) => Some(Arc::new(tokenizer)),
-            Err(error) => {
-                error!("failed to create tokenizer: {error}");
-                None
+    TOKENIZER.get().and_then(|opt| opt.as_ref().map(Arc::clone))
+}
+
+/// Kick off background initialization of the shared tokenizer without blocking the caller.
+pub(crate) fn prefetch_tokenizer_in_background() {
+    if TOKENIZER.get().is_some() {
+        return;
+    }
+
+    // Spawn a background task to initialize the tokenizer. Use spawn_blocking in case
+    // initialization performs CPU-heavy work or file I/O.
+    tokio::spawn(async {
+        let result = task::spawn_blocking(Tokenizer::try_default).await;
+        match result {
+            Ok(Ok(tokenizer)) => {
+                let _ = TOKENIZER.set(Some(Arc::new(tokenizer)));
             }
-        })
-        .as_ref()
-        .map(Arc::clone)
+            Ok(Err(error)) => {
+                error!("failed to create tokenizer: {error}");
+                let _ = TOKENIZER.set(None);
+            }
+            Err(join_error) => {
+                error!("failed to join tokenizer init task: {join_error}");
+                let _ = TOKENIZER.set(None);
+            }
+        }
+    });
 }
 
 /// Anything that is not a system message or "reasoning" message is considered
