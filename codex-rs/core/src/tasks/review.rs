@@ -37,67 +37,101 @@ impl SessionTask for ReviewTask {
         input: Vec<UserInput>,
         cancellation_token: CancellationToken,
     ) -> Option<String> {
-        // let sess = session.clone_session();
-        // run_task(sess, ctx, input, TaskKind::Review, cancellation_token).await
-
-        let config = ctx.client.get_config().await;
-        let receiver = match run_codex_conversation(
-            config.as_ref().clone(),
-            session.auth_manager(),
+        let receiver = match start_review_conversation(
+            session.clone(),
+            ctx.clone(),
             input,
             cancellation_token,
         )
         .await
         {
-            Ok(r) => r,
-            Err(_) => return None,
+            Some(receiver) => receiver,
+            None => return None,
         };
-        while let Ok(agent_event) = receiver.recv().await {
-            match agent_event {
-                AgentEvent::EventMsg(event) => {
-                    session
-                        .clone_session()
-                        .send_event(ctx.as_ref(), event.clone())
-                        .await;
-                    if let EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) = event
-                    {
-                        exit_review_mode(
-                            session.clone_session(),
-                            last_agent_message.as_deref().map(parse_review_output_event),
-                            ctx.clone(),
-                        )
-                        .await;
-                    }
-                }
-                AgentEvent::ExecApprovalRequest(event, tx) => {
-                    let decision = session
-                        .clone_session()
-                        .request_command_approval(
-                            ctx.as_ref(),
-                            event.call_id.clone(),
-                            event.command.clone(),
-                            event.cwd.clone(),
-                            event.reason.clone(),
-                        )
-                        .await;
-                    let _ = tx.send(decision);
-                }
-                AgentEvent::PatchApprovalRequest(event, tx) => {
-                    // For now, forward the request to the UI via EventMsg and deny by default if no response is wired here.
-                    session
-                        .clone_session()
-                        .send_event(ctx.as_ref(), EventMsg::ApplyPatchApprovalRequest(event))
-                        .await;
-                    let _ = tx.send(codex_protocol::protocol::ReviewDecision::Denied);
-                }
-            }
-        }
+
+        process_review_events(session.clone(), ctx.clone(), receiver).await;
 
         Some("".to_string())
     }
 
     async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
         exit_review_mode(session.clone_session(), None, ctx).await;
+    }
+}
+
+async fn start_review_conversation(
+    session: Arc<SessionTaskContext>,
+    ctx: Arc<TurnContext>,
+    input: Vec<UserInput>,
+    cancellation_token: CancellationToken,
+) -> Option<async_channel::Receiver<AgentEvent>> {
+    let config = ctx.client.get_config().await;
+    match run_codex_conversation(
+        config.as_ref().clone(),
+        session.auth_manager(),
+        input,
+        cancellation_token,
+    )
+    .await
+    {
+        Ok(receiver) => Some(receiver),
+        Err(_) => {
+            exit_review_mode(session.clone_session(), None, ctx).await;
+            None
+        }
+    }
+}
+
+async fn process_review_events(
+    session: Arc<SessionTaskContext>,
+    ctx: Arc<TurnContext>,
+    receiver: async_channel::Receiver<AgentEvent>,
+) {
+    while let Ok(agent_event) = receiver.recv().await {
+        handle_review_agent_event(&session, &ctx, agent_event).await;
+    }
+}
+
+async fn handle_review_agent_event(
+    session: &Arc<SessionTaskContext>,
+    ctx: &Arc<TurnContext>,
+    agent_event: AgentEvent,
+) {
+    match agent_event {
+        AgentEvent::EventMsg(event) => {
+            session
+                .clone_session()
+                .send_event(ctx.as_ref(), event.clone())
+                .await;
+            if let EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message }) = event {
+                exit_review_mode(
+                    session.clone_session(),
+                    last_agent_message.as_deref().map(parse_review_output_event),
+                    ctx.clone(),
+                )
+                .await;
+            }
+        }
+        AgentEvent::ExecApprovalRequest(event, tx) => {
+            let decision = session
+                .clone_session()
+                .request_command_approval(
+                    ctx.as_ref(),
+                    event.call_id.clone(),
+                    event.command.clone(),
+                    event.cwd.clone(),
+                    event.reason.clone(),
+                )
+                .await;
+            let _ = tx.send(decision);
+        }
+        AgentEvent::PatchApprovalRequest(event, tx) => {
+            session
+                .clone_session()
+                .send_event(ctx.as_ref(), EventMsg::ApplyPatchApprovalRequest(event))
+                .await;
+            let _ = tx.send(codex_protocol::protocol::ReviewDecision::Denied);
+        }
     }
 }
 
