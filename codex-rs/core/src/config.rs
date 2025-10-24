@@ -108,6 +108,10 @@ pub struct Config {
     /// for either of approval_policy or sandbox_mode.
     pub did_user_set_custom_approval_policy_or_sandbox_mode: bool,
 
+    /// On Windows, indicates that a previously configured workspace-write sandbox
+    /// was coerced to read-only because native auto mode is unsupported.
+    pub forced_auto_mode_downgraded_on_windows: bool,
+
     pub shell_environment_policy: ShellEnvironmentPolicy,
 
     /// When `true`, `AgentReasoning` events emitted by the backend will be
@@ -1018,13 +1022,19 @@ impl From<ToolsToml> for Tools {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct SandboxPolicyResolution {
+    pub policy: SandboxPolicy,
+    pub forced_auto_mode_downgraded_on_windows: bool,
+}
+
 impl ConfigToml {
     /// Derive the effective sandbox policy from the configuration.
     fn derive_sandbox_policy(
         &self,
         sandbox_mode_override: Option<SandboxMode>,
         resolved_cwd: &Path,
-    ) -> SandboxPolicy {
+    ) -> SandboxPolicyResolution {
         let resolved_sandbox_mode = sandbox_mode_override
             .or(self.sandbox_mode)
             .or_else(|| {
@@ -1038,7 +1048,7 @@ impl ConfigToml {
                 })
             })
             .unwrap_or_default();
-        match resolved_sandbox_mode {
+        let mut sandbox_policy = match resolved_sandbox_mode {
             SandboxMode::ReadOnly => SandboxPolicy::new_read_only_policy(),
             SandboxMode::WorkspaceWrite => match self.sandbox_workspace_write.as_ref() {
                 Some(SandboxWorkspaceWrite {
@@ -1055,6 +1065,17 @@ impl ConfigToml {
                 None => SandboxPolicy::new_workspace_write_policy(),
             },
             SandboxMode::DangerFullAccess => SandboxPolicy::DangerFullAccess,
+        };
+        let mut forced_auto_mode_downgraded_on_windows = false;
+        if cfg!(target_os = "windows")
+            && matches!(resolved_sandbox_mode, SandboxMode::WorkspaceWrite)
+        {
+            sandbox_policy = SandboxPolicy::new_read_only_policy();
+            forced_auto_mode_downgraded_on_windows = true;
+        }
+        SandboxPolicyResolution {
+            policy: sandbox_policy,
+            forced_auto_mode_downgraded_on_windows,
         }
     }
 
@@ -1212,7 +1233,10 @@ impl Config {
             .get_active_project(&resolved_cwd)
             .unwrap_or(ProjectConfig { trust_level: None });
 
-        let mut sandbox_policy = cfg.derive_sandbox_policy(sandbox_mode, &resolved_cwd);
+        let SandboxPolicyResolution {
+            policy: mut sandbox_policy,
+            forced_auto_mode_downgraded_on_windows,
+        } = cfg.derive_sandbox_policy(sandbox_mode, &resolved_cwd);
         if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
             for path in additional_writable_roots {
                 if !writable_roots.iter().any(|existing| existing == &path) {
@@ -1341,6 +1365,7 @@ impl Config {
             approval_policy,
             sandbox_policy,
             did_user_set_custom_approval_policy_or_sandbox_mode,
+            forced_auto_mode_downgraded_on_windows,
             shell_environment_policy,
             notify: cfg.notify,
             user_instructions,
@@ -1591,10 +1616,14 @@ network_access = false  # This should be ignored.
         let sandbox_full_access_cfg = toml::from_str::<ConfigToml>(sandbox_full_access)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
+        let resolution = sandbox_full_access_cfg
+            .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"));
         assert_eq!(
-            SandboxPolicy::DangerFullAccess,
-            sandbox_full_access_cfg
-                .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"))
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::DangerFullAccess,
+                forced_auto_mode_downgraded_on_windows: false,
+            }
         );
 
         let sandbox_read_only = r#"
@@ -1607,10 +1636,14 @@ network_access = true  # This should be ignored.
         let sandbox_read_only_cfg = toml::from_str::<ConfigToml>(sandbox_read_only)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
+        let resolution = sandbox_read_only_cfg
+            .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"));
         assert_eq!(
-            SandboxPolicy::ReadOnly,
-            sandbox_read_only_cfg
-                .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"))
+            resolution,
+            SandboxPolicyResolution {
+                policy: SandboxPolicy::ReadOnly,
+                forced_auto_mode_downgraded_on_windows: false,
+            }
         );
 
         let sandbox_workspace_write = r#"
@@ -1627,16 +1660,30 @@ exclude_slash_tmp = true
         let sandbox_workspace_write_cfg = toml::from_str::<ConfigToml>(sandbox_workspace_write)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
-        assert_eq!(
-            SandboxPolicy::WorkspaceWrite {
-                writable_roots: vec![PathBuf::from("/my/workspace")],
-                network_access: false,
-                exclude_tmpdir_env_var: true,
-                exclude_slash_tmp: true,
-            },
-            sandbox_workspace_write_cfg
-                .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"))
-        );
+        let resolution = sandbox_workspace_write_cfg
+            .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"));
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::ReadOnly,
+                    forced_auto_mode_downgraded_on_windows: true,
+                }
+            );
+        } else {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::WorkspaceWrite {
+                        writable_roots: vec![PathBuf::from("/my/workspace")],
+                        network_access: false,
+                        exclude_tmpdir_env_var: true,
+                        exclude_slash_tmp: true,
+                    },
+                    forced_auto_mode_downgraded_on_windows: false,
+                }
+            );
+        }
 
         let sandbox_workspace_write = r#"
 sandbox_mode = "workspace-write"
@@ -1655,16 +1702,30 @@ trust_level = "trusted"
         let sandbox_workspace_write_cfg = toml::from_str::<ConfigToml>(sandbox_workspace_write)
             .expect("TOML deserialization should succeed");
         let sandbox_mode_override = None;
-        assert_eq!(
-            SandboxPolicy::WorkspaceWrite {
-                writable_roots: vec![PathBuf::from("/my/workspace")],
-                network_access: false,
-                exclude_tmpdir_env_var: true,
-                exclude_slash_tmp: true,
-            },
-            sandbox_workspace_write_cfg
-                .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"))
-        );
+        let resolution = sandbox_workspace_write_cfg
+            .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"));
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::ReadOnly,
+                    forced_auto_mode_downgraded_on_windows: true,
+                }
+            );
+        } else {
+            assert_eq!(
+                resolution,
+                SandboxPolicyResolution {
+                    policy: SandboxPolicy::WorkspaceWrite {
+                        writable_roots: vec![PathBuf::from("/my/workspace")],
+                        network_access: false,
+                        exclude_tmpdir_env_var: true,
+                        exclude_slash_tmp: true,
+                    },
+                    forced_auto_mode_downgraded_on_windows: false,
+                }
+            );
+        }
     }
 
     #[test]
@@ -2849,6 +2910,7 @@ model_verbosity = "high"
                 approval_policy: AskForApproval::Never,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
+                forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 user_instructions: None,
                 notify: None,
@@ -2917,6 +2979,7 @@ model_verbosity = "high"
             approval_policy: AskForApproval::UnlessTrusted,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
@@ -3000,6 +3063,7 @@ model_verbosity = "high"
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
@@ -3069,6 +3133,7 @@ model_verbosity = "high"
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
             notify: None,
