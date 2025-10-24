@@ -4,24 +4,90 @@
 use anyhow::Result;
 use codex_core::features::Feature;
 use codex_core::model_family::find_family_for_model;
-use codex_core::protocol::AskForApproval;
-use codex_core::protocol::EventMsg;
-use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
-use codex_protocol::config_types::ReasoningSummary;
-use codex_protocol::user_input::UserInput;
 use core_test_support::assert_regex_match;
 use core_test_support::responses;
+use core_test_support::responses::ev_assistant_message;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
+use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
-use core_test_support::wait_for_event;
 use escargot::CargoBuild;
 use regex_lite::Regex;
 use serde_json::Value;
+use serde_json::json;
 use wiremock::matchers::any;
+
+// Verifies byte-truncation formatting for function error output (RespondToModel errors)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn truncate_function_error_trims_respond_to_model() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        // Use the test model that wires function tools like grep_files
+        config.model = "test-gpt-5-codex".to_string();
+        config.model_family =
+            find_family_for_model("test-gpt-5-codex").expect("model family for test model");
+    });
+    let test = builder.build(&server).await?;
+
+    // Construct a very long, non-existent path to force a RespondToModel error with a large message
+    let long_path = "a".repeat(20_000);
+    let call_id = "grep-huge-error";
+    let args = json!({
+        "pattern": "alpha",
+        "path": long_path,
+        "limit": 10
+    });
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(call_id, "grep_files", &serde_json::to_string(&args)?),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-2"),
+        ]),
+    ];
+    let mock = mount_sse_sequence(&server, responses).await;
+
+    test.submit_turn_with_policy(
+        "trigger grep_files with long path to test truncation",
+        SandboxPolicy::DangerFullAccess,
+    )
+    .await?;
+
+    let output = mock
+        .function_call_output_text(call_id)
+        .expect("function error output present");
+
+    // Expect plaintext with byte-truncation marker and no omitted-lines marker
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&output).is_err(),
+        "expected error output to be plain text",
+    );
+    assert!(
+        output.contains("Total output lines: 1\n\n"),
+        "expected total lines header in truncated output: {output}"
+    );
+    assert!(
+        output.contains("[... output truncated to fit 10240 bytes ...]"),
+        "missing byte truncation marker: {output}"
+    );
+    assert!(
+        !output.contains("omitted"),
+        "line omission marker should not appear when no lines were dropped: {output}"
+    );
+
+    Ok(())
+}
 
 // Verifies that a standard tool call (shell) exceeding the model formatting
 // limits is truncated before being sent back to the model.
@@ -38,7 +104,6 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
             find_family_for_model("gpt-5-codex").expect("gpt-5-codex is a model family");
     });
     let fixture = builder.build(&server).await?;
-    let session_model = fixture.session_configured.model.clone();
 
     let call_id = "shell-too-large";
     let args = serde_json::json!({
@@ -68,22 +133,8 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
     .await;
 
     fixture
-        .codex
-        .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
-                text: "trigger big shell output".into(),
-            }],
-            final_output_json_schema: None,
-            cwd: fixture.cwd.path().to_path_buf(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model: session_model,
-            effort: None,
-            summary: ReasoningSummary::Auto,
-        })
+        .submit_turn_with_policy("trigger big shell output", SandboxPolicy::DangerFullAccess)
         .await?;
-
-    wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
 
     // Inspect what we sent back to the model; it should contain a truncated
     // function_call_output for the shell call.
@@ -188,25 +239,13 @@ async fn mcp_tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> 
         );
     });
     let fixture = builder.build(&server).await?;
-    let session_model = fixture.session_configured.model.clone();
 
     fixture
-        .codex
-        .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
-                text: "call the rmcp echo tool with a very large message".into(),
-            }],
-            final_output_json_schema: None,
-            cwd: fixture.cwd.path().to_path_buf(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::ReadOnly,
-            model: session_model,
-            effort: None,
-            summary: ReasoningSummary::Auto,
-        })
+        .submit_turn_with_policy(
+            "call the rmcp echo tool with a very large message",
+            SandboxPolicy::ReadOnly,
+        )
         .await?;
-
-    wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
 
     // The MCP tool call output is converted to a function_call_output for the model.
     let output = mock2
