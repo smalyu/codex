@@ -6,6 +6,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExitedReviewModeEvent;
 use codex_protocol::protocol::ReviewOutputEvent;
+use codex_protocol::protocol::TaskCompleteEvent;
 use tokio_util::sync::CancellationToken;
 
 use crate::codex::Session;
@@ -48,13 +49,20 @@ impl SessionTask for ReviewTask {
             None => return None,
         };
 
-        process_review_events(session.clone(), ctx.clone(), receiver).await;
+        let exit_emitted = process_review_events(session.clone(), ctx.clone(), receiver).await;
 
-        Some("".to_string())
+        if !exit_emitted && !cancellation_token.is_cancelled() {
+            // Ensure the parent session leaves review mode even if the sub-agent
+            // finished without emitting a TaskComplete event (for example, when
+            // cancellation interrupts the stream before completion parsing).
+            emit_review_exit_on_abort(session.clone_session(), ctx.clone()).await;
+        }
+
+        None
     }
 
     async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
-        exit_review_mode(session.clone_session(), None, ctx).await;
+        let _ = (session, ctx);
     }
 }
 
@@ -85,34 +93,48 @@ async fn process_review_events(
     session: Arc<SessionTaskContext>,
     ctx: Arc<TurnContext>,
     receiver: async_channel::Receiver<AgentEvent>,
-) {
+) -> bool {
+    let mut exit_emitted = false;
     while let Ok(agent_event) = receiver.recv().await {
-        handle_review_agent_event(&session, &ctx, agent_event).await;
+        match handle_review_agent_event(&session, &ctx, agent_event).await {
+            ReviewEventAction::Continue => {}
+            ReviewEventAction::Finish {
+                exit_already_emitted,
+            } => {
+                exit_emitted = exit_already_emitted;
+                break;
+            }
+        }
     }
+    exit_emitted
 }
 
 async fn handle_review_agent_event(
     session: &Arc<SessionTaskContext>,
     ctx: &Arc<TurnContext>,
     agent_event: AgentEvent,
-) {
+) -> ReviewEventAction {
     match agent_event {
         AgentEvent::EventMsg(event) => {
             match event {
                 EventMsg::AgentMessage(_) => {
                     // The structured review output is surfaced through ExitedReviewMode.
                     // Suppress the raw AgentMessage to avoid leaking implementation details.
+                    ReviewEventAction::Continue
                 }
                 EventMsg::TaskComplete(task_complete) => {
-                    let review_output = task_complete
-                        .last_agent_message
-                        .as_deref()
-                        .map(parse_review_output_event);
-                    exit_review_mode(session.clone_session(), review_output, ctx.clone()).await;
-                    session
-                        .clone_session()
-                        .send_event(ctx.as_ref(), EventMsg::TaskComplete(task_complete))
-                        .await;
+                    finalize_review_completion(session, ctx, task_complete).await;
+                    ReviewEventAction::Finish {
+                        exit_already_emitted: true,
+                    }
+                }
+                EventMsg::TurnAborted(_) => {
+                    // The parent session emits the authoritative TurnAborted once
+                    // review teardown completes, so drop the sub-agent's copy to
+                    // preserve the expected event ordering.
+                    ReviewEventAction::Finish {
+                        exit_already_emitted: false,
+                    }
                 }
                 EventMsg::AgentMessageDelta(_)
                 | EventMsg::TokenCount(_)
@@ -144,7 +166,6 @@ async fn handle_review_agent_event(
                 | EventMsg::McpListToolsResponse(_)
                 | EventMsg::ListCustomPromptsResponse(_)
                 | EventMsg::PlanUpdate(_)
-                | EventMsg::TurnAborted(_)
                 | EventMsg::ShutdownComplete
                 | EventMsg::ConversationPath(_)
                 | EventMsg::EnteredReviewMode(_)
@@ -155,6 +176,7 @@ async fn handle_review_agent_event(
                         .clone_session()
                         .send_event(ctx.as_ref(), event)
                         .await;
+                    ReviewEventAction::Continue
                 }
             }
         }
@@ -170,6 +192,7 @@ async fn handle_review_agent_event(
                 )
                 .await;
             let _ = tx.send(decision);
+            ReviewEventAction::Continue
         }
         AgentEvent::PatchApprovalRequest(event, tx) => {
             session
@@ -177,8 +200,27 @@ async fn handle_review_agent_event(
                 .send_event(ctx.as_ref(), EventMsg::ApplyPatchApprovalRequest(event))
                 .await;
             let _ = tx.send(codex_protocol::protocol::ReviewDecision::Denied);
+            ReviewEventAction::Continue
         }
     }
+}
+
+enum ReviewEventAction {
+    Continue,
+    Finish { exit_already_emitted: bool },
+}
+
+async fn finalize_review_completion(
+    session: &Arc<SessionTaskContext>,
+    ctx: &Arc<TurnContext>,
+    task_complete: TaskCompleteEvent,
+) {
+    let review_output = task_complete
+        .last_agent_message
+        .as_deref()
+        .map(parse_review_output_event);
+
+    exit_review_mode(session.clone_session(), review_output, ctx.clone()).await;
 }
 
 /// Emits an ExitedReviewMode Event with optional ReviewOutput,
@@ -232,6 +274,10 @@ pub(crate) async fn exit_review_mode(
             EventMsg::ExitedReviewMode(ExitedReviewModeEvent { review_output }),
         )
         .await;
+}
+
+pub(crate) async fn emit_review_exit_on_abort(session: Arc<Session>, ctx: Arc<TurnContext>) {
+    exit_review_mode(session, None, ctx).await;
 }
 
 /// Parse the review output; when not valid JSON, build a structured
