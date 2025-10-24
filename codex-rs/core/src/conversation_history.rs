@@ -1,11 +1,8 @@
-use std::sync::OnceLock;
-
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_utils_tokenizer::Tokenizer;
-use codex_utils_tokenizer::TokenizerError;
 use tracing::error;
 
 use crate::error::CodexErr;
@@ -16,6 +13,7 @@ pub(crate) struct ConversationHistory {
     /// The oldest items are at the beginning of the vector.
     items: Vec<ResponseItem>,
     token_info: Option<TokenUsageInfo>,
+    tokenizer: Option<Tokenizer>,
 }
 
 impl ConversationHistory {
@@ -25,18 +23,18 @@ impl ConversationHistory {
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(context_window),
         });
+        let tokenizer = match Tokenizer::try_default() {
+            Ok(tokenizer) => Some(tokenizer),
+            Err(error) => {
+                error!("failed to create tokenizer: {error}");
+                None
+            }
+        };
         Self {
             items: Vec::new(),
             token_info,
+            tokenizer,
         }
-    }
-
-    fn tokenizer() -> Result<&'static Tokenizer, CodexErr> {
-        static TOKENIZER: OnceLock<Result<Tokenizer, TokenizerError>> = OnceLock::new();
-        let tokenizer = TOKENIZER.get_or_init(Tokenizer::try_default);
-        tokenizer
-            .as_ref()
-            .map_err(|e| CodexErr::InvalidInput(format!("tokenizer error: {e}")))
     }
 
     pub(crate) fn token_info(&self) -> Option<TokenUsageInfo> {
@@ -128,8 +126,9 @@ impl ConversationHistory {
         let Some(context_window) = info.model_context_window else {
             return Ok(());
         };
-
-        let tokenizer = Self::tokenizer()?;
+        let Some(tokenizer) = self.tokenizer.as_ref() else {
+            return Ok(());
+        };
 
         let mut input_tokens: i64 = 0;
         for item in content {
