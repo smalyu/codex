@@ -396,6 +396,7 @@ async fn run_ratatui_app(
             1,
             None,
             INTERACTIVE_SESSION_SOURCES,
+            None,
         )
         .await
         {

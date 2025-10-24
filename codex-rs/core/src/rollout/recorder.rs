@@ -97,8 +97,16 @@ impl RolloutRecorder {
         page_size: usize,
         cursor: Option<&Cursor>,
         allowed_sources: &[SessionSource],
+        model_provider: Option<&str>,
     ) -> std::io::Result<ConversationsPage> {
-        get_conversations(codex_home, page_size, cursor, allowed_sources).await
+        get_conversations(
+            codex_home,
+            page_size,
+            cursor,
+            allowed_sources,
+            model_provider,
+        )
+        .await
     }
 
     /// Attempt to create a new [`RolloutRecorder`]. If the sessions directory

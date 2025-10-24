@@ -77,6 +77,7 @@ pub async fn run_resume_picker(tui: &mut Tui, codex_home: &Path) -> Result<Resum
                 PAGE_SIZE,
                 request.cursor.as_ref(),
                 INTERACTIVE_SESSION_SOURCES,
+                None,
             )
             .await;
             let _ = tx.send(BackgroundEvent::PageLoaded {
@@ -329,6 +330,7 @@ impl PickerState {
             PAGE_SIZE,
             None,
             INTERACTIVE_SESSION_SOURCES,
+            None,
         )
         .await?;
         self.reset_pagination();
