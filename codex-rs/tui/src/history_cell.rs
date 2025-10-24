@@ -46,7 +46,6 @@ use ratatui::style::Style;
 use ratatui::style::Styled;
 use ratatui::style::Stylize;
 use ratatui::widgets::Paragraph;
-use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
 use std::any::Any;
 use std::collections::HashMap;
@@ -103,12 +102,21 @@ pub(crate) trait HistoryCell: std::fmt::Debug + Send + Sync + Any {
 impl Renderable for Box<dyn HistoryCell> {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let lines = self.display_lines(area.width);
-        Paragraph::new(Text::from(lines)).render(area, buf);
+        let y = if area.height == 0 {
+            0
+        } else {
+            let overflow = lines.len().saturating_sub(usize::from(area.height));
+            u16::try_from(overflow).unwrap_or(u16::MAX)
+        };
+        Paragraph::new(Text::from(lines))
+            .scroll((y, 0))
+            .render(area, buf);
     }
     fn desired_height(&self, width: u16) -> u16 {
         HistoryCell::desired_height(self.as_ref(), width)
     }
 }
+
 impl dyn HistoryCell {
     pub(crate) fn as_any(&self) -> &dyn Any {
         self
@@ -934,23 +942,6 @@ impl HistoryCell for McpToolCallCell {
         }
 
         lines
-    }
-}
-
-impl WidgetRef for &McpToolCallCell {
-    fn render_ref(&self, area: Rect, buf: &mut Buffer) {
-        if area.height == 0 {
-            return;
-        }
-        let lines = self.display_lines(area.width);
-        let max_rows = area.height as usize;
-        let rendered = if lines.len() > max_rows {
-            lines[lines.len() - max_rows..].to_vec()
-        } else {
-            lines
-        };
-
-        Text::from(rendered).render(area, buf);
     }
 }
 

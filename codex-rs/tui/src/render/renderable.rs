@@ -197,6 +197,7 @@ impl<'a> ColumnRenderable<'a> {
         self.children.push(RenderableItem::Owned(child.into()));
     }
 
+    #[allow(dead_code)]
     pub fn push_ref<R>(&mut self, child: &'a R)
     where
         R: Renderable + 'a,
