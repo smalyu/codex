@@ -174,7 +174,8 @@ fn create_fake_rollout(codex_home: &Path, filename_ts: &str, meta_rfc3339: &str,
                 "cwd": "/",
                 "originator": "codex",
                 "cli_version": "0.0.0",
-                "instructions": null
+                "instructions": null,
+                "model_provider": "test-provider"
             }
         })
         .to_string(),

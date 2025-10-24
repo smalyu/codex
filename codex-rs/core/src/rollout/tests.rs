@@ -63,6 +63,7 @@ fn write_session_file(
         "cwd": ".",
         "originator": "test_originator",
         "cli_version": "test_version",
+        "model_provider": "test-provider",
     });
 
     if let Some(source) = source {
@@ -166,6 +167,7 @@ async fn test_list_conversations_latest_first() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
     let head_2 = vec![serde_json::json!({
         "id": u2,
@@ -175,6 +177,7 @@ async fn test_list_conversations_latest_first() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
     let head_1 = vec![serde_json::json!({
         "id": u1,
@@ -184,6 +187,7 @@ async fn test_list_conversations_latest_first() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
 
     let expected_cursor: Cursor =
@@ -298,6 +302,7 @@ async fn test_pagination_cursor() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
     let head_4 = vec![serde_json::json!({
         "id": u4,
@@ -307,6 +312,7 @@ async fn test_pagination_cursor() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
     let expected_cursor1: Cursor =
         serde_json::from_str(&format!("\"2025-03-04T09-00-00|{u4}\"")).unwrap();
@@ -361,6 +367,7 @@ async fn test_pagination_cursor() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
     let head_2 = vec![serde_json::json!({
         "id": u2,
@@ -370,6 +377,7 @@ async fn test_pagination_cursor() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
     let expected_cursor2: Cursor =
         serde_json::from_str(&format!("\"2025-03-02T09-00-00|{u2}\"")).unwrap();
@@ -418,6 +426,7 @@ async fn test_pagination_cursor() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
     let expected_cursor3: Cursor =
         serde_json::from_str(&format!("\"2025-03-01T09-00-00|{u1}\"")).unwrap();
@@ -467,6 +476,7 @@ async fn test_get_conversation_contents() {
         "originator": "test_originator",
         "cli_version": "test_version",
         "source": "vscode",
+        "model_provider": "test-provider",
     })];
     let expected_cursor: Cursor = serde_json::from_str(&format!("\"{ts}|{uuid}\"")).unwrap();
     let expected_page = ConversationsPage {
@@ -495,6 +505,7 @@ async fn test_get_conversation_contents() {
             "originator": "test_originator",
             "cli_version": "test_version",
             "source": "vscode",
+            "model_provider": "test-provider",
         }
     });
     let user_event = serde_json::json!({
@@ -532,6 +543,7 @@ async fn test_tail_includes_last_response_items() -> Result<()> {
                 originator: "test_originator".into(),
                 cli_version: "test_version".into(),
                 source: SessionSource::VSCode,
+                model_provider: Some("test-provider".into()),
             },
             git: None,
         }),
@@ -615,6 +627,7 @@ async fn test_tail_handles_short_sessions() -> Result<()> {
                 originator: "test_originator".into(),
                 cli_version: "test_version".into(),
                 source: SessionSource::VSCode,
+                model_provider: Some("test-provider".into()),
             },
             git: None,
         }),
@@ -699,6 +712,7 @@ async fn test_tail_skips_trailing_non_responses() -> Result<()> {
                 originator: "test_originator".into(),
                 cli_version: "test_version".into(),
                 source: SessionSource::VSCode,
+                model_provider: Some("test-provider".into()),
             },
             git: None,
         }),
@@ -810,6 +824,7 @@ async fn test_stable_ordering_same_second_pagination() {
             "originator": "test_originator",
             "cli_version": "test_version",
             "source": "vscode",
+            "model_provider": "test-provider",
         })]
     };
     let expected_cursor1: Cursor = serde_json::from_str(&format!("\"{ts}|{u2}\"")).unwrap();
