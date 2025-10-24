@@ -41,7 +41,7 @@ impl SessionTask for ReviewTask {
             session.clone(),
             ctx.clone(),
             input,
-            cancellation_token,
+            cancellation_token.clone(),
         )
         .await
         {
