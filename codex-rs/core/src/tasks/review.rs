@@ -73,8 +73,12 @@ async fn start_review_conversation(
     cancellation_token: CancellationToken,
 ) -> Option<async_channel::Receiver<AgentEvent>> {
     let config = ctx.client.get_config().await;
+    let mut sub_agent_config = config.as_ref().clone();
+    sub_agent_config.user_instructions = None;
+    sub_agent_config.project_doc_max_bytes = 0;
+    sub_agent_config.base_instructions = Some(crate::REVIEW_PROMPT.to_string());
     match run_codex_conversation(
-        config.as_ref().clone(),
+        sub_agent_config,
         session.auth_manager(),
         input,
         cancellation_token,
