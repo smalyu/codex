@@ -54,6 +54,7 @@ struct HeadTailSummary {
     saw_session_meta: bool,
     saw_user_event: bool,
     source: Option<SessionSource>,
+    model_provider: Option<String>,
     created_at: Option<String>,
     updated_at: Option<String>,
 }
@@ -109,6 +110,7 @@ pub(crate) async fn get_conversations(
     page_size: usize,
     cursor: Option<&Cursor>,
     allowed_sources: &[SessionSource],
+    model_provider: Option<&str>,
 ) -> io::Result<ConversationsPage> {
     let mut root = codex_home.to_path_buf();
     root.push(SESSIONS_SUBDIR);
@@ -124,8 +126,14 @@ pub(crate) async fn get_conversations(
 
     let anchor = cursor.cloned();
 
-    let result =
-        traverse_directories_for_paths(root.clone(), page_size, anchor, allowed_sources).await?;
+    let result = traverse_directories_for_paths(
+        root.clone(),
+        page_size,
+        anchor,
+        allowed_sources,
+        model_provider,
+    )
+    .await?;
     Ok(result)
 }
 
@@ -145,6 +153,7 @@ async fn traverse_directories_for_paths(
     page_size: usize,
     anchor: Option<Cursor>,
     allowed_sources: &[SessionSource],
+    model_provider: Option<&str>,
 ) -> io::Result<ConversationsPage> {
     let mut items: Vec<ConversationItem> = Vec::with_capacity(page_size);
     let mut scanned_files = 0usize;
@@ -207,6 +216,12 @@ async fn traverse_directories_for_paths(
                             .is_some_and(|source| allowed_sources.iter().any(|s| s == &source))
                     {
                         continue;
+                    }
+                    if let Some(filter) = model_provider {
+                        match summary.model_provider.as_deref() {
+                            Some(provider) if provider == filter => {}
+                            _ => continue,
+                        }
                     }
                     // Apply filters: must have session meta and at least one user message event
                     if summary.saw_session_meta && summary.saw_user_event {
@@ -354,6 +369,7 @@ async fn read_head_and_tail(
         match rollout_line.item {
             RolloutItem::SessionMeta(session_meta_line) => {
                 summary.source = Some(session_meta_line.meta.source);
+                summary.model_provider = session_meta_line.meta.model_provider.clone();
                 summary.created_at = summary
                     .created_at
                     .clone()

@@ -933,6 +933,7 @@ pub struct SessionMeta {
     pub instructions: Option<String>,
     #[serde(default)]
     pub source: SessionSource,
+    pub model_provider: Option<String>,
 }
 
 impl Default for SessionMeta {
@@ -945,6 +946,7 @@ impl Default for SessionMeta {
             cli_version: String::new(),
             instructions: None,
             source: SessionSource::default(),
+            model_provider: None,
         }
     }
 }

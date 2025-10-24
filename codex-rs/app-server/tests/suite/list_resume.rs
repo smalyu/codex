@@ -57,6 +57,7 @@ async fn test_list_and_resume_conversations() {
         .send_list_conversations_request(ListConversationsParams {
             page_size: Some(2),
             cursor: None,
+            model_provider: None,
         })
         .await
         .expect("send listConversations");
@@ -74,6 +75,8 @@ async fn test_list_and_resume_conversations() {
     // Newest first; preview text should match
     assert_eq!(items[0].preview, "Hello A");
     assert_eq!(items[1].preview, "Hello B");
+    assert_eq!(items[0].model_provider.as_deref(), Some("test-provider"));
+    assert_eq!(items[1].model_provider.as_deref(), Some("test-provider"));
     assert!(items[0].path.is_absolute());
     assert!(next_cursor.is_some());
 
@@ -82,6 +85,7 @@ async fn test_list_and_resume_conversations() {
         .send_list_conversations_request(ListConversationsParams {
             page_size: Some(2),
             cursor: next_cursor,
+            model_provider: None,
         })
         .await
         .expect("send listConversations page 2");
@@ -99,7 +103,58 @@ async fn test_list_and_resume_conversations() {
     } = to_response::<ListConversationsResponse>(resp2).expect("deserialize response");
     assert_eq!(items2.len(), 1);
     assert_eq!(items2[0].preview, "Hello C");
+    assert_eq!(items2[0].model_provider.as_deref(), Some("test-provider"));
     assert!(next2.is_some());
+
+    // Filtering by model provider should return only matching sessions.
+    let filter_req_id = mcp
+        .send_list_conversations_request(ListConversationsParams {
+            page_size: Some(10),
+            cursor: None,
+            model_provider: Some("test-provider".to_string()),
+        })
+        .await
+        .expect("send listConversations filtered");
+    let filter_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(filter_req_id)),
+    )
+    .await
+    .expect("listConversations filtered timeout")
+    .expect("listConversations filtered resp");
+    let ListConversationsResponse {
+        items: filtered_items,
+        next_cursor: filtered_next,
+    } = to_response::<ListConversationsResponse>(filter_resp).expect("deserialize filtered");
+    assert_eq!(filtered_items.len(), 3);
+    assert!(filtered_next.is_none());
+    assert!(
+        filtered_items
+            .iter()
+            .all(|item| item.model_provider.as_deref() == Some("test-provider"))
+    );
+
+    let empty_req_id = mcp
+        .send_list_conversations_request(ListConversationsParams {
+            page_size: Some(10),
+            cursor: None,
+            model_provider: Some("other".to_string()),
+        })
+        .await
+        .expect("send listConversations filtered empty");
+    let empty_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(empty_req_id)),
+    )
+    .await
+    .expect("listConversations filtered empty timeout")
+    .expect("listConversations filtered empty resp");
+    let ListConversationsResponse {
+        items: empty_items,
+        next_cursor: empty_next,
+    } = to_response::<ListConversationsResponse>(empty_resp).expect("deserialize filtered empty");
+    assert!(empty_items.is_empty());
+    assert!(empty_next.is_none());
 
     // Now resume one of the sessions and expect a SessionConfigured notification and response.
     let resume_req_id = mcp
@@ -174,7 +229,8 @@ fn create_fake_rollout(codex_home: &Path, filename_ts: &str, meta_rfc3339: &str,
                 "cwd": "/",
                 "originator": "codex",
                 "cli_version": "0.0.0",
-                "instructions": null
+                "instructions": null,
+                "model_provider": "test-provider"
             }
         })
         .to_string(),

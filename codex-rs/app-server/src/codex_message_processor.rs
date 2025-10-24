@@ -818,9 +818,14 @@ impl CodexMessageProcessor {
         request_id: RequestId,
         params: ListConversationsParams,
     ) {
-        let page_size = params.page_size.unwrap_or(25);
+        let ListConversationsParams {
+            page_size,
+            cursor,
+            model_provider,
+        } = params;
+        let page_size = page_size.unwrap_or(25);
         // Decode the optional cursor string to a Cursor via serde (Cursor implements Deserialize from string)
-        let cursor_obj: Option<RolloutCursor> = match params.cursor {
+        let cursor_obj: Option<RolloutCursor> = match cursor {
             Some(s) => serde_json::from_str::<RolloutCursor>(&format!("\"{s}\"")).ok(),
             None => None,
         };
@@ -831,6 +836,7 @@ impl CodexMessageProcessor {
             page_size,
             cursor_ref,
             INTERACTIVE_SESSION_SOURCES,
+            model_provider.as_deref(),
         )
         .await
         {
@@ -1640,12 +1646,14 @@ fn extract_conversation_summary(
     } else {
         Some(session_meta.timestamp.clone())
     };
+    let model_provider = session_meta.model_provider.clone();
 
     Some(ConversationSummary {
         conversation_id: session_meta.id,
         timestamp,
         path,
         preview: preview.to_string(),
+        model_provider,
     })
 }
 
@@ -1669,7 +1677,8 @@ mod tests {
                 "cwd": "/",
                 "originator": "codex",
                 "cli_version": "0.0.0",
-                "instructions": null
+                "instructions": null,
+                "model_provider": "test-provider"
             }),
             json!({
                 "type": "message",
@@ -1698,6 +1707,7 @@ mod tests {
         );
         assert_eq!(summary.path, path);
         assert_eq!(summary.preview, "Count to 5");
+        assert_eq!(summary.model_provider, Some("test-provider".to_string()));
         Ok(())
     }
 }
