@@ -27,7 +27,7 @@ impl ConversationHistory {
         };
         Self {
             items: Vec::new(),
-            token_info: Some(TokenUsageInfo::default()),
+            token_info: None,
             tokenizer,
         }
     }

@@ -38,7 +38,7 @@ async fn interrupt_tool_records_history_entries() {
         .unwrap();
 
     // Wait for the normal turn to complete before sending the oversized input
-    let turn_timeout = Duration::from_secs(2);
+    let turn_timeout = Duration::from_secs(1);
     wait_for_event_with_timeout(
         &codex,
         |ev| matches!(ev, EventMsg::TaskComplete(_)),
