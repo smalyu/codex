@@ -1,5 +1,7 @@
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::context_manager::truncation::TruncationConfig;
+use crate::context_manager::truncation::truncate_with_config;
 use crate::tools::TELEMETRY_PREVIEW_MAX_BYTES;
 use crate::tools::TELEMETRY_PREVIEW_MAX_LINES;
 use crate::tools::TELEMETRY_PREVIEW_TRUNCATION_NOTICE;
@@ -9,7 +11,6 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ShellToolCallParams;
 use codex_protocol::protocol::FileChange;
-use codex_utils_string::take_bytes_at_char_boundary;
 use mcp_types::CallToolResult;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -112,43 +113,14 @@ impl ToolOutput {
 }
 
 fn telemetry_preview(content: &str) -> String {
-    let truncated_slice = take_bytes_at_char_boundary(content, TELEMETRY_PREVIEW_MAX_BYTES);
-    let truncated_by_bytes = truncated_slice.len() < content.len();
-
-    let mut preview = String::new();
-    let mut lines_iter = truncated_slice.lines();
-    for idx in 0..TELEMETRY_PREVIEW_MAX_LINES {
-        match lines_iter.next() {
-            Some(line) => {
-                if idx > 0 {
-                    preview.push('\n');
-                }
-                preview.push_str(line);
-            }
-            None => break,
-        }
-    }
-    let truncated_by_lines = lines_iter.next().is_some();
-
-    if !truncated_by_bytes && !truncated_by_lines {
-        return content.to_string();
-    }
-
-    if preview.len() < truncated_slice.len()
-        && truncated_slice
-            .as_bytes()
-            .get(preview.len())
-            .is_some_and(|byte| *byte == b'\n')
-    {
-        preview.push('\n');
-    }
-
-    if !preview.is_empty() && !preview.ends_with('\n') {
-        preview.push('\n');
-    }
-    preview.push_str(TELEMETRY_PREVIEW_TRUNCATION_NOTICE);
-
-    preview
+    truncate_with_config(
+        content,
+        TruncationConfig {
+            max_bytes: TELEMETRY_PREVIEW_MAX_BYTES,
+            max_lines: TELEMETRY_PREVIEW_MAX_LINES,
+            truncation_notice: TELEMETRY_PREVIEW_TRUNCATION_NOTICE,
+        },
+    )
 }
 
 #[cfg(test)]

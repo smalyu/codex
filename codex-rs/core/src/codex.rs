@@ -59,7 +59,7 @@ use crate::client_common::ResponseEvent;
 use crate::config::Config;
 use crate::config_types::McpServerTransportConfig;
 use crate::config_types::ShellEnvironmentPolicy;
-use crate::conversation_history::ConversationHistory;
+use crate::context_manager::ContextManager;
 use crate::environment_context::EnvironmentContext;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
@@ -867,7 +867,7 @@ impl Session {
         turn_context: &TurnContext,
         rollout_items: &[RolloutItem],
     ) -> Vec<ResponseItem> {
-        let mut history = ConversationHistory::new();
+        let mut history = ContextManager::new();
         for item in rollout_items {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
@@ -941,7 +941,7 @@ impl Session {
         state.history_snapshot()
     }
 
-    pub(crate) async fn clone_history(&self) -> ConversationHistory {
+    pub(crate) async fn clone_history(&self) -> ContextManager {
         let state = self.state.lock().await;
         state.clone_history()
     }
@@ -1524,7 +1524,7 @@ pub(crate) async fn run_task(
     // For normal turns, continue recording to the session history as before.
     let is_review_mode = turn_context.is_review_mode;
 
-    let mut review_thread_history: ConversationHistory = ConversationHistory::new();
+    let mut review_thread_history: ContextManager = ContextManager::new();
     if is_review_mode {
         // Seed review threads with environment context so the model knows the working directory.
         review_thread_history
@@ -2843,7 +2843,7 @@ mod tests {
         turn_context: &TurnContext,
     ) -> (Vec<RolloutItem>, Vec<ResponseItem>) {
         let mut rollout_items = Vec::new();
-        let mut live_history = ConversationHistory::new();
+        let mut live_history = ContextManager::new();
 
         let initial_context = session.build_initial_context(turn_context);
         for item in &initial_context {

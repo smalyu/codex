@@ -20,7 +20,7 @@ pub mod config_edit;
 pub mod config_loader;
 pub mod config_profile;
 pub mod config_types;
-mod conversation_history;
+mod context_manager;
 pub mod custom_prompts;
 mod environment_context;
 pub mod error;

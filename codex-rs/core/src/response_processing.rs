@@ -1,5 +1,5 @@
 use crate::codex::Session;
-use crate::conversation_history::ConversationHistory;
+use crate::context_manager::ContextManager;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -11,7 +11,7 @@ use tracing::warn;
 pub(crate) async fn process_items(
     processed_items: Vec<crate::codex::ProcessedResponseItem>,
     is_review_mode: bool,
-    review_thread_history: &mut ConversationHistory,
+    review_thread_history: &mut ContextManager,
     sess: &Session,
 ) -> (Vec<ResponseInputItem>, Vec<ResponseItem>) {
     let mut items_to_record_in_conversation_history = Vec::<ResponseItem>::new();
