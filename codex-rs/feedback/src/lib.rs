@@ -223,7 +223,7 @@ impl CodexLogSnapshot {
         // appears in Sentry where it would otherwise say "No error message".
         let mut event = Event {
             level,
-            message: Some(title),
+            message: Some(title.clone()),
             tags,
             ..Default::default()
         };
