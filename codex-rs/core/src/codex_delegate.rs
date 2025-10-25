@@ -70,7 +70,7 @@ async fn forward_events(
                 let decision = parent_session
                     .request_command_approval(
                         parent_ctx.as_ref(),
-                        event.call_id.clone(),
+                        parent_ctx.sub_id.clone(),
                         event.command.clone(),
                         event.cwd.clone(),
                         event.reason.clone(),
