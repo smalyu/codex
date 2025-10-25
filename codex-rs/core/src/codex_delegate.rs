@@ -3,39 +3,30 @@ use std::sync::Arc;
 use async_channel::Receiver;
 use async_channel::Sender;
 use codex_async_utils::OrCancelExt;
-use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ExecApprovalRequestEvent;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
-use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::AuthManager;
 use crate::codex::Codex;
 use crate::codex::CodexSpawnOk;
+use crate::codex::Session;
+use crate::codex::TurnContext;
 use crate::config::Config;
 use crate::error::CodexErr;
 use codex_protocol::protocol::InitialHistory;
-
-pub(crate) enum AgentEvent {
-    ExecApprovalRequest(ExecApprovalRequestEvent, oneshot::Sender<ReviewDecision>),
-    PatchApprovalRequest(
-        ApplyPatchApprovalRequestEvent,
-        oneshot::Sender<ReviewDecision>,
-    ),
-    EventMsg(EventMsg),
-}
 
 pub(crate) async fn run_codex_conversation(
     config: Config,
     auth_manager: Arc<AuthManager>,
     input: Vec<UserInput>,
+    parent_session: Arc<Session>,
+    parent_ctx: Arc<TurnContext>,
     cancel_token: CancellationToken,
-) -> Result<Receiver<AgentEvent>, CodexErr> {
+) -> Result<Receiver<EventMsg>, CodexErr> {
     let (tx_sub, rx_sub) = async_channel::unbounded();
     let CodexSpawnOk { codex, .. } = Codex::spawn(
         config,
@@ -48,14 +39,23 @@ pub(crate) async fn run_codex_conversation(
     codex.submit(Op::UserInput { items: input }).await?;
 
     let cancel_token = cancel_token.clone();
+    let parent_session_clone = Arc::clone(&parent_session);
+    let parent_ctx_clone = Arc::clone(&parent_ctx);
     tokio::spawn(async move {
-        let _ = forward_events(codex, tx_sub).or_cancel(&cancel_token).await;
+        let _ = forward_events(codex, tx_sub, parent_session_clone, parent_ctx_clone)
+            .or_cancel(&cancel_token)
+            .await;
     });
 
     Ok(rx_sub)
 }
 
-async fn forward_events(codex: Codex, tx_sub: Sender<AgentEvent>) {
+async fn forward_events(
+    codex: Codex,
+    tx_sub: Sender<EventMsg>,
+    parent_session: Arc<Session>,
+    parent_ctx: Arc<TurnContext>,
+) {
     while let Ok(event) = codex.next_event().await {
         match event {
             Event {
@@ -66,53 +66,42 @@ async fn forward_events(codex: Codex, tx_sub: Sender<AgentEvent>) {
                 id,
                 msg: EventMsg::ExecApprovalRequest(event),
             } => {
-                let (tx_approve, rx_approve) = oneshot::channel();
-                let _ = tx_sub
-                    .send(AgentEvent::ExecApprovalRequest(event, tx_approve))
+                // Initiate approval via parent session; do not surface to consumer.
+                let decision = parent_session
+                    .request_command_approval(
+                        parent_ctx.as_ref(),
+                        event.call_id.clone(),
+                        event.command.clone(),
+                        event.cwd.clone(),
+                        event.reason.clone(),
+                    )
                     .await;
-                let _ = handle_exec_approval_request(id, rx_approve, &codex).await;
+                let _ = codex.submit(Op::ExecApproval { id, decision }).await;
             }
             Event {
                 id,
                 msg: EventMsg::ApplyPatchApprovalRequest(event),
             } => {
-                let (tx_approve, rx_approve) = oneshot::channel();
-                let _ = tx_sub
-                    .send(AgentEvent::PatchApprovalRequest(event, tx_approve))
+                // Unify approval flow: request via command approval API.
+                let count = event.changes.len();
+                let reason = event
+                    .reason
+                    .clone()
+                    .or_else(|| Some(format!("apply patch ({count} changes)")));
+                let decision = parent_session
+                    .request_command_approval(
+                        parent_ctx.as_ref(),
+                        event.call_id.clone(),
+                        vec!["apply_patch".to_string()],
+                        parent_ctx.cwd.clone(),
+                        reason,
+                    )
                     .await;
-                let _ = handle_patch_approval_request(id, rx_approve, &codex).await;
+                let _ = codex.submit(Op::PatchApproval { id, decision }).await;
             }
             other => {
-                let _ = tx_sub.send(AgentEvent::EventMsg(other.msg)).await;
+                let _ = tx_sub.send(other.msg).await;
             }
         }
-    }
-}
-
-async fn handle_exec_approval_request(
-    id: String,
-    channel: oneshot::Receiver<ReviewDecision>,
-    codex: &Codex,
-) -> Result<(), CodexErr> {
-    match channel.await {
-        Ok(decision) => {
-            codex.submit(Op::ExecApproval { id, decision }).await?;
-            Ok(())
-        }
-        Err(_) => Err(CodexErr::InternalAgentDied),
-    }
-}
-
-async fn handle_patch_approval_request(
-    id: String,
-    channel: oneshot::Receiver<ReviewDecision>,
-    codex: &Codex,
-) -> Result<(), CodexErr> {
-    match channel.await {
-        Ok(decision) => {
-            codex.submit(Op::PatchApproval { id, decision }).await?;
-            Ok(())
-        }
-        Err(_) => Err(CodexErr::InternalAgentDied),
     }
 }

@@ -2588,15 +2588,7 @@ mod tests {
         let input = vec![UserInput::Text {
             text: "start review".to_string(),
         }];
-        sess.spawn_task(
-            Arc::clone(&tc),
-            input,
-            NeverEndingTask {
-                kind: TaskKind::Review,
-                listen_to_cancellation_token: false,
-            },
-        )
-        .await;
+        sess.spawn_task(Arc::clone(&tc), input, ReviewTask).await;
 
         sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 

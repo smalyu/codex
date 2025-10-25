@@ -187,11 +187,6 @@ impl Session {
             .abort(session_ctx, Arc::clone(&task.turn_context))
             .await;
 
-        if matches!(task.kind, TaskKind::Review) {
-            review::emit_review_exit_on_abort(Arc::clone(self), Arc::clone(&task.turn_context))
-                .await;
-        }
-
         let event = EventMsg::TurnAborted(TurnAbortedEvent { reason });
         self.send_event(task.turn_context.as_ref(), event).await;
     }

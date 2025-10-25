@@ -11,7 +11,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
-use crate::codex_delegate::AgentEvent;
 use crate::codex_delegate::run_codex_conversation;
 // use crate::config::Config; // no longer needed directly; use session.base_config()
 use crate::review_format::format_review_findings_block;
@@ -62,7 +61,8 @@ impl SessionTask for ReviewTask {
     }
 
     async fn abort(&self, session: Arc<SessionTaskContext>, ctx: Arc<TurnContext>) {
-        let _ = (session, ctx);
+        // Ensure ExitedReviewMode is emitted before generic TurnAborted.
+        emit_review_exit_on_abort(session.clone_session(), ctx).await;
     }
 }
 
@@ -71,7 +71,7 @@ async fn start_review_conversation(
     ctx: Arc<TurnContext>,
     input: Vec<UserInput>,
     cancellation_token: CancellationToken,
-) -> Option<async_channel::Receiver<AgentEvent>> {
+) -> Option<async_channel::Receiver<EventMsg>> {
     let config = ctx.client.get_config().await;
     let mut sub_agent_config = config.as_ref().clone();
     sub_agent_config.user_instructions = None;
@@ -81,6 +81,8 @@ async fn start_review_conversation(
         sub_agent_config,
         session.auth_manager(),
         input,
+        session.clone_session(),
+        ctx.clone(),
         cancellation_token,
     )
     .await
@@ -96,122 +98,36 @@ async fn start_review_conversation(
 async fn process_review_events(
     session: Arc<SessionTaskContext>,
     ctx: Arc<TurnContext>,
-    receiver: async_channel::Receiver<AgentEvent>,
+    receiver: async_channel::Receiver<EventMsg>,
 ) -> bool {
     let mut exit_emitted = false;
-    while let Ok(agent_event) = receiver.recv().await {
-        match handle_review_agent_event(&session, &ctx, agent_event).await {
-            ReviewEventAction::Continue => {}
-            ReviewEventAction::Finish {
-                exit_already_emitted,
-            } => {
-                exit_emitted = exit_already_emitted;
+    let mut prev_agent_message: Option<EventMsg> = None;
+    while let Ok(event) = receiver.recv().await {
+        match event.clone() {
+            EventMsg::AgentMessage(_) => {
+                if let Some(prev) = prev_agent_message.take() {
+                    session.clone_session().send_event(ctx.as_ref(), prev).await;
+                }
+                prev_agent_message = Some(event);
+            }
+            EventMsg::TaskComplete(task_complete) => {
+                finalize_review_completion(&session, &ctx, task_complete).await;
+                exit_emitted = true;
                 break;
+            }
+            EventMsg::TurnAborted(_) => {
+                exit_emitted = false;
+                break;
+            }
+            other => {
+                session
+                    .clone_session()
+                    .send_event(ctx.as_ref(), other)
+                    .await;
             }
         }
     }
     exit_emitted
-}
-
-async fn handle_review_agent_event(
-    session: &Arc<SessionTaskContext>,
-    ctx: &Arc<TurnContext>,
-    agent_event: AgentEvent,
-) -> ReviewEventAction {
-    match agent_event {
-        AgentEvent::EventMsg(event) => {
-            match event {
-                EventMsg::AgentMessage(_) => {
-                    // The structured review output is surfaced through ExitedReviewMode.
-                    // Suppress the raw AgentMessage to avoid leaking implementation details.
-                    ReviewEventAction::Continue
-                }
-                EventMsg::TaskComplete(task_complete) => {
-                    finalize_review_completion(session, ctx, task_complete).await;
-                    ReviewEventAction::Finish {
-                        exit_already_emitted: true,
-                    }
-                }
-                EventMsg::TurnAborted(_) => {
-                    // The parent session emits the authoritative TurnAborted once
-                    // review teardown completes, so drop the sub-agent's copy to
-                    // preserve the expected event ordering.
-                    ReviewEventAction::Finish {
-                        exit_already_emitted: false,
-                    }
-                }
-                EventMsg::AgentMessageDelta(_)
-                | EventMsg::TokenCount(_)
-                | EventMsg::Error(_)
-                | EventMsg::TaskStarted(_)
-                | EventMsg::UserMessage(_)
-                | EventMsg::AgentReasoning(_)
-                | EventMsg::AgentReasoningDelta(_)
-                | EventMsg::AgentReasoningRawContent(_)
-                | EventMsg::AgentReasoningRawContentDelta(_)
-                | EventMsg::AgentReasoningSectionBreak(_)
-                | EventMsg::SessionConfigured(_)
-                | EventMsg::McpToolCallBegin(_)
-                | EventMsg::McpToolCallEnd(_)
-                | EventMsg::WebSearchBegin(_)
-                | EventMsg::WebSearchEnd(_)
-                | EventMsg::ExecCommandBegin(_)
-                | EventMsg::ExecCommandOutputDelta(_)
-                | EventMsg::ExecCommandEnd(_)
-                | EventMsg::ViewImageToolCall(_)
-                | EventMsg::ExecApprovalRequest(_)
-                | EventMsg::ApplyPatchApprovalRequest(_)
-                | EventMsg::BackgroundEvent(_)
-                | EventMsg::StreamError(_)
-                | EventMsg::PatchApplyBegin(_)
-                | EventMsg::PatchApplyEnd(_)
-                | EventMsg::TurnDiff(_)
-                | EventMsg::GetHistoryEntryResponse(_)
-                | EventMsg::McpListToolsResponse(_)
-                | EventMsg::ListCustomPromptsResponse(_)
-                | EventMsg::PlanUpdate(_)
-                | EventMsg::ShutdownComplete
-                | EventMsg::ConversationPath(_)
-                | EventMsg::EnteredReviewMode(_)
-                | EventMsg::ExitedReviewMode(_)
-                | EventMsg::ItemStarted(_)
-                | EventMsg::ItemCompleted(_) => {
-                    session
-                        .clone_session()
-                        .send_event(ctx.as_ref(), event)
-                        .await;
-                    ReviewEventAction::Continue
-                }
-            }
-        }
-        AgentEvent::ExecApprovalRequest(event, tx) => {
-            let decision = session
-                .clone_session()
-                .request_command_approval(
-                    ctx.as_ref(),
-                    event.call_id.clone(),
-                    event.command.clone(),
-                    event.cwd.clone(),
-                    event.reason.clone(),
-                )
-                .await;
-            let _ = tx.send(decision);
-            ReviewEventAction::Continue
-        }
-        AgentEvent::PatchApprovalRequest(event, tx) => {
-            session
-                .clone_session()
-                .send_event(ctx.as_ref(), EventMsg::ApplyPatchApprovalRequest(event))
-                .await;
-            let _ = tx.send(codex_protocol::protocol::ReviewDecision::Denied);
-            ReviewEventAction::Continue
-        }
-    }
-}
-
-enum ReviewEventAction {
-    Continue,
-    Finish { exit_already_emitted: bool },
 }
 
 async fn finalize_review_completion(
