@@ -219,8 +219,6 @@ impl CodexLogSnapshot {
             self.thread_id
         );
 
-        // Include the user's free-text feedback (reason) as an Exception value so it
-        // appears in Sentry where it would otherwise say "No error message".
         let mut event = Event {
             level,
             message: Some(title.clone()),
@@ -230,9 +228,7 @@ impl CodexLogSnapshot {
         if let Some(r) = reason {
             use sentry::protocol::Exception;
             use sentry::protocol::Values;
-            // Set the exception type to the same string as our title so the
-            // Sentry issue title stays unchanged. The feedback text becomes
-            // the exception value, filling the previous "No error message" spot.
+
             event.exception = Values::from(vec![Exception {
                 ty: title.clone(),
                 value: Some(r.to_string()),
