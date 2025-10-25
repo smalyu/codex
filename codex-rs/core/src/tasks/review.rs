@@ -36,7 +36,7 @@ impl SessionTask for ReviewTask {
         cancellation_token: CancellationToken,
     ) -> Option<String> {
         // Start sub-codex conversation and get the receiver for events.
-        let receiver = match start_review_conversation(
+        let output = match start_review_conversation(
             session.clone(),
             ctx.clone(),
             input,
@@ -44,19 +44,10 @@ impl SessionTask for ReviewTask {
         )
         .await
         {
-            Some(receiver) => receiver,
-            None => return None,
+            Some(receiver) => process_review_events(session.clone(), ctx.clone(), receiver).await,
+            None => None,
         };
-
-        // Process subagent events and produce structured review output if available.
-        let review_output = process_review_events(session.clone(), ctx.clone(), receiver).await;
-
-        // Always end review mode here unless the task was cancelled. On cancellation,
-        // abort() will emit ExitedReviewMode before TurnAborted to preserve ordering.
-        if !cancellation_token.is_cancelled() {
-            exit_review_mode(session.clone_session(), review_output, ctx.clone()).await;
-        }
-
+        exit_review_mode(session.clone_session(), output.clone(), ctx.clone()).await;
         None
     }
 
