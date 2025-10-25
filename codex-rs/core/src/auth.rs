@@ -43,7 +43,7 @@ impl PartialEq for CodexAuth {
     }
 }
 
-const TOKEN_REFRESH_INTERVAL: i64 = 18;
+const TOKEN_REFRESH_INTERVAL: i64 = 8;
 
 impl CodexAuth {
     pub async fn refresh_token(&self) -> Result<String, std::io::Error> {
