@@ -15,10 +15,10 @@ use crate::terminal;
 use crate::user_notification::UserNotifier;
 use async_channel::Receiver;
 use async_channel::Sender;
-use codex_apply_patch::ApplyPatchAction;
 use codex_protocol::ConversationId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::ConversationPathResponseEvent;
+use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::ReviewRequest;
@@ -48,7 +48,6 @@ use tracing::info;
 use tracing::warn;
 
 use crate::ModelProviderInfo;
-use crate::apply_patch::convert_apply_patch_to_protocol;
 use crate::client::ModelClient;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -795,7 +794,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         call_id: String,
-        action: &ApplyPatchAction,
+        changes: HashMap<PathBuf, FileChange>,
         reason: Option<String>,
         grant_root: Option<PathBuf>,
     ) -> oneshot::Receiver<ReviewDecision> {
@@ -819,7 +818,7 @@ impl Session {
 
         let event = EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
             call_id,
-            changes: convert_apply_patch_to_protocol(action),
+            changes,
             reason,
             grant_root,
         });

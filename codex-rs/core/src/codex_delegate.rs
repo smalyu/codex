@@ -82,22 +82,21 @@ async fn forward_events(
                 id,
                 msg: EventMsg::ApplyPatchApprovalRequest(event),
             } => {
-                // Unify approval flow: request via command approval API.
-                let count = event.changes.len();
-                let reason = event
-                    .reason
-                    .clone()
-                    .or_else(|| Some(format!("apply patch ({count} changes)")));
                 let decision = parent_session
-                    .request_command_approval(
+                    .request_patch_approval(
                         parent_ctx.as_ref(),
-                        event.call_id.clone(),
-                        vec!["apply_patch".to_string()],
-                        parent_ctx.cwd.clone(),
-                        reason,
+                        parent_ctx.sub_id.clone(),
+                        event.changes.clone(),
+                        event.reason.clone(),
+                        event.grant_root.clone(),
                     )
                     .await;
-                let _ = codex.submit(Op::PatchApproval { id, decision }).await;
+                let _ = codex
+                    .submit(Op::PatchApproval {
+                        id,
+                        decision: decision.await.unwrap_or_default(),
+                    })
+                    .await;
             }
             other => {
                 let _ = tx_sub.send(other.msg).await;
