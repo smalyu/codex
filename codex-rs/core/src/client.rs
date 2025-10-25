@@ -381,9 +381,8 @@ impl ModelClient {
                 if status == StatusCode::UNAUTHORIZED
                     && let Some(manager) = auth_manager.as_ref()
                     && manager.auth().is_some()
-                    && let Err(e) = manager.refresh_token().await
                 {
-                    return Err(StreamAttemptError::Fatal(CodexErr::Io(e)));
+                    let _ = manager.refresh_token().await;
                 }
 
                 // The OpenAI Responses endpoint returns structured JSON bodies even for 4xx/5xx
