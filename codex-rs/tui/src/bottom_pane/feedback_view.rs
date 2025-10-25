@@ -406,16 +406,17 @@ pub(crate) fn feedback_upload_consent_params(
     });
 
     // Build header listing files that would be sent if user consents.
-    let mut header_lines: Vec<Box<dyn crate::render::renderable::Renderable>> = Vec::new();
-    header_lines.push(Line::from("Upload logs?".bold()).into());
-    header_lines.push(Line::from("").into());
-    header_lines.push(Line::from("The following files will be sent:".dim()).into());
-    header_lines.push(Line::from(vec!["  • ".into(), "codex-logs.log".into()]).into());
-    if let Some(path) = rollout_path.as_deref() {
-        if let Some(name) = path.file_name().map(|s| s.to_string_lossy().to_string()) {
-            header_lines.push(Line::from(vec!["  • ".into(), name.into()]).into());
-        }
-    });
+    let mut header_lines: Vec<Box<dyn crate::render::renderable::Renderable>> = vec![
+        Line::from("Upload logs?".bold()).into(),
+        Line::from("").into(),
+        Line::from("The following files will be sent:".dim()).into(),
+        Line::from(vec!["  • ".into(), "codex-logs.log".into()]).into(),
+    ];
+    if let Some(path) = rollout_path.as_deref()
+        && let Some(name) = path.file_name().map(|s| s.to_string_lossy().to_string())
+    {
+        header_lines.push(Line::from(vec!["  • ".into(), name.into()]).into());
+    }
 
     super::SelectionViewParams {
         footer_hint: Some(standard_popup_hint_line()),

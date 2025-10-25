@@ -218,12 +218,27 @@ impl CodexLogSnapshot {
             display_classification(classification),
             self.thread_id
         );
-        let event = Event {
+
+        // Include the user's free-text feedback (reason) as an Exception value so it
+        // appears in Sentry where it would otherwise say "No error message".
+        let mut event = Event {
             level,
             message: Some(title),
             tags,
             ..Default::default()
         };
+        if let Some(r) = reason {
+            use sentry::protocol::Exception;
+            use sentry::protocol::Values;
+            // Set the exception type to the same string as our title so the
+            // Sentry issue title stays unchanged. The feedback text becomes
+            // the exception value, filling the previous "No error message" spot.
+            event.exception = Values::from(vec![Exception {
+                ty: title.clone(),
+                value: Some(r.to_string()),
+                ..Default::default()
+            }]);
+        }
         envelope.add_item(EnvelopeItem::Event(event));
 
         if include_logs {
@@ -249,94 +264,9 @@ impl CodexLogSnapshot {
             }));
         }
 
-        // Attachment 2: rollout file (if provided and readable)
-        if let Some((path, data)) = rollout_path.and_then(|p| fs::read(p).ok().map(|d| (p, d))) {
-            // Name the file by suffix so users can spot it.
-            let fname = path
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "rollout.jsonl".to_string());
-            envelope.add_item(EnvelopeItem::Attachment(Attachment {
-                buffer: data,
-                filename: fname,
-                content_type: Some("application/jsonl".to_string()),
-                ty: None,
-            }));
-        }
-
         client.send_envelope(envelope);
         client.flush(Some(Duration::from_secs(UPLOAD_TIMEOUT_SECS)));
         Ok(())
-    }
-
-    /// Upload a metadata-only feedback event (no attachments). Includes classification,
-    /// optional reason, CLI version and thread ID as tags.
-    pub fn upload_feedback_metadata_only(
-        &self,
-        classification: &str,
-        reason: Option<&str>,
-        cli_version: &str,
-    ) -> Result<()> {
-        use std::collections::BTreeMap;
-        use std::str::FromStr;
-        use std::sync::Arc;
-
-        use sentry::Client;
-        use sentry::ClientOptions;
-        use sentry::protocol::Envelope;
-        use sentry::protocol::EnvelopeItem;
-        use sentry::protocol::Event;
-        use sentry::protocol::Level;
-        use sentry::transports::DefaultTransportFactory;
-        use sentry::types::Dsn;
-
-        let client = Client::from_config(ClientOptions {
-            dsn: Some(Dsn::from_str(SENTRY_DSN).map_err(|e| anyhow!("invalid DSN: {}", e))?),
-            transport: Some(Arc::new(DefaultTransportFactory {})),
-            ..Default::default()
-        });
-
-        let mut tags = BTreeMap::from([
-            (String::from("thread_id"), self.thread_id.to_string()),
-            (String::from("classification"), classification.to_string()),
-            (String::from("cli_version"), cli_version.to_string()),
-        ]);
-        if let Some(r) = reason {
-            tags.insert(String::from("reason"), r.to_string());
-        }
-
-        let level = match classification {
-            "bug" | "bad_result" => Level::Error,
-            _ => Level::Info,
-        };
-
-        let mut envelope = Envelope::new();
-        // Title is the message in Sentry: "[Classification]: Codex session <thread_id>"
-        let title = format!(
-            "[{}]: Codex session {}",
-            display_classification(classification),
-            self.thread_id
-        );
-        let event = Event {
-            level,
-            message: Some(title),
-            tags,
-            ..Default::default()
-        };
-        envelope.add_item(EnvelopeItem::Event(event));
-
-        client.send_envelope(envelope);
-        client.flush(Some(Duration::from_secs(UPLOAD_TIMEOUT_SECS)));
-        Ok(())
-    }
-}
-
-fn display_classification(classification: &str) -> String {
-    match classification {
-        "bug" => "Bug".to_string(),
-        "bad_result" => "Bad result".to_string(),
-        "good_result" => "Good result".to_string(),
-        _ => "Other".to_string(),
     }
 }
 
