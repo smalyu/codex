@@ -415,7 +415,7 @@ pub(crate) fn feedback_upload_consent_params(
         if let Some(name) = path.file_name().map(|s| s.to_string_lossy().to_string()) {
             header_lines.push(Line::from(vec!["  • ".into(), name.into()]).into());
         }
-    }
+    });
 
     super::SelectionViewParams {
         footer_hint: Some(standard_popup_hint_line()),
