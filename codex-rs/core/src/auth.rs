@@ -43,7 +43,7 @@ impl PartialEq for CodexAuth {
     }
 }
 
-// TODO(pakrym): use token exp field to check for expiration instead 
+// TODO(pakrym): use token exp field to check for expiration instead
 const TOKEN_REFRESH_INTERVAL: i64 = 8;
 
 impl CodexAuth {
