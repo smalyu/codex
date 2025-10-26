@@ -21,6 +21,9 @@ use core_test_support::load_sse_fixture_with_id;
 use core_test_support::skip_if_no_network;
 use core_test_support::wait_for_event;
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
 use tempfile::TempDir;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -50,6 +53,75 @@ fn default_env_context_str(cwd: &str, shell: &Shell) -> String {
             None => String::new(),
         }
     )
+}
+
+fn git_command(repo_path: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(repo_path);
+    command.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command
+}
+
+fn run_git_command(repo_path: &Path, args: &[&str]) {
+    let output = git_command(repo_path)
+        .args(args)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run git command: {err}"));
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn init_git_repo_with_remote() -> (TempDir, String) {
+    let repo = TempDir::new().unwrap();
+    let repo_path = repo.path();
+
+    run_git_command(repo_path, &["init"]);
+    run_git_command(repo_path, &["config", "user.name", "Integration Test"]);
+    run_git_command(repo_path, &["config", "user.email", "test@example.com"]);
+
+    fs::write(repo_path.join("tracked.txt"), "tracked file").unwrap();
+    run_git_command(repo_path, &["add", "."]);
+    run_git_command(repo_path, &["commit", "-m", "initial commit"]);
+    run_git_command(repo_path, &["checkout", "-b", "integration-test-branch"]);
+    run_git_command(
+        repo_path,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/git-info-test.git",
+        ],
+    );
+
+    let output = git_command(repo_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap_or_else(|err| panic!("failed to read git commit hash: {err}"));
+    assert!(output.status.success(), "git rev-parse failed");
+    let commit_hash = String::from_utf8(output.stdout)
+        .unwrap_or_else(|err| panic!("commit hash should be utf8: {err}"))
+        .trim()
+        .to_string();
+
+    (repo, commit_hash)
+}
+
+fn find_environment_context(body: &serde_json::Value) -> &str {
+    body["input"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                let content = item.get("content")?.as_array()?;
+                let text = content.first()?.get("text")?.as_str()?;
+                text.starts_with("<environment_context>").then_some(text)
+            })
+        })
+        .unwrap_or_else(|| panic!("environment_context message not found"))
 }
 
 /// Build minimal SSE stream with completed marker using the JSON fixture.
@@ -882,4 +954,89 @@ async fn send_user_turn_with_changes_sends_environment_context() {
         expected_user_message_2,
     ]);
     assert_eq!(body2["input"], expected_input_2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn environment_context_includes_git_info_when_available() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+
+    let sse = sse_completed("resp");
+    let template = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_raw(sse, "text/event-stream");
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(template)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let model_provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..built_in_model_providers()["openai"].clone()
+    };
+
+    let (git_repo, commit_hash) = init_git_repo_with_remote();
+
+    let codex_home = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&codex_home);
+    config.cwd = git_repo.path().to_path_buf();
+    config.model_provider = model_provider;
+
+    let default_cwd = config.cwd.clone();
+    let default_approval_policy = config.approval_policy;
+    let default_sandbox_policy = config.sandbox_policy.clone();
+    let default_model = config.model.clone();
+    let default_effort = config.model_reasoning_effort;
+    let default_summary = config.model_reasoning_summary;
+
+    let conversation_manager =
+        ConversationManager::with_auth(CodexAuth::from_api_key("Test API Key"));
+    let codex = conversation_manager
+        .new_conversation(config)
+        .await
+        .expect("create new conversation")
+        .conversation;
+
+    codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: "git info turn".into(),
+            }],
+            cwd: default_cwd,
+            approval_policy: default_approval_policy,
+            sandbox_policy: default_sandbox_policy,
+            model: default_model,
+            effort: default_effort,
+            summary: default_summary,
+            final_output_json_schema: None,
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "expected a single POST request");
+
+    let body = requests[0].body_json::<serde_json::Value>().unwrap();
+    let env_text = find_environment_context(&body);
+
+    assert!(env_text.contains("<git_info>"), "git info block missing");
+    assert!(
+        env_text.contains(&format!("<commit_hash>{commit_hash}</commit_hash>")),
+        "commit hash missing from git info"
+    );
+    assert!(
+        env_text.contains("<branch>integration-test-branch</branch>"),
+        "branch missing from git info"
+    );
+    assert!(
+        env_text.contains(
+            "<repository_url>https://github.com/example/git-info-test.git</repository_url>"
+        ),
+        "repository url missing from git info"
+    );
 }

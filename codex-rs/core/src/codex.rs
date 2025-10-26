@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicU64;
 use crate::AuthManager;
 use crate::client_common::REVIEW_PROMPT;
 use crate::function_tool::FunctionCallError;
+use crate::git_info::collect_git_info;
 use crate::mcp::auth::McpAuthStatusEntry;
 use crate::mcp_connection_manager::DEFAULT_STARTUP_TIMEOUT;
 use crate::parse_command::parse_command;
@@ -22,6 +23,7 @@ use codex_protocol::ConversationId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::ConversationPathResponseEvent;
 use codex_protocol::protocol::ExitedReviewModeEvent;
+use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::ReviewRequest;
@@ -177,6 +179,7 @@ impl Codex {
             approval_policy: config.approval_policy,
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
+            git_info: None,
             original_config_do_not_use: Arc::clone(&config),
         };
 
@@ -271,6 +274,7 @@ pub(crate) struct TurnContext {
     pub(crate) is_review_mode: bool,
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
+    pub(crate) git_info: Option<GitInfo>,
 }
 
 impl TurnContext {
@@ -311,6 +315,8 @@ pub(crate) struct SessionConfiguration {
     /// `ConfigureSession` operation so that the business-logic layer can
     /// operate deterministically.
     cwd: PathBuf,
+
+    pub(crate) git_info: Option<GitInfo>,
 
     // TODO(pakrym): Remove config from here
     original_config_do_not_use: Arc<Config>,
@@ -406,11 +412,12 @@ impl Session {
             is_review_mode: false,
             final_output_json_schema: None,
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
+            git_info: session_configuration.git_info.clone(),
         }
     }
 
     async fn new(
-        session_configuration: SessionConfiguration,
+        mut session_configuration: SessionConfiguration,
         config: Arc<Config>,
         auth_manager: Arc<AuthManager>,
         tx_event: Sender<Event>,
@@ -467,6 +474,7 @@ impl Session {
             config.mcp_servers.iter(),
             config.mcp_oauth_credentials_store_mode,
         );
+        let git_info_fut = collect_git_info(&session_configuration.cwd);
 
         // Join all independent futures.
         let (
@@ -475,13 +483,17 @@ impl Session {
             default_shell,
             (history_log_id, history_entry_count),
             auth_statuses,
+            git_info,
         ) = tokio::join!(
             rollout_fut,
             mcp_fut,
             default_shell_fut,
             history_meta_fut,
-            auth_statuses_fut
+            auth_statuses_fut,
+            git_info_fut
         );
+
+        session_configuration.git_info = git_info;
 
         let rollout_recorder = rollout_recorder.map_err(|e| {
             error!("failed to initialize rollout recorder: {e:#}");
@@ -630,9 +642,7 @@ impl Session {
     }
 
     pub(crate) async fn update_settings(&self, updates: SessionSettingsUpdate) {
-        let mut state = self.state.lock().await;
-
-        state.session_configuration = state.session_configuration.apply(&updates);
+        self.apply_session_updates(&updates).await;
     }
 
     pub(crate) async fn new_turn(&self, updates: SessionSettingsUpdate) -> Arc<TurnContext> {
@@ -645,12 +655,7 @@ impl Session {
         sub_id: String,
         updates: SessionSettingsUpdate,
     ) -> Arc<TurnContext> {
-        let session_configuration = {
-            let mut state = self.state.lock().await;
-            let session_configuration = state.session_configuration.clone().apply(&updates);
-            state.session_configuration = session_configuration.clone();
-            session_configuration
-        };
+        let session_configuration = self.apply_session_updates(&updates).await;
 
         let mut turn_context: TurnContext = Self::make_turn_context(
             Some(Arc::clone(&self.services.auth_manager)),
@@ -664,6 +669,26 @@ impl Session {
             turn_context.final_output_json_schema = final_schema;
         }
         Arc::new(turn_context)
+    }
+
+    async fn apply_session_updates(&self, updates: &SessionSettingsUpdate) -> SessionConfiguration {
+        let needs_git_refresh = updates.cwd.is_some();
+        let mut state = self.state.lock().await;
+        let mut session_configuration = state.session_configuration.clone().apply(updates);
+        if needs_git_refresh {
+            session_configuration.git_info = None;
+        }
+        state.session_configuration = session_configuration.clone();
+        drop(state);
+
+        if needs_git_refresh {
+            let git_info = collect_git_info(&session_configuration.cwd).await;
+            session_configuration.git_info = git_info;
+            let mut state = self.state.lock().await;
+            state.session_configuration = session_configuration.clone();
+        }
+
+        session_configuration
     }
 
     fn build_environment_update_item(
@@ -919,6 +944,7 @@ impl Session {
             Some(turn_context.approval_policy),
             Some(turn_context.sandbox_policy.clone()),
             Some(self.user_shell().clone()),
+            turn_context.git_info.clone(),
         )));
         items
     }
@@ -1472,6 +1498,7 @@ async fn spawn_review_thread(
         is_review_mode: true,
         final_output_json_schema: None,
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
+        git_info: parent_turn_context.git_info.clone(),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -2549,6 +2576,7 @@ mod tests {
             approval_policy: config.approval_policy,
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
+            git_info: None,
             original_config_do_not_use: Arc::clone(&config),
         };
 
@@ -2617,6 +2645,7 @@ mod tests {
             approval_policy: config.approval_policy,
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
+            git_info: None,
             original_config_do_not_use: Arc::clone(&config),
         };
 
