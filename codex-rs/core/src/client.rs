@@ -391,7 +391,10 @@ impl ModelClient {
                     && let Some(manager) = auth_manager.as_ref()
                     && manager.auth().is_some()
                 {
-                    let _ = manager.refresh_token().await;
+                    manager
+                        .refresh_token()
+                        .await
+                        .map_err(|err| StreamAttemptError::Fatal(err.into()))?;
                 }
 
                 // The OpenAI Responses endpoint returns structured JSON bodies even for 4xx/5xx
