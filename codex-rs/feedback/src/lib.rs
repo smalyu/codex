@@ -10,9 +10,17 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_protocol::ConversationId;
-use tracing_subscriber::fmt::writer::MakeWriter;
+use sentry::protocol::ItemContainer;
+use sentry::protocol::Log;
+use sentry_tracing::log_from_event;
+use tracing::Event;
+use tracing::Subscriber;
 
-const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::LookupSpan;
+
+const DEFAULT_MAX_MESSAGES: usize = 300;
 const SENTRY_DSN: &str =
     "https://ae32ed50620d7a7792c1ce5df38b3e3e@o33249.ingest.us.sentry.io/4510195390611458";
 const UPLOAD_TIMEOUT_SECS: u64 = 10;
@@ -30,28 +38,28 @@ impl Default for CodexFeedback {
 
 impl CodexFeedback {
     pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_MAX_BYTES)
+        Self::with_capacity(DEFAULT_MAX_MESSAGES)
     }
 
-    pub(crate) fn with_capacity(max_bytes: usize) -> Self {
+    pub(crate) fn with_capacity(max_messages: usize) -> Self {
         Self {
-            inner: Arc::new(FeedbackInner::new(max_bytes)),
+            inner: Arc::new(FeedbackInner::new(max_messages)),
         }
     }
 
-    pub fn make_writer(&self) -> FeedbackMakeWriter {
-        FeedbackMakeWriter {
+    pub fn make_layer(&self) -> FeedbackLayer {
+        FeedbackLayer {
             inner: self.inner.clone(),
         }
     }
 
     pub fn snapshot(&self, session_id: Option<ConversationId>) -> CodexLogSnapshot {
-        let bytes = {
-            let guard = self.inner.ring.lock().expect("mutex poisoned");
-            guard.snapshot_bytes()
+        let logs = {
+            let guard = self.inner.messages.lock().expect("mutex poisoned");
+            guard.clone()
         };
         CodexLogSnapshot {
-            bytes,
+            logs,
             thread_id: session_id
                 .map(|id| id.to_string())
                 .unwrap_or("no-active-thread-".to_string() + &ConversationId::new().to_string()),
@@ -60,110 +68,53 @@ impl CodexFeedback {
 }
 
 struct FeedbackInner {
-    ring: Mutex<RingBuffer>,
+    messages: Mutex<VecDeque<Log>>,
 }
 
 impl FeedbackInner {
-    fn new(max_bytes: usize) -> Self {
+    fn new(max_messages: usize) -> Self {
         Self {
-            ring: Mutex::new(RingBuffer::new(max_bytes)),
+            messages: Mutex::new(VecDeque::with_capacity(max_messages)),
         }
+    }
+
+    fn add_message(&self, message: Log) {
+        let mut guard = self.messages.lock().expect("mutex poisoned");
+        guard.push_back(message);
     }
 }
 
-#[derive(Clone)]
-pub struct FeedbackMakeWriter {
+pub struct FeedbackLayer {
     inner: Arc<FeedbackInner>,
 }
 
-impl<'a> MakeWriter<'a> for FeedbackMakeWriter {
-    type Writer = FeedbackWriter;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        FeedbackWriter {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-pub struct FeedbackWriter {
-    inner: Arc<FeedbackInner>,
-}
-
-impl Write for FeedbackWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut guard = self.inner.ring.lock().map_err(|_| io::ErrorKind::Other)?;
-        guard.push_bytes(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-struct RingBuffer {
-    max: usize,
-    buf: VecDeque<u8>,
-}
-
-impl RingBuffer {
-    fn new(capacity: usize) -> Self {
-        Self {
-            max: capacity,
-            buf: VecDeque::with_capacity(capacity),
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.buf.len()
-    }
-
-    fn push_bytes(&mut self, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-
-        // If the incoming chunk is larger than capacity, keep only the trailing bytes.
-        if data.len() >= self.max {
-            self.buf.clear();
-            let start = data.len() - self.max;
-            self.buf.extend(data[start..].iter().copied());
-            return;
-        }
-
-        // Evict from the front if we would exceed capacity.
-        let needed = self.len() + data.len();
-        if needed > self.max {
-            let to_drop = needed - self.max;
-            for _ in 0..to_drop {
-                let _ = self.buf.pop_front();
-            }
-        }
-
-        self.buf.extend(data.iter().copied());
-    }
-
-    fn snapshot_bytes(&self) -> Vec<u8> {
-        self.buf.iter().copied().collect()
+impl<S> Layer<S> for FeedbackLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_event(&self, event: &Event, ctx: Context<'_, S>) {
+        let log = log_from_event(event, Some(&ctx));
+        self.inner.add_message(log);
     }
 }
 
 pub struct CodexLogSnapshot {
-    bytes: Vec<u8>,
+    logs: VecDeque<Log>,
     pub thread_id: String,
 }
 
 impl CodexLogSnapshot {
-    pub(crate) fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
-
     pub fn save_to_temp_file(&self) -> io::Result<PathBuf> {
         let dir = std::env::temp_dir();
         let filename = format!("codex-feedback-{}.log", self.thread_id);
         let path = dir.join(filename);
-        fs::write(&path, self.as_bytes())?;
+        let messages_text = self
+            .logs
+            .iter()
+            .filter_map(|message| serde_json::to_string(&message).ok())
+            .collect::<Vec<String>>()
+            .join("\n");
+        fs::write(&path, messages_text)?;
         Ok(path)
     }
 
@@ -238,12 +189,9 @@ impl CodexLogSnapshot {
         envelope.add_item(EnvelopeItem::Event(event));
 
         if include_logs {
-            envelope.add_item(EnvelopeItem::Attachment(Attachment {
-                buffer: self.bytes.clone(),
-                filename: String::from("codex-logs.log"),
-                content_type: Some("text/plain".to_string()),
-                ty: None,
-            }));
+            envelope.add_item(EnvelopeItem::ItemContainer(ItemContainer::Logs(
+                self.logs.iter().cloned().collect(),
+            )));
         }
 
         if let Some((path, data)) = rollout_path.and_then(|p| fs::read(p).ok().map(|d| (p, d))) {
@@ -272,23 +220,5 @@ fn display_classification(classification: &str) -> String {
         "bad_result" => "Bad result".to_string(),
         "good_result" => "Good result".to_string(),
         _ => "Other".to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ring_buffer_drops_front_when_full() {
-        let fb = CodexFeedback::with_capacity(8);
-        {
-            let mut w = fb.make_writer().make_writer();
-            w.write_all(b"abcdefgh").unwrap();
-            w.write_all(b"ij").unwrap();
-        }
-        let snap = fb.snapshot(None);
-        // Capacity 8: after writing 10 bytes, we should keep the last 8.
-        pretty_assertions::assert_eq!(std::str::from_utf8(snap.as_bytes()).unwrap(), "cdefghij");
     }
 }

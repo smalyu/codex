@@ -214,13 +214,8 @@ pub async fn run_main(
         .with_filter(env_filter());
 
     let feedback = codex_feedback::CodexFeedback::new();
-    let targets = Targets::new().with_default(tracing::Level::TRACE);
 
-    let feedback_layer = tracing_subscriber::fmt::layer()
-        .with_writer(feedback.make_writer())
-        .with_ansi(false)
-        .with_target(false)
-        .with_filter(targets);
+    let feedback_layer = feedback.make_layer();
 
     if cli.oss {
         codex_ollama::ensure_oss_ready(&config)
