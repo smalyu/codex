@@ -188,8 +188,6 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
 
     let server = responses::start_mock_server().await;
 
-    // No chat completions mock in this test; focuses on Responses path only.
-
     let call_id = "img-1";
     let server_name = "rmcp";
     let tool_name = format!("mcp__{server_name}__image");
@@ -324,7 +322,6 @@ async fn stdio_image_responses_round_trip() -> anyhow::Result<()> {
 
     wait_for_event(&fixture.codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
 
-    // Responses assertion: function_call_output contains an input_image with the expected data URL.
     let output_item = final_mock.single_request().function_call_output(call_id);
     assert_eq!(
         output_item,
@@ -348,7 +345,6 @@ async fn stdio_image_completions_round_trip() -> anyhow::Result<()> {
 
     let server = responses::start_mock_server().await;
 
-    // Prepare Chat Completions SSE sequences: first a tool call, then a final assistant message.
     let call_id = "img-cc-1";
     let server_name = "rmcp";
     let tool_name = format!("mcp__{server_name}__image");
@@ -416,7 +412,6 @@ async fn stdio_image_completions_round_trip() -> anyhow::Result<()> {
         .mount(&server)
         .await;
 
-    // Build the stdio rmcp server and pass the image as data URL so it can construct ImageContent.
     let rmcp_test_server_bin = CargoBuild::new()
         .package("codex-rmcp-client")
         .bin("test_stdio_server")
@@ -427,7 +422,6 @@ async fn stdio_image_completions_round_trip() -> anyhow::Result<()> {
 
     let fixture = test_codex()
         .with_config(move |config| {
-            // Use Chat Completions wire API for this test.
             config.model_provider.wire_api = codex_core::WireApi::Chat;
             config.features.enable(Feature::RmcpClient);
             config.mcp_servers.insert(
@@ -471,7 +465,6 @@ async fn stdio_image_completions_round_trip() -> anyhow::Result<()> {
         })
         .await?;
 
-    // Wait for tool begin/end and final completion.
     let begin_event = wait_for_event_with_timeout(
         &fixture.codex,
         |ev| matches!(ev, EventMsg::McpToolCallBegin(_)),
@@ -522,15 +515,13 @@ async fn stdio_image_completions_round_trip() -> anyhow::Result<()> {
         })
         .cloned()
         .expect("tool message present");
-    let content = tool_msg.get("content").expect("tool content present");
-    assert!(content.is_array(), "tool content should be an array");
-    let items = content.as_array().unwrap();
-    assert!(
-        items.iter().any(|it| {
-            it.get("type") == Some(&json!("image_url"))
-                && it.get("image_url").and_then(|v| v.get("url")) == Some(&json!(OPENAI_PNG))
-        }),
-        "tool content should include a tagged image_url item with nested url"
+    assert_eq!(
+        tool_msg,
+        json!({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": [{"type": "image_url", "image_url": {"url": OPENAI_PNG}}]
+        })
     );
 
     Ok(())

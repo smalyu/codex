@@ -255,13 +255,14 @@ pub struct ShellToolCallParams {
     pub justification: Option<String>,
 }
 
-/// Typed content returned by a tool call.
+/// Responses API compatible content items that can be returned by a tool call.
+/// This is a subset of ContentItem with the types we support as function call outputs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FunctionCallOutputContentItem {
-    // Do not rename, these are serialized and used directly in the completions and responses APIs.
+    // Do not rename, these are serialized and used directly in the responses API.
     InputText { text: String },
-    // Do not rename, these are serialized and used directly in the completions and responses APIs.
+    // Do not rename, these are serialized and used directly in the responses API.
     InputImage { image_url: String },
 }
 
@@ -330,8 +331,8 @@ impl FunctionCallOutputPayload {
     pub fn from_call_tool_result(call_tool_result: &CallToolResult) -> Self {
         let CallToolResult {
             content,
-            is_error,
             structured_content,
+            is_error,
         } = call_tool_result;
 
         let is_success = is_error != &Some(true);
