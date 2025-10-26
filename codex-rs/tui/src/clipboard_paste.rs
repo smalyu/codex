@@ -150,6 +150,9 @@ pub fn paste_image_to_temp_png() -> Result<(PathBuf, PastedImageInfo), PasteImag
 /// - shell-escaped single paths (via `shlex`)
 pub fn normalize_pasted_path(pasted: &str) -> Option<PathBuf> {
     let pasted = pasted.trim();
+    if pasted.is_empty() {
+        return None;
+    }
 
     // file:// URL → filesystem path
     if let Ok(url) = url::Url::parse(pasted)
@@ -190,6 +193,10 @@ pub fn normalize_pasted_path(pasted: &str) -> Option<PathBuf> {
         return parts.into_iter().next().map(PathBuf::from);
     }
 
+    if !contains_unescaped_ascii_whitespace(pasted) {
+        return shell_style_single_path(pasted);
+    }
+
     None
 }
 
@@ -205,6 +212,71 @@ pub fn pasted_image_format(path: &Path) -> EncodedImageFormat {
         Some("jpg") | Some("jpeg") => EncodedImageFormat::Jpeg,
         _ => EncodedImageFormat::Other,
     }
+}
+
+fn contains_unescaped_ascii_whitespace(pasted: &str) -> bool {
+    let mut escaped = false;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    for c in pasted.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if !in_single_quote => {
+                escaped = true;
+            }
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            ' ' | '\t' | '\r' | '\n' | '\u{000B}' | '\u{000C}'
+                if !in_single_quote && !in_double_quote =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
+fn shell_style_single_path(pasted: &str) -> Option<PathBuf> {
+    let mut result = String::with_capacity(pasted.len());
+    let mut chars = pasted.chars();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(c) = chars.next() {
+        if c == '\\' && !in_single_quote {
+            if let Some(next) = chars.next() {
+                result.push(next);
+            } else {
+                result.push('\\');
+            }
+            continue;
+        }
+        if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            continue;
+        }
+        if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            continue;
+        }
+        result.push(c);
+    }
+
+    if in_single_quote || in_double_quote {
+        return None;
+    }
+
+    Some(PathBuf::from(result))
 }
 
 #[cfg(test)]
@@ -305,6 +377,23 @@ mod pasted_paths_tests {
             result,
             PathBuf::from(r"\\\\server\\share\\folder\\file.jpg")
         );
+    }
+
+    #[test]
+    fn normalize_path_with_narrow_no_break_space() {
+        let input = "/Users/zhao/Downloads/Screenshot\\ 2025-09-25\\ at\\ 10.47.39\u{202F}AM.png";
+        let expected =
+            PathBuf::from("/Users/zhao/Downloads/Screenshot 2025-09-25 at 10.47.39\u{202F}AM.png");
+        let result = normalize_pasted_path(input).expect("should handle narrow no-break space");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn normalize_single_path_with_nbsp_and_quotes() {
+        let input = "'/Users/zhao/Documents/My\u{00A0}File.png'";
+        let expected = PathBuf::from("/Users/zhao/Documents/My\u{00A0}File.png");
+        let result = normalize_pasted_path(input).expect("should handle quoted non-breaking space");
+        assert_eq!(result, expected);
     }
 
     #[test]
