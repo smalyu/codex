@@ -64,8 +64,8 @@ pub(crate) async fn process_items(
                     }
                     Err(err) => FunctionCallOutputPayload {
                         content: err.clone(),
-                        content_items: None,
                         success: Some(false),
+                        ..Default::default()
                     },
                 };
                 items_to_record_in_conversation_history.push(ResponseItem::FunctionCallOutput {

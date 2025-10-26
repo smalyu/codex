@@ -1941,8 +1941,7 @@ async fn try_run_turn(
                             call_id: String::new(),
                             output: FunctionCallOutputPayload {
                                 content: msg.to_string(),
-                                content_items: None,
-                                success: None,
+                                ..Default::default()
                             },
                         };
                         add_completed(ProcessedResponseItem {
@@ -1956,8 +1955,7 @@ async fn try_run_turn(
                             call_id: String::new(),
                             output: FunctionCallOutputPayload {
                                 content: message,
-                                content_items: None,
-                                success: None,
+                                ..Default::default()
                             },
                         };
                         add_completed(ProcessedResponseItem {
@@ -2286,8 +2284,8 @@ mod tests {
                 "value": 42
             }))
             .unwrap(),
-            content_items: None,
             success: Some(true),
+            ..Default::default()
         };
 
         assert_eq!(expected, got);
@@ -2413,8 +2411,8 @@ mod tests {
         let expected = FunctionCallOutputPayload {
             content: serde_json::to_string(&vec![text_block("hello"), text_block("world")])
                 .unwrap(),
-            content_items: None,
             success: Some(true),
+            ..Default::default()
         };
 
         assert_eq!(expected, got);
@@ -2431,8 +2429,8 @@ mod tests {
         let got = FunctionCallOutputPayload::from_call_tool_result(&ctr);
         let expected = FunctionCallOutputPayload {
             content: serde_json::to_string(&json!({ "message": "bad" })).unwrap(),
-            content_items: None,
             success: Some(false),
+            ..Default::default()
         };
 
         assert_eq!(expected, got);
@@ -2449,8 +2447,8 @@ mod tests {
         let got = FunctionCallOutputPayload::from_call_tool_result(&ctr);
         let expected = FunctionCallOutputPayload {
             content: serde_json::to_string(&vec![text_block("alpha")]).unwrap(),
-            content_items: None,
             success: Some(true),
+            ..Default::default()
         };
 
         assert_eq!(expected, got);

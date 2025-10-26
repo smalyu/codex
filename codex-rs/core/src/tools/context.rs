@@ -66,7 +66,9 @@ impl ToolPayload {
 #[derive(Clone)]
 pub enum ToolOutput {
     Function {
+        // Plain text representation of the tool output.
         content: String,
+        // Some tool calls such as MCP calls may return structured content that can get parsed into an array of polymorphic content items.
         content_items: Option<Vec<FunctionCallOutputContentItem>>,
         success: Option<bool>,
     },

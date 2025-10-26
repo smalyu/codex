@@ -81,9 +81,8 @@ pub enum ResponseItem {
     // NOTE: The input schema for `function_call_output` objects that clients send to the
     // OpenAI /v1/responses endpoint is NOT the same shape as the objects the server returns on the
     // SSE stream. When *sending* we must wrap the string output inside an object that includes a
-    // required `success` boolean. The upstream TypeScript CLI does this implicitly. To ensure we
-    // serialize exactly the expected shape we introduce a dedicated payload struct and flatten it
-    // here.
+    // required `success` boolean. To ensure we serialize exactly the expected shape we introduce
+    // a dedicated payload struct and flatten it here.
     FunctionCallOutput {
         call_id: String,
         output: FunctionCallOutputPayload,
@@ -146,8 +145,8 @@ impl From<ResponseInputItem> for ResponseItem {
                     Ok(result) => FunctionCallOutputPayload::from_call_tool_result(&result),
                     Err(tool_call_err) => FunctionCallOutputPayload {
                         content: format!("err: {tool_call_err:?}"),
-                        content_items: None,
                         success: Some(false),
+                        ..Default::default()
                     },
                 };
                 Self::FunctionCallOutput { call_id, output }
@@ -256,14 +255,24 @@ pub struct ShellToolCallParams {
     pub justification: Option<String>,
 }
 
+/// Typed content returned by a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FunctionCallOutputContentItem {
+    // Do not rename, these are serialized and used directly in the completions and responses APIs.
     InputText { text: String },
+    // Do not rename, these are serialized and used directly in the completions and responses APIs.
     InputImage { image_url: String },
 }
 
-#[derive(Debug, Clone, PartialEq, JsonSchema, TS)]
+/// The payload we send back to OpenAI when reporting a tool call result.
+///
+/// `content` preserves the historical plain-string payload so downstream
+/// integrations (tests, logging, etc.) can keep treating tool output as
+/// `String`. When an MCP server returns richer data we additionally populate
+/// `content_items` with the structured form that the Responses/Chat
+/// Completions APIs understand.
+#[derive(Debug, Default, Clone, PartialEq, JsonSchema, TS)]
 pub struct FunctionCallOutputPayload {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,12 +281,16 @@ pub struct FunctionCallOutputPayload {
     pub success: Option<bool>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FunctionCallOutputPayloadSerde {
+    Text(String),
+    Items(Vec<FunctionCallOutputContentItem>),
+}
+
 // The Responses API expects two *different* shapes depending on success vs failure:
 //   • success → output is a plain string (no nested object)
 //   • failure → output is an object { content, success:false }
-// The upstream TypeScript CLI implements this by special‑casing the serialize path.
-// We replicate that behavior with a manual Serialize impl.
-
 impl Serialize for FunctionCallOutputPayload {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -286,10 +299,6 @@ impl Serialize for FunctionCallOutputPayload {
         if let Some(items) = &self.content_items {
             items.serialize(serializer)
         } else {
-            // The upstream TypeScript CLI historically serialized `output` as a plain string.
-            // Preserve that behavior for text-only payloads so we do not regress existing
-            // integrations. When images are present we instead emit the array form introduced by
-            // the Responses API so the model receives a renderable image instead of raw base64.
             serializer.serialize_str(&self.content)
         }
     }
@@ -300,33 +309,19 @@ impl<'de> Deserialize<'de> for FunctionCallOutputPayload {
     where
         D: Deserializer<'de>,
     {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        match value {
-            serde_json::Value::String(s) => Ok(FunctionCallOutputPayload {
-                content: s,
-                content_items: None,
-                success: None,
+        match FunctionCallOutputPayloadSerde::deserialize(deserializer)? {
+            FunctionCallOutputPayloadSerde::Text(content) => Ok(FunctionCallOutputPayload {
+                content,
+                ..Default::default()
             }),
-            serde_json::Value::Array(values) => {
-                let mut items = Vec::with_capacity(values.len());
-                for value in values {
-                    let item: FunctionCallOutputContentItem =
-                        serde_json::from_value(value).map_err(serde::de::Error::custom)?;
-                    items.push(item);
-                }
-
-                let content = serde_json::to_string(&items)
-                    .map_err(|err| serde::de::Error::custom(err.to_string()))?;
-
+            FunctionCallOutputPayloadSerde::Items(items) => {
+                let content = serde_json::to_string(&items).map_err(serde::de::Error::custom)?;
                 Ok(FunctionCallOutputPayload {
                     content,
                     content_items: Some(items),
                     success: None,
                 })
             }
-            other => Err(serde::de::Error::custom(format!(
-                "expected string or array for function call output payload, got {other}"
-            ))),
         }
     }
 }
@@ -342,21 +337,21 @@ impl FunctionCallOutputPayload {
         let is_success = is_error != &Some(true);
 
         if let Some(structured_content) = structured_content
-            && structured_content != &serde_json::Value::Null
+            && !structured_content.is_null()
         {
             match serde_json::to_string(structured_content) {
                 Ok(serialized_structured_content) => {
                     return FunctionCallOutputPayload {
                         content: serialized_structured_content,
-                        content_items: None,
                         success: Some(is_success),
+                        ..Default::default()
                     };
                 }
                 Err(err) => {
                     return FunctionCallOutputPayload {
                         content: err.to_string(),
-                        content_items: None,
                         success: Some(false),
+                        ..Default::default()
                     };
                 }
             }
@@ -367,8 +362,8 @@ impl FunctionCallOutputPayload {
             Err(err) => {
                 return FunctionCallOutputPayload {
                     content: err.to_string(),
-                    content_items: None,
                     success: Some(false),
+                    ..Default::default()
                 };
             }
         };
@@ -398,9 +393,13 @@ fn convert_content_blocks_to_items(
             }
             ContentBlock::ImageContent(image) => {
                 saw_image = true;
-                items.push(FunctionCallOutputContentItem::InputImage {
-                    image_url: format!("data:{};base64,{}", image.mime_type, image.data),
-                });
+                // Just in case the content doesn't include a data URL, add it.
+                let image_url = if image.data.starts_with("data:") {
+                    image.data.clone()
+                } else {
+                    format!("data:{};base64,{}", image.mime_type, image.data)
+                };
+                items.push(FunctionCallOutputContentItem::InputImage { image_url });
             }
             // TODO: render audio, resource, and embedded resource content to the model.
             _ => return None,
@@ -442,8 +441,7 @@ mod tests {
             call_id: "call1".into(),
             output: FunctionCallOutputPayload {
                 content: "ok".into(),
-                content_items: None,
-                success: None,
+                ..Default::default()
             },
         };
 
@@ -461,8 +459,8 @@ mod tests {
             call_id: "call1".into(),
             output: FunctionCallOutputPayload {
                 content: "bad".into(),
-                content_items: None,
                 success: Some(false),
+                ..Default::default()
             },
         };
 

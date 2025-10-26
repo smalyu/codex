@@ -180,8 +180,8 @@ impl ToolRouter {
                 call_id,
                 output: codex_protocol::models::FunctionCallOutputPayload {
                     content: message,
-                    content_items: None,
                     success: Some(false),
+                    ..Default::default()
                 },
             }
         }
