@@ -185,12 +185,77 @@ pub fn normalize_pasted_path(pasted: &str) -> Option<PathBuf> {
     }
 
     // shell-escaped single path → unescaped
-    let parts: Vec<String> = shlex::Shlex::new(pasted).collect();
-    if parts.len() == 1 {
-        return parts.into_iter().next().map(PathBuf::from);
+    let mut shlex = shlex::Shlex::new(pasted);
+    let parts: Vec<String> = shlex.by_ref().collect();
+    match parts.len() {
+        0 => {}
+        1 => return parts.into_iter().next().map(PathBuf::from),
+        _ => {}
+    }
+
+    if is_probably_posix_shell_escaped_path(pasted) {
+        let unescaped = unescape_posix_backslashes(pasted);
+        return Some(PathBuf::from(unescaped));
     }
 
     None
+}
+
+fn is_probably_posix_shell_escaped_path(pasted: &str) -> bool {
+    pasted.contains('/')
+        && pasted.contains('\\')
+        && !pasted.contains('"')
+        && !pasted.contains('\'')
+        && !has_unescaped_ascii_whitespace(pasted)
+}
+
+fn has_unescaped_ascii_whitespace(pasted: &str) -> bool {
+    let mut escaped = false;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    for ch in pasted.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single_quote => {
+                escaped = true;
+            }
+            '\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn unescape_posix_backslashes(pasted: &str) -> String {
+    let mut out = String::with_capacity(pasted.len());
+    let mut escaped = false;
+    for ch in pasted.chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        out.push(ch);
+    }
+    if escaped {
+        out.push('\\');
+    }
+    out
 }
 
 /// Infer an image format for the provided path based on its extension.
@@ -253,6 +318,34 @@ mod pasted_paths_tests {
         let input = "/home/user/a\\ b.png /home/user/c.png";
         let result = normalize_pasted_path(input);
         assert!(result.is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn normalize_dragged_macos_screenshot_path() {
+        let input = "/Users/zhao/Downloads/Screenshot\\ 2025-09-25\\ at\\ 10.47.39\u{202F}AM.png ";
+        let result = normalize_pasted_path(input).expect("should parse Finder screenshot path");
+        assert_eq!(
+            result,
+            PathBuf::from("/Users/zhao/Downloads/Screenshot 2025-09-25 at 10.47.39\u{202F}AM.png")
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn normalize_dragged_macos_temporary_screenshot_path() {
+        let input = concat!(
+            "/var/folders/mr/tt5wpmvs1w5b0td1bj93t0800000gp/T/TemporaryItems/",
+            "NSIRD_screencaptureui_SBcoDE/Screenshot\\ 2025-10-26\\ at\\ 2.10.40\u{202F}PM.png "
+        );
+        let result = normalize_pasted_path(input).expect("should parse temporary screenshot path");
+        assert_eq!(
+            result,
+            PathBuf::from(concat!(
+                "/var/folders/mr/tt5wpmvs1w5b0td1bj93t0800000gp/T/TemporaryItems/",
+                "NSIRD_screencaptureui_SBcoDE/Screenshot 2025-10-26 at 2.10.40\u{202F}PM.png"
+            ))
+        );
     }
 
     #[test]
