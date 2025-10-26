@@ -117,6 +117,27 @@ impl CodexRequestBuilder {
         match self.builder.send().await {
             Ok(response) => {
                 let request_ids = Self::extract_request_ids(&response);
+                let is_error = !response.status().is_success();
+                if is_error {
+                    tracing::error!(
+                        method = %self.method,
+                        url = %self.url,
+                        status = %response.status(),
+                        request_ids = ?request_ids,
+                        version = ?response.version(),
+                        "Request failed"
+                    );
+                } else {
+                    tracing::debug!(
+                        method = %self.method,
+                        url = %self.url,
+                        status = %response.status(),
+                        request_ids = ?request_ids,
+                        version = ?response.version(),
+                        "Request completed"
+                    );
+                }
+
                 tracing::debug!(
                     method = %self.method,
                     url = %self.url,
