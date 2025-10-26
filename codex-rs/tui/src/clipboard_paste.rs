@@ -190,7 +190,53 @@ pub fn normalize_pasted_path(pasted: &str) -> Option<PathBuf> {
         return parts.into_iter().next().map(PathBuf::from);
     }
 
+    if !contains_unescaped_ascii_whitespace(pasted) {
+        let unescaped = unescape_shell_escapes(pasted);
+        return Some(PathBuf::from(unescaped));
+    }
+
     None
+}
+
+fn contains_unescaped_ascii_whitespace(input: &str) -> bool {
+    let chars = input.chars();
+    let mut escaped = false;
+    for ch in chars {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{0b}' | '\u{0c}') {
+            return true;
+        }
+    }
+    false
+}
+
+fn unescape_shell_escapes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let chars = input.chars();
+    let mut escaped = false;
+    for ch in chars {
+        if escaped {
+            result.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        result.push(ch);
+    }
+    if escaped {
+        result.push('\\');
+    }
+    result
 }
 
 /// Infer an image format for the provided path based on its extension.
@@ -253,6 +299,17 @@ mod pasted_paths_tests {
         let input = "/home/user/a\\ b.png /home/user/c.png";
         let result = normalize_pasted_path(input);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn normalize_macos_screenshot_path_with_thin_space() {
+        let input = "/Users/zhao/Downloads/Screenshot\\ 2025-09-25\\ at\\ 10.47.39\u{202f}AM.png";
+        let result = normalize_pasted_path(input)
+            .expect("should accept macOS screenshot path with thin space");
+        assert_eq!(
+            result,
+            PathBuf::from("/Users/zhao/Downloads/Screenshot 2025-09-25 at 10.47.39\u{202f}AM.png")
+        );
     }
 
     #[test]
