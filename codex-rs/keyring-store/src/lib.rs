@@ -1,23 +1,24 @@
-use anyhow::Error as AnyhowError;
 use keyring::Entry;
+use keyring::Error as KeyringError;
 use std::error::Error;
 use std::fmt;
 use std::fmt::Debug;
 
 #[derive(Debug)]
-pub struct CredentialStoreError(AnyhowError);
+pub struct CredentialStoreError(KeyringError);
 
 impl CredentialStoreError {
-    pub fn new(error: impl Into<AnyhowError>) -> Self {
-        Self(error.into())
+    pub fn new(error: KeyringError) -> Self {
+        Self(error)
     }
     pub fn message(&self) -> String {
         self.0.to_string()
     }
-    pub fn into_error(self) -> AnyhowError {
+    pub fn into_error(self) -> KeyringError {
         self.0
     }
 }
+
 impl fmt::Display for CredentialStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)

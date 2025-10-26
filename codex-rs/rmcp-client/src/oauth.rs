@@ -17,6 +17,7 @@
 //! If the keyring is not available or fails, we fall back to CODEX_HOME/.credentials.json which is consistent with other coding CLI agents.
 
 use anyhow::Context;
+use anyhow::Error;
 use anyhow::Result;
 use oauth2::AccessToken;
 use oauth2::EmptyExtraTokenFields;
@@ -141,7 +142,7 @@ fn load_oauth_tokens_from_keyring<K: KeyringStore>(
             Ok(Some(tokens))
         }
         Ok(None) => Ok(None),
-        Err(error) => Err(error.into_error()),
+        Err(error) => Err(Error::new(error.into_error())),
     }
 }
 
@@ -185,7 +186,7 @@ fn save_oauth_tokens_with_keyring<K: KeyringStore>(
                 error.message()
             );
             warn!("{message}");
-            Err(error.into_error().context(message))
+            Err(Error::new(error.into_error()).context(message))
         }
     }
 }

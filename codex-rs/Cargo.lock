@@ -1221,7 +1221,6 @@ dependencies = [
 name = "codex-keyring-store"
 version = "0.0.0"
 dependencies = [
- "anyhow",
  "keyring",
 ]
 
