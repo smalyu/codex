@@ -52,6 +52,7 @@ use crate::ui_consts::LIVE_PREFIX_COLS;
 use codex_file_search::FileMatch;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -60,6 +61,34 @@ use std::time::Instant;
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+
+fn maybe_prefix_root_like(path: &Path) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        let _ = path;
+        None
+    }
+
+    #[cfg(not(windows))]
+    {
+        if path.has_root() {
+            return None;
+        }
+
+        let path_str = path.to_string_lossy();
+        const ROOT_PREFIXES: [&str; 5] =
+            ["Applications/", "Library/", "System/", "Users/", "Volumes/"];
+
+        if ROOT_PREFIXES
+            .iter()
+            .any(|prefix| path_str.starts_with(prefix))
+        {
+            return Some(PathBuf::from(format!("/{path_str}")));
+        }
+
+        None
+    }
+}
 
 /// Result returned when the user interacts with the text area.
 #[derive(Debug, PartialEq)]
@@ -275,16 +304,44 @@ impl ChatComposer {
             return false;
         };
 
-        match image::image_dimensions(&path_buf) {
-            Ok((w, h)) => {
+        match Self::resolve_image_path_with_fallback(path_buf) {
+            Ok((resolved_path, w, h)) => {
                 tracing::info!("OK: {pasted}");
-                let format_label = pasted_image_format(&path_buf).label();
-                self.attach_image(path_buf, w, h, format_label);
+                let format_label = pasted_image_format(&resolved_path).label();
+                self.attach_image(resolved_path, w, h, format_label);
                 true
             }
             Err(err) => {
                 tracing::info!("ERR: {err}");
                 false
+            }
+        }
+    }
+
+    fn resolve_image_path_with_fallback(
+        path: PathBuf,
+    ) -> Result<(PathBuf, u32, u32), image::ImageError> {
+        match image::image_dimensions(&path) {
+            Ok((w, h)) => Ok((path, w, h)),
+            Err(err) => {
+                if let image::ImageError::IoError(io_err) = &err
+                    && io_err.kind() == ErrorKind::NotFound
+                {
+                    if let Some(fallback) = maybe_prefix_root_like(&path) {
+                        match image::image_dimensions(&fallback) {
+                            Ok((w, h)) => return Ok((fallback, w, h)),
+                            Err(fallback_err) => {
+                                tracing::debug!(
+                                    ?fallback_err,
+                                    original = %path.display(),
+                                    fallback = %fallback.display(),
+                                    "fallback_dimensions_failed",
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(err)
             }
         }
     }
@@ -3447,5 +3504,21 @@ mod tests {
 
         assert_eq!(composer.textarea.text(), "z".repeat(count));
         assert!(composer.pending_pastes.is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn maybe_prefix_root_like_adds_leading_slash() {
+        let input = PathBuf::from("Users/example/image.png");
+        let result = maybe_prefix_root_like(&input);
+        assert_eq!(result, Some(PathBuf::from("/Users/example/image.png")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn maybe_prefix_root_like_ignores_relative_dirs() {
+        let input = PathBuf::from("project/assets/image.png");
+        let result = maybe_prefix_root_like(&input);
+        assert!(result.is_none());
     }
 }

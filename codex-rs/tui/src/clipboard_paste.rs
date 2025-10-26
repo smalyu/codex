@@ -187,10 +187,34 @@ pub fn normalize_pasted_path(pasted: &str) -> Option<PathBuf> {
     // shell-escaped single path → unescaped
     let parts: Vec<String> = shlex::Shlex::new(pasted).collect();
     if parts.len() == 1 {
-        return parts.into_iter().next().map(PathBuf::from);
+        let mut path = parts.into_iter().next()?;
+
+        #[cfg(not(windows))]
+        {
+            path = fixup_unix_root_relative_path(path);
+        }
+
+        return Some(PathBuf::from(path));
     }
 
     None
+}
+
+#[cfg(not(windows))]
+fn fixup_unix_root_relative_path(mut path: String) -> String {
+    use std::path::Path;
+
+    if Path::new(&path).has_root() {
+        return path;
+    }
+
+    const ROOT_PREFIXES: [&str; 5] = ["Applications/", "Library/", "System/", "Users/", "Volumes/"];
+
+    if ROOT_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+        path.insert(0, '/');
+    }
+
+    path
 }
 
 /// Infer an image format for the provided path based on its extension.
@@ -253,6 +277,25 @@ mod pasted_paths_tests {
         let input = "/home/user/a\\ b.png /home/user/c.png";
         let result = normalize_pasted_path(input);
         assert!(result.is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn normalize_dragged_finder_users_path() {
+        let input = "'Users/alice/Pictures/example.png'";
+        let result = normalize_pasted_path(input).expect("should add leading slash for Users/");
+        assert_eq!(result, PathBuf::from("/Users/alice/Pictures/example.png"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn normalize_dragged_finder_volumes_path() {
+        let input = "'Volumes/ExternalDrive/photos/image.jpg'";
+        let result = normalize_pasted_path(input).expect("should add leading slash for Volumes/");
+        assert_eq!(
+            result,
+            PathBuf::from("/Volumes/ExternalDrive/photos/image.jpg")
+        );
     }
 
     #[test]
