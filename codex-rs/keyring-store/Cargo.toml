@@ -8,3 +8,4 @@ workspace = true
 
 [dependencies]
 keyring = { workspace = true }
+tracing = { workspace = true }
