@@ -11,6 +11,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ENVIRONMENT_CONTEXT_CLOSE_TAG;
 use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
+use codex_protocol::protocol::GitInfo;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, DeriveDisplay)]
@@ -29,6 +30,8 @@ pub(crate) struct EnvironmentContext {
     pub network_access: Option<NetworkAccess>,
     pub writable_roots: Option<Vec<PathBuf>>,
     pub shell: Option<Shell>,
+    pub git_info: Option<GitInfo>,
+    pub git_info_cleared: bool,
 }
 
 impl EnvironmentContext {
@@ -37,6 +40,7 @@ impl EnvironmentContext {
         approval_policy: Option<AskForApproval>,
         sandbox_policy: Option<SandboxPolicy>,
         shell: Option<Shell>,
+        git_info: Option<GitInfo>,
     ) -> Self {
         Self {
             cwd,
@@ -70,6 +74,8 @@ impl EnvironmentContext {
                 _ => None,
             },
             shell,
+            git_info,
+            git_info_cleared: false,
         }
     }
 
@@ -83,8 +89,10 @@ impl EnvironmentContext {
             sandbox_mode,
             network_access,
             writable_roots,
+            git_info,
             // should compare all fields except shell
             shell: _,
+            git_info_cleared: _,
         } = other;
 
         self.cwd == *cwd
@@ -92,6 +100,7 @@ impl EnvironmentContext {
             && self.sandbox_mode == *sandbox_mode
             && self.network_access == *network_access
             && self.writable_roots == *writable_roots
+            && self.git_info == *git_info
     }
 
     pub fn diff(before: &TurnContext, after: &TurnContext) -> Self {
@@ -110,7 +119,22 @@ impl EnvironmentContext {
         } else {
             None
         };
-        EnvironmentContext::new(cwd, approval_policy, sandbox_policy, None)
+        let git_info_changed = before.git_info != after.git_info;
+        let mut context = EnvironmentContext::new(
+            cwd,
+            approval_policy,
+            sandbox_policy,
+            None,
+            if git_info_changed {
+                after.git_info.clone()
+            } else {
+                None
+            },
+        );
+        if git_info_changed && before.git_info.is_some() && after.git_info.is_none() {
+            context.git_info_cleared = true;
+        }
+        context
     }
 }
 
@@ -122,6 +146,7 @@ impl From<&TurnContext> for EnvironmentContext {
             Some(turn_context.sandbox_policy.clone()),
             // Shell is not configurable from turn to turn
             None,
+            turn_context.git_info.clone(),
         )
     }
 }
@@ -139,6 +164,7 @@ impl EnvironmentContext {
     ///   <writable_roots>...</writable_roots>
     ///   <network_access>...</network_access>
     ///   <shell>...</shell>
+    ///   <git_info>...</git_info>
     /// </environment_context>
     /// ```
     pub fn serialize_to_xml(self) -> String {
@@ -173,6 +199,23 @@ impl EnvironmentContext {
             && let Some(shell_name) = shell.name()
         {
             lines.push(format!("  <shell>{shell_name}</shell>"));
+        }
+        if let Some(git_info) = self.git_info {
+            lines.push("  <git_info>".to_string());
+            if let Some(commit_hash) = git_info.commit_hash {
+                lines.push(format!("    <commit_hash>{commit_hash}</commit_hash>"));
+            }
+            if let Some(branch) = git_info.branch {
+                lines.push(format!("    <branch>{branch}</branch>"));
+            }
+            if let Some(repository_url) = git_info.repository_url {
+                lines.push(format!(
+                    "    <repository_url>{repository_url}</repository_url>"
+                ));
+            }
+            lines.push("  </git_info>".to_string());
+        } else if self.git_info_cleared {
+            lines.push("  <git_info />".to_string());
         }
         lines.push(ENVIRONMENT_CONTEXT_CLOSE_TAG.to_string());
         lines.join("\n")
@@ -215,6 +258,7 @@ mod tests {
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp"], false)),
             None,
+            None,
         );
 
         let expected = r#"<environment_context>
@@ -238,6 +282,7 @@ mod tests {
             Some(AskForApproval::Never),
             Some(SandboxPolicy::ReadOnly),
             None,
+            None,
         );
 
         let expected = r#"<environment_context>
@@ -256,12 +301,55 @@ mod tests {
             Some(AskForApproval::OnFailure),
             Some(SandboxPolicy::DangerFullAccess),
             None,
+            None,
         );
 
         let expected = r#"<environment_context>
   <approval_policy>on-failure</approval_policy>
   <sandbox_mode>danger-full-access</sandbox_mode>
   <network_access>enabled</network_access>
+</environment_context>"#;
+
+        assert_eq!(context.serialize_to_xml(), expected);
+    }
+
+    #[test]
+    fn serialize_environment_context_with_git_info() {
+        let git_info = GitInfo {
+            commit_hash: Some("abc123".to_string()),
+            branch: Some("main".to_string()),
+            repository_url: Some("https://example.com/repo.git".to_string()),
+        };
+        let context = EnvironmentContext::new(
+            Some(PathBuf::from("/repo")),
+            Some(AskForApproval::OnRequest),
+            Some(SandboxPolicy::ReadOnly),
+            None,
+            Some(git_info),
+        );
+
+        let expected = r#"<environment_context>
+  <cwd>/repo</cwd>
+  <approval_policy>on-request</approval_policy>
+  <sandbox_mode>read-only</sandbox_mode>
+  <network_access>restricted</network_access>
+  <git_info>
+    <commit_hash>abc123</commit_hash>
+    <branch>main</branch>
+    <repository_url>https://example.com/repo.git</repository_url>
+  </git_info>
+</environment_context>"#;
+
+        assert_eq!(context.serialize_to_xml(), expected);
+    }
+
+    #[test]
+    fn serialize_environment_context_with_cleared_git_info() {
+        let mut context = EnvironmentContext::new(None, None, None, None, None);
+        context.git_info_cleared = true;
+
+        let expected = r#"<environment_context>
+  <git_info />
 </environment_context>"#;
 
         assert_eq!(context.serialize_to_xml(), expected);
@@ -275,11 +363,13 @@ mod tests {
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo"], false)),
             None,
+            None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
             Some(AskForApproval::Never),
             Some(workspace_write_policy(vec!["/repo"], true)),
+            None,
             None,
         );
         assert!(!context1.equals_except_shell(&context2));
@@ -292,11 +382,13 @@ mod tests {
             Some(AskForApproval::OnRequest),
             Some(SandboxPolicy::new_read_only_policy()),
             None,
+            None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
             Some(AskForApproval::OnRequest),
             Some(SandboxPolicy::new_workspace_write_policy()),
+            None,
             None,
         );
 
@@ -310,12 +402,45 @@ mod tests {
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp", "/var"], false)),
             None,
+            None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
             Some(AskForApproval::OnRequest),
             Some(workspace_write_policy(vec!["/repo", "/tmp"], true)),
             None,
+            None,
+        );
+
+        assert!(!context1.equals_except_shell(&context2));
+    }
+
+    #[test]
+    fn equals_except_shell_compares_git_info() {
+        let git_info1 = Some(GitInfo {
+            commit_hash: Some("abc".to_string()),
+            branch: Some("main".to_string()),
+            repository_url: None,
+        });
+        let git_info2 = Some(GitInfo {
+            commit_hash: Some("def".to_string()),
+            branch: Some("feature".to_string()),
+            repository_url: None,
+        });
+
+        let context1 = EnvironmentContext::new(
+            Some(PathBuf::from("/repo")),
+            Some(AskForApproval::OnRequest),
+            Some(workspace_write_policy(vec!["/repo"], false)),
+            None,
+            git_info1,
+        );
+        let context2 = EnvironmentContext::new(
+            Some(PathBuf::from("/repo")),
+            Some(AskForApproval::OnRequest),
+            Some(workspace_write_policy(vec!["/repo"], false)),
+            None,
+            git_info2,
         );
 
         assert!(!context1.equals_except_shell(&context2));
@@ -331,6 +456,7 @@ mod tests {
                 shell_path: "/bin/bash".into(),
                 bashrc_path: "/home/user/.bashrc".into(),
             })),
+            None,
         );
         let context2 = EnvironmentContext::new(
             Some(PathBuf::from("/repo")),
@@ -340,6 +466,7 @@ mod tests {
                 shell_path: "/bin/zsh".into(),
                 zshrc_path: "/home/user/.zshrc".into(),
             })),
+            None,
         );
 
         assert!(context1.equals_except_shell(&context2));

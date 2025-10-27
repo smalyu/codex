@@ -65,6 +65,7 @@ use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 #[cfg(test)]
 use crate::exec::StreamOutput;
+use crate::git_info::collect_git_info;
 // Removed: legacy executor wiring replaced by ToolOrchestrator flows.
 // legacy normalize_exec_result no longer used after orchestrator migration
 use crate::mcp::auth::compute_auth_statuses;
@@ -127,6 +128,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::user_input::UserInput;
 
@@ -168,6 +170,8 @@ impl Codex {
 
         let config = Arc::new(config);
 
+        let git_info = collect_git_info(&config.cwd).await;
+
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
             model: config.model.clone(),
@@ -178,6 +182,7 @@ impl Codex {
             approval_policy: config.approval_policy,
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
+            git_info,
             original_config_do_not_use: Arc::clone(&config),
         };
 
@@ -263,6 +268,7 @@ pub(crate) struct TurnContext {
     /// the model as well as sandbox policies are resolved against this path
     /// instead of `std::env::current_dir()`.
     pub(crate) cwd: PathBuf,
+    pub(crate) git_info: Option<GitInfo>,
     pub(crate) base_instructions: Option<String>,
     pub(crate) user_instructions: Option<String>,
     pub(crate) approval_policy: AskForApproval,
@@ -313,6 +319,9 @@ pub(crate) struct SessionConfiguration {
     /// operate deterministically.
     cwd: PathBuf,
 
+    /// Git metadata for the current working directory, if available.
+    git_info: Option<GitInfo>,
+
     // TODO(pakrym): Remove config from here
     original_config_do_not_use: Arc<Config>,
 }
@@ -338,6 +347,9 @@ impl SessionConfiguration {
         if let Some(cwd) = updates.cwd.clone() {
             next_configuration.cwd = cwd;
         }
+        if let Some(git_info) = updates.git_info.clone() {
+            next_configuration.git_info = git_info;
+        }
         next_configuration
     }
 }
@@ -345,6 +357,7 @@ impl SessionConfiguration {
 #[derive(Default, Clone)]
 pub(crate) struct SessionSettingsUpdate {
     pub(crate) cwd: Option<PathBuf>,
+    pub(crate) git_info: Option<Option<GitInfo>>,
     pub(crate) approval_policy: Option<AskForApproval>,
     pub(crate) sandbox_policy: Option<SandboxPolicy>,
     pub(crate) model: Option<String>,
@@ -398,6 +411,7 @@ impl Session {
             sub_id,
             client,
             cwd: session_configuration.cwd.clone(),
+            git_info: session_configuration.git_info.clone(),
             base_instructions: session_configuration.base_instructions.clone(),
             user_instructions: session_configuration.user_instructions.clone(),
             approval_policy: session_configuration.approval_policy,
@@ -962,6 +976,7 @@ impl Session {
             Some(turn_context.approval_policy),
             Some(turn_context.sandbox_policy.clone()),
             Some(self.user_shell().clone()),
+            turn_context.git_info.clone(),
         )));
         items
     }
@@ -1190,7 +1205,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 effort,
                 summary,
             } => {
-                let updates = SessionSettingsUpdate {
+                let mut updates = SessionSettingsUpdate {
                     cwd,
                     approval_policy,
                     sandbox_policy,
@@ -1199,11 +1214,14 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     reasoning_summary: summary,
                     ..Default::default()
                 };
+                if let Some(cwd) = updates.cwd.clone() {
+                    updates.git_info = Some(collect_git_info(&cwd).await);
+                }
                 sess.update_settings(updates).await;
             }
 
             Op::UserInput { .. } | Op::UserTurn { .. } => {
-                let (items, updates) = match sub.op {
+                let (items, mut updates) = match sub.op {
                     Op::UserTurn {
                         cwd,
                         approval_policy,
@@ -1217,6 +1235,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                         items,
                         SessionSettingsUpdate {
                             cwd: Some(cwd),
+                            git_info: None,
                             approval_policy: Some(approval_policy),
                             sandbox_policy: Some(sandbox_policy),
                             model: Some(model),
@@ -1228,6 +1247,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     Op::UserInput { items } => (items, SessionSettingsUpdate::default()),
                     _ => unreachable!(),
                 };
+                if let Some(cwd) = updates.cwd.clone() {
+                    updates.git_info = Some(collect_git_info(&cwd).await);
+                }
                 let current_context = sess.new_turn_with_sub_id(sub.id.clone(), updates).await;
                 current_context
                     .client
@@ -1515,6 +1537,7 @@ async fn spawn_review_thread(
         sandbox_policy: parent_turn_context.sandbox_policy.clone(),
         shell_environment_policy: parent_turn_context.shell_environment_policy.clone(),
         cwd: parent_turn_context.cwd.clone(),
+        git_info: parent_turn_context.git_info.clone(),
         is_review_mode: true,
         final_output_json_schema: None,
         codex_linux_sandbox_exe: parent_turn_context.codex_linux_sandbox_exe.clone(),
@@ -2601,6 +2624,7 @@ mod tests {
             approval_policy: config.approval_policy,
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
+            git_info: None,
             original_config_do_not_use: Arc::clone(&config),
         };
 
@@ -2669,6 +2693,7 @@ mod tests {
             approval_policy: config.approval_policy,
             sandbox_policy: config.sandbox_policy.clone(),
             cwd: config.cwd.clone(),
+            git_info: None,
             original_config_do_not_use: Arc::clone(&config),
         };
 
