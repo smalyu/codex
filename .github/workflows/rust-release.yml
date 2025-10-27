@@ -113,9 +113,12 @@ jobs:
           version: 0.1.71
 
       - name: Pre-warm dependency cache (cargo-chef)
+        shell: bash
         run: |
-          cargo chef prepare --recipe-path target/chef-recipe.json
-          cargo chef cook --recipe-path target/chef-recipe.json --target ${{ matrix.target }} --release --all-features
+          set -euo pipefail
+          RECIPE="${RUNNER_TEMP}/chef-recipe.json"
+          cargo chef prepare --recipe-path "$RECIPE"
+          cargo chef cook --recipe-path "$RECIPE" --target ${{ matrix.target }} --release --all-features
 
       - name: Cargo build
         run: cargo build --target ${{ matrix.target }} --release --bin codex --bin codex-responses-api-proxy

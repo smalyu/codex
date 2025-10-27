@@ -188,11 +188,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo chef prepare --recipe-path target/chef-recipe.json
+          RECIPE="${RUNNER_TEMP}/chef-recipe.json"
+          cargo chef prepare --recipe-path "$RECIPE"
           if [[ "${{ matrix.profile }}" == "release" ]]; then
-            cargo chef cook --recipe-path target/chef-recipe.json --target ${{ matrix.target }} --release --all-features
+            cargo chef cook --recipe-path "$RECIPE" --target ${{ matrix.target }} --release --all-features
           else
-            cargo chef cook --recipe-path target/chef-recipe.json --target ${{ matrix.target }} --all-features
+            cargo chef cook --recipe-path "$RECIPE" --target ${{ matrix.target }} --all-features
           fi
 
       - name: cargo clippy
