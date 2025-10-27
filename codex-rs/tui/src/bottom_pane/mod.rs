@@ -36,10 +36,10 @@ pub(crate) use feedback_view::feedback_selection_params;
 pub(crate) use feedback_view::feedback_upload_consent_params;
 mod paste_burst;
 pub mod popup_consts;
+mod queued_user_messages;
 mod scroll_state;
 mod selection_popup_common;
 mod textarea;
-mod queued_user_messages;
 pub(crate) use feedback_view::FeedbackNoteView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
