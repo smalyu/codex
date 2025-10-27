@@ -373,6 +373,7 @@ impl ConversationHistory {
             | ResponseItem::FunctionCall { .. }
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::GhostSnapshot { .. }
             | ResponseItem::Other => item.clone(),
         }
     }
