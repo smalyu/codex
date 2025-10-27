@@ -216,15 +216,15 @@ pub struct Config {
     /// When set, restricts the login mechanism users may use.
     pub forced_login_method: Option<ForcedLoginMethod>,
 
-    /// Include an experimental plan tool that the model can use to update its current plan and status of each step.
-    pub include_plan_tool: bool,
-
     /// Include the `apply_patch` tool for models that benefit from invoking
     /// file edits as a structured tool call. When unset, this falls back to the
     /// model family's default preference.
     pub include_apply_patch_tool: bool,
 
     pub tools_web_search_request: bool,
+
+    /// When `true`, run a model-based assessment for commands denied by the sandbox.
+    pub experimental_sandbox_command_assessment: bool,
 
     pub use_experimental_streamable_shell_tool: bool,
 
@@ -961,6 +961,7 @@ pub struct ConfigToml {
     pub experimental_use_unified_exec_tool: Option<bool>,
     pub experimental_use_rmcp_client: Option<bool>,
     pub experimental_use_freeform_apply_patch: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
 }
 
 impl From<ConfigToml> for UserSavedConfig {
@@ -1026,9 +1027,11 @@ impl ConfigToml {
     fn derive_sandbox_policy(
         &self,
         sandbox_mode_override: Option<SandboxMode>,
+        profile_sandbox_mode: Option<SandboxMode>,
         resolved_cwd: &Path,
     ) -> SandboxPolicy {
         let resolved_sandbox_mode = sandbox_mode_override
+            .or(profile_sandbox_mode)
             .or(self.sandbox_mode)
             .or_else(|| {
                 // if no sandbox_mode is set, but user has marked directory as trusted, use WorkspaceWrite
@@ -1117,11 +1120,11 @@ pub struct ConfigOverrides {
     pub config_profile: Option<String>,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     pub base_instructions: Option<String>,
-    pub include_plan_tool: Option<bool>,
     pub include_apply_patch_tool: Option<bool>,
     pub include_view_image_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
     /// Additional directories that should be treated as writable roots for this session.
     pub additional_writable_roots: Vec<PathBuf>,
 }
@@ -1147,11 +1150,11 @@ impl Config {
             config_profile: config_profile_key,
             codex_linux_sandbox_exe,
             base_instructions,
-            include_plan_tool: include_plan_tool_override,
             include_apply_patch_tool: include_apply_patch_tool_override,
             include_view_image_tool: include_view_image_tool_override,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
+            experimental_sandbox_command_assessment: sandbox_command_assessment_override,
             additional_writable_roots,
         } = overrides;
 
@@ -1174,10 +1177,10 @@ impl Config {
         };
 
         let feature_overrides = FeatureOverrides {
-            include_plan_tool: include_plan_tool_override,
             include_apply_patch_tool: include_apply_patch_tool_override,
             include_view_image_tool: include_view_image_tool_override,
             web_search_request: override_tools_web_search_request,
+            experimental_sandbox_command_assessment: sandbox_command_assessment_override,
         };
 
         let features = Features::from_config(&cfg, &config_profile, feature_overrides);
@@ -1218,7 +1221,8 @@ impl Config {
             .get_active_project(&resolved_cwd)
             .unwrap_or(ProjectConfig { trust_level: None });
 
-        let mut sandbox_policy = cfg.derive_sandbox_policy(sandbox_mode, &resolved_cwd);
+        let mut sandbox_policy =
+            cfg.derive_sandbox_policy(sandbox_mode, config_profile.sandbox_mode, &resolved_cwd);
         if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
             for path in additional_writable_roots {
                 if !writable_roots.iter().any(|existing| existing == &path) {
@@ -1226,7 +1230,7 @@ impl Config {
                 }
             }
         }
-        let mut approval_policy = approval_policy_override
+        let approval_policy = approval_policy_override
             .or(config_profile.approval_policy)
             .or(cfg.approval_policy)
             .unwrap_or_else(|| {
@@ -1241,8 +1245,8 @@ impl Config {
             .is_some()
             || config_profile.approval_policy.is_some()
             || cfg.approval_policy.is_some()
-            // TODO(#3034): profile.sandbox_mode is not implemented
             || sandbox_mode.is_some()
+            || config_profile.sandbox_mode.is_some()
             || cfg.sandbox_mode.is_some();
 
         let mut model_providers = built_in_model_providers();
@@ -1269,13 +1273,14 @@ impl Config {
 
         let history = cfg.history.unwrap_or_default();
 
-        let include_plan_tool_flag = features.enabled(Feature::PlanTool);
         let include_apply_patch_tool_flag = features.enabled(Feature::ApplyPatchFreeform);
         let include_view_image_tool_flag = features.enabled(Feature::ViewImageTool);
         let tools_web_search_request = features.enabled(Feature::WebSearchRequest);
         let use_experimental_streamable_shell_tool = features.enabled(Feature::StreamableShell);
         let use_experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
         let use_experimental_use_rmcp_client = features.enabled(Feature::RmcpClient);
+        let experimental_sandbox_command_assessment =
+            features.enabled(Feature::SandboxCommandAssessment);
 
         let forced_chatgpt_workspace_id =
             cfg.forced_chatgpt_workspace_id.as_ref().and_then(|value| {
@@ -1334,10 +1339,6 @@ impl Config {
         let review_model = override_review_model
             .or(cfg.review_model)
             .unwrap_or_else(default_review_model);
-
-        if features.enabled(Feature::ApproveAll) {
-            approval_policy = AskForApproval::OnRequest;
-        }
 
         let config = Self {
             model,
@@ -1399,9 +1400,9 @@ impl Config {
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
             forced_chatgpt_workspace_id,
             forced_login_method,
-            include_plan_tool: include_plan_tool_flag,
             include_apply_patch_tool: include_apply_patch_tool_flag,
             tools_web_search_request,
+            experimental_sandbox_command_assessment,
             use_experimental_streamable_shell_tool,
             use_experimental_unified_exec_tool,
             use_experimental_use_rmcp_client,
@@ -1605,8 +1606,11 @@ network_access = false  # This should be ignored.
         let sandbox_mode_override = None;
         assert_eq!(
             SandboxPolicy::DangerFullAccess,
-            sandbox_full_access_cfg
-                .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"))
+            sandbox_full_access_cfg.derive_sandbox_policy(
+                sandbox_mode_override,
+                None,
+                &PathBuf::from("/tmp/test")
+            )
         );
 
         let sandbox_read_only = r#"
@@ -1621,8 +1625,11 @@ network_access = true  # This should be ignored.
         let sandbox_mode_override = None;
         assert_eq!(
             SandboxPolicy::ReadOnly,
-            sandbox_read_only_cfg
-                .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"))
+            sandbox_read_only_cfg.derive_sandbox_policy(
+                sandbox_mode_override,
+                None,
+                &PathBuf::from("/tmp/test")
+            )
         );
 
         let sandbox_workspace_write = r#"
@@ -1646,8 +1653,11 @@ exclude_slash_tmp = true
                 exclude_tmpdir_env_var: true,
                 exclude_slash_tmp: true,
             },
-            sandbox_workspace_write_cfg
-                .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"))
+            sandbox_workspace_write_cfg.derive_sandbox_policy(
+                sandbox_mode_override,
+                None,
+                &PathBuf::from("/tmp/test")
+            )
         );
 
         let sandbox_workspace_write = r#"
@@ -1674,8 +1684,11 @@ trust_level = "trusted"
                 exclude_tmpdir_env_var: true,
                 exclude_slash_tmp: true,
             },
-            sandbox_workspace_write_cfg
-                .derive_sandbox_policy(sandbox_mode_override, &PathBuf::from("/tmp/test"))
+            sandbox_workspace_write_cfg.derive_sandbox_policy(
+                sandbox_mode_override,
+                None,
+                &PathBuf::from("/tmp/test")
+            )
         );
     }
 
@@ -1720,26 +1733,6 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn approve_all_feature_forces_on_request_policy() -> std::io::Result<()> {
-        let cfg = r#"
-[features]
-approve_all = true
-"#;
-        let parsed = toml::from_str::<ConfigToml>(cfg)
-            .expect("TOML deserialization should succeed for approve_all feature");
-        let temp_dir = TempDir::new()?;
-        let config = Config::load_from_base_config_with_overrides(
-            parsed,
-            ConfigOverrides::default(),
-            temp_dir.path().to_path_buf(),
-        )?;
-
-        assert!(config.features.enabled(Feature::ApproveAll));
-        assert_eq!(config.approval_policy, AskForApproval::OnRequest);
-        Ok(())
-    }
-
-    #[test]
     fn config_defaults_to_auto_oauth_store_mode() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml::default();
@@ -1765,7 +1758,6 @@ approve_all = true
         profiles.insert(
             "work".to_string(),
             ConfigProfile {
-                include_plan_tool: Some(true),
                 include_view_image_tool: Some(false),
                 ..Default::default()
             },
@@ -1782,10 +1774,77 @@ approve_all = true
             codex_home.path().to_path_buf(),
         )?;
 
-        assert!(config.features.enabled(Feature::PlanTool));
         assert!(!config.features.enabled(Feature::ViewImageTool));
-        assert!(config.include_plan_tool);
         assert!(!config.include_view_image_tool);
+
+        Ok(())
+    }
+
+    #[test]
+    fn profile_sandbox_mode_overrides_base() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                sandbox_mode: Some(SandboxMode::DangerFullAccess),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            profiles,
+            profile: Some("work".to_string()),
+            sandbox_mode: Some(SandboxMode::ReadOnly),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert!(matches!(
+            config.sandbox_policy,
+            SandboxPolicy::DangerFullAccess
+        ));
+        assert!(config.did_user_set_custom_approval_policy_or_sandbox_mode);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cli_override_takes_precedence_over_profile_sandbox_mode() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "work".to_string(),
+            ConfigProfile {
+                sandbox_mode: Some(SandboxMode::DangerFullAccess),
+                ..Default::default()
+            },
+        );
+        let cfg = ConfigToml {
+            profiles,
+            profile: Some("work".to_string()),
+            ..Default::default()
+        };
+
+        let overrides = ConfigOverrides {
+            sandbox_mode: Some(SandboxMode::WorkspaceWrite),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            overrides,
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert!(matches!(
+            config.sandbox_policy,
+            SandboxPolicy::WorkspaceWrite { .. }
+        ));
 
         Ok(())
     }
@@ -1794,7 +1853,6 @@ approve_all = true
     fn feature_table_overrides_legacy_flags() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let mut entries = BTreeMap::new();
-        entries.insert("plan_tool".to_string(), false);
         entries.insert("apply_patch_freeform".to_string(), false);
         let cfg = ConfigToml {
             features: Some(crate::features::FeaturesToml { entries }),
@@ -1807,9 +1865,7 @@ approve_all = true
             codex_home.path().to_path_buf(),
         )?;
 
-        assert!(!config.features.enabled(Feature::PlanTool));
         assert!(!config.features.enabled(Feature::ApplyPatchFreeform));
-        assert!(!config.include_plan_tool);
         assert!(!config.include_apply_patch_tool);
 
         Ok(())
@@ -2815,6 +2871,7 @@ model_verbosity = "high"
             env_key: Some("OPENAI_API_KEY".to_string()),
             wire_api: crate::WireApi::Chat,
             env_key_instructions: None,
+            experimental_bearer_token: None,
             query_params: None,
             http_headers: None,
             env_http_headers: None,
@@ -2908,9 +2965,9 @@ model_verbosity = "high"
                 base_instructions: None,
                 forced_chatgpt_workspace_id: None,
                 forced_login_method: None,
-                include_plan_tool: false,
                 include_apply_patch_tool: false,
                 tools_web_search_request: false,
+                experimental_sandbox_command_assessment: false,
                 use_experimental_streamable_shell_tool: false,
                 use_experimental_unified_exec_tool: false,
                 use_experimental_use_rmcp_client: false,
@@ -2977,9 +3034,9 @@ model_verbosity = "high"
             base_instructions: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
-            include_plan_tool: false,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
+            experimental_sandbox_command_assessment: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
@@ -3061,9 +3118,9 @@ model_verbosity = "high"
             base_instructions: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
-            include_plan_tool: false,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
+            experimental_sandbox_command_assessment: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,
@@ -3131,9 +3188,9 @@ model_verbosity = "high"
             base_instructions: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
-            include_plan_tool: false,
             include_apply_patch_tool: false,
             tools_web_search_request: false,
+            experimental_sandbox_command_assessment: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
             use_experimental_use_rmcp_client: false,

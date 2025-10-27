@@ -21,6 +21,7 @@ use codex_app_server_protocol::AuthMode;
 use codex_protocol::config_types::ForcedLoginMethod;
 
 use crate::config::Config;
+use crate::default_client::CodexHttpClient;
 use crate::token_data::PlanType;
 use crate::token_data::TokenData;
 use crate::token_data::parse_id_token;
@@ -32,7 +33,7 @@ pub struct CodexAuth {
     pub(crate) api_key: Option<String>,
     pub(crate) auth_dot_json: Arc<Mutex<Option<AuthDotJson>>>,
     pub(crate) auth_file: PathBuf,
-    pub(crate) client: reqwest::Client,
+    pub(crate) client: CodexHttpClient,
 }
 
 impl PartialEq for CodexAuth {
@@ -43,6 +44,8 @@ impl PartialEq for CodexAuth {
 
 impl CodexAuth {
     pub async fn refresh_token(&self) -> Result<String, std::io::Error> {
+        tracing::info!("Refreshing token");
+
         let token_data = self
             .get_current_token_data()
             .ok_or(std::io::Error::other("Token data is not available."))?;
@@ -180,7 +183,7 @@ impl CodexAuth {
         }
     }
 
-    fn from_api_key_with_client(api_key: &str, client: reqwest::Client) -> Self {
+    fn from_api_key_with_client(api_key: &str, client: CodexHttpClient) -> Self {
         Self {
             api_key: Some(api_key.to_owned()),
             mode: AuthMode::ApiKey,
@@ -400,7 +403,7 @@ async fn update_tokens(
 
 async fn try_refresh_token(
     refresh_token: String,
-    client: &reqwest::Client,
+    client: &CodexHttpClient,
 ) -> std::io::Result<RefreshResponse> {
     let refresh_request = RefreshRequest {
         client_id: CLIENT_ID,
@@ -542,6 +545,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(codex_api_key)]
     async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
         let codex_home = tempdir().unwrap();
         let fake_jwt = write_auth_file(
@@ -591,6 +595,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(codex_api_key)]
     async fn loads_api_key_from_auth_json() {
         let dir = tempdir().unwrap();
         let auth_file = dir.path().join("auth.json");
@@ -742,6 +747,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(codex_api_key)]
     async fn enforce_login_restrictions_logs_out_for_workspace_mismatch() {
         let codex_home = tempdir().unwrap();
         let _jwt = write_auth_file(
@@ -767,6 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial(codex_api_key)]
     async fn enforce_login_restrictions_allows_matching_workspace() {
         let codex_home = tempdir().unwrap();
         let _jwt = write_auth_file(
@@ -912,7 +919,10 @@ impl AuthManager {
                 self.reload();
                 Ok(Some(token))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                tracing::error!("Failed to refresh token: {}", e);
+                Err(e)
+            }
         }
     }
 

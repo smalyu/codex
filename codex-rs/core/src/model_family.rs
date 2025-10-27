@@ -84,11 +84,7 @@ macro_rules! model_family {
 
 /// Returns a `ModelFamily` for the given model slug, or `None` if the slug
 /// does not match any known model family.
-pub fn find_family_for_model(mut slug: &str) -> Option<ModelFamily> {
-    // TODO(jif) clean once we have proper feature flags
-    if matches!(std::env::var("CODEX_EXPERIMENTAL").as_deref(), Ok("1")) {
-        slug = "codex-experimental";
-    }
+pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
     if slug.starts_with("o3") {
         model_family!(
             slug, "o3",
@@ -135,7 +131,7 @@ pub fn find_family_for_model(mut slug: &str) -> Option<ModelFamily> {
         )
 
     // Internal models.
-    } else if slug.starts_with("codex-") {
+    } else if slug.starts_with("codex-exp-") {
         model_family!(
             slug, slug,
             supports_reasoning_summaries: true,
@@ -151,7 +147,7 @@ pub fn find_family_for_model(mut slug: &str) -> Option<ModelFamily> {
         )
 
     // Production models.
-    } else if slug.starts_with("gpt-5-codex") {
+    } else if slug.starts_with("gpt-5-codex") || slug.starts_with("codex-") {
         model_family!(
             slug, slug,
             supports_reasoning_summaries: true,

@@ -354,11 +354,20 @@ impl App {
                     self.config.model_family = family;
                 }
             }
-            AppEvent::OpenReasoningPopup { model, presets } => {
-                self.chat_widget.open_reasoning_popup(model, presets);
+            AppEvent::OpenReasoningPopup { model } => {
+                self.chat_widget.open_reasoning_popup(model);
             }
             AppEvent::OpenFullAccessConfirmation { preset } => {
                 self.chat_widget.open_full_access_confirmation(preset);
+            }
+            AppEvent::OpenFeedbackNote {
+                category,
+                include_logs,
+            } => {
+                self.chat_widget.open_feedback_note(category, include_logs);
+            }
+            AppEvent::OpenFeedbackConsent { category } => {
+                self.chat_widget.open_feedback_consent(category);
             }
             AppEvent::PersistModelSelection { model, effort } => {
                 let profile = self.active_profile.as_deref();

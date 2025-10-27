@@ -4,6 +4,7 @@ use crate::ModelProviderInfo;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::default_client::CodexHttpClient;
 use crate::error::CodexErr;
 use crate::error::ConnectionFailedError;
 use crate::error::ResponseStreamFailed;
@@ -36,7 +37,7 @@ use tracing::trace;
 pub(crate) async fn stream_chat_completions(
     prompt: &Prompt,
     model_family: &ModelFamily,
-    client: &reqwest::Client,
+    client: &CodexHttpClient,
     provider: &ModelProviderInfo,
     otel_event_manager: &OtelEventManager,
 ) -> Result<ResponseStream> {
@@ -75,6 +76,7 @@ pub(crate) async fn stream_chat_completions(
             ResponseItem::CustomToolCall { .. } => {}
             ResponseItem::CustomToolCallOutput { .. } => {}
             ResponseItem::WebSearchCall { .. } => {}
+            ResponseItem::GhostSnapshot { .. } => {}
         }
     }
 
@@ -104,10 +106,10 @@ pub(crate) async fn stream_chat_completions(
             } = item
             {
                 let mut text = String::new();
-                for c in items {
-                    match c {
-                        ReasoningItemContent::ReasoningText { text: t }
-                        | ReasoningItemContent::Text { text: t } => text.push_str(t),
+                for entry in items {
+                    match entry {
+                        ReasoningItemContent::ReasoningText { text: segment }
+                        | ReasoningItemContent::Text { text: segment } => text.push_str(segment),
                     }
                 }
                 if text.trim().is_empty() {
@@ -268,6 +270,10 @@ pub(crate) async fn stream_chat_completions(
                     "tool_call_id": call_id,
                     "content": output,
                 }));
+            }
+            ResponseItem::GhostSnapshot { .. } => {
+                // Ghost snapshots annotate history but are not sent to the model.
+                continue;
             }
             ResponseItem::Reasoning { .. }
             | ResponseItem::WebSearchCall { .. }

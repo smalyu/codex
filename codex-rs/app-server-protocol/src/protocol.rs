@@ -5,6 +5,7 @@ use crate::JSONRPCNotification;
 use crate::JSONRPCRequest;
 use crate::RequestId;
 use codex_protocol::ConversationId;
+use codex_protocol::account::Account;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
@@ -16,6 +17,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::SandboxCommandAssessment;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TurnAbortReason;
 use paste::paste;
@@ -93,6 +95,50 @@ macro_rules! client_request_definitions {
 }
 
 client_request_definitions! {
+    /// NEW APIs
+    #[serde(rename = "model/list")]
+    #[ts(rename = "model/list")]
+    ListModels {
+        params: ListModelsParams,
+        response: ListModelsResponse,
+    },
+
+    #[serde(rename = "account/login")]
+    #[ts(rename = "account/login")]
+    LoginAccount {
+        params: LoginAccountParams,
+        response: LoginAccountResponse,
+    },
+
+    #[serde(rename = "account/logout")]
+    #[ts(rename = "account/logout")]
+    LogoutAccount {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        response: LogoutAccountResponse,
+    },
+
+    #[serde(rename = "account/rateLimits/read")]
+    #[ts(rename = "account/rateLimits/read")]
+    GetAccountRateLimits {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        response: GetAccountRateLimitsResponse,
+    },
+
+    #[serde(rename = "feedback/upload")]
+    #[ts(rename = "feedback/upload")]
+    UploadFeedback {
+        params: UploadFeedbackParams,
+        response: UploadFeedbackResponse,
+    },
+
+    #[serde(rename = "account/read")]
+    #[ts(rename = "account/read")]
+    GetAccount {
+        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
+        response: GetAccountResponse,
+    },
+
+    /// DEPRECATED APIs below
     Initialize {
         params: InitializeParams,
         response: InitializeResponse,
@@ -100,6 +146,10 @@ client_request_definitions! {
     NewConversation {
         params: NewConversationParams,
         response: NewConversationResponse,
+    },
+    GetConversationSummary {
+        params: GetConversationSummaryParams,
+        response: GetConversationSummaryResponse,
     },
     /// List recorded Codex conversations (rollouts) with optional pagination and search.
     ListConversations {
@@ -184,12 +234,12 @@ client_request_definitions! {
         params: ExecOneOffCommandParams,
         response: ExecOneOffCommandResponse,
     },
-    #[serde(rename = "account/rateLimits/read")]
-    #[ts(rename = "account/rateLimits/read")]
-    GetAccountRateLimits {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        response: GetAccountRateLimitsResponse,
-    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GetAccountResponse {
+    pub account: Account,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
@@ -220,6 +270,10 @@ pub struct NewConversationParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Override the model provider to use for this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+
     /// Configuration profile from config.toml to specify default options.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
@@ -247,10 +301,6 @@ pub struct NewConversationParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,
 
-    /// Whether to include the plan tool in the conversation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub include_plan_tool: Option<bool>,
-
     /// Whether to include the apply patch tool in the conversation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include_apply_patch_tool: Option<bool>,
@@ -276,6 +326,18 @@ pub struct ResumeConversationResponse {
     pub initial_messages: Option<Vec<EventMsg>>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GetConversationSummaryParams {
+    pub rollout_path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct GetConversationSummaryResponse {
+    pub summary: ConversationSummary,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ListConversationsParams {
@@ -285,6 +347,12 @@ pub struct ListConversationsParams {
     /// Opaque pagination cursor returned by a previous call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// Optional model provider filter (matches against session metadata).
+    /// - None => filter by the server's default model provider
+    /// - Some([]) => no filtering, include all providers
+    /// - Some([...]) => only include sessions with one of the specified providers
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_providers: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -296,6 +364,8 @@ pub struct ConversationSummary {
     /// RFC3339 timestamp string for the session start, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timestamp: Option<String>,
+    /// Model provider recorded for the session (resolved when absent in metadata).
+    pub model_provider: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -307,6 +377,96 @@ pub struct ListConversationsResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ListModelsParams {
+    /// Optional page size; defaults to a reasonable server-side value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<usize>,
+    /// Opaque pagination cursor returned by a previous call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Model {
+    pub id: String,
+    pub model: String,
+    pub display_name: String,
+    pub description: String,
+    pub supported_reasoning_efforts: Vec<ReasoningEffortOption>,
+    pub default_reasoning_effort: ReasoningEffort,
+    // Only one model should be marked as default.
+    pub is_default: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningEffortOption {
+    pub reasoning_effort: ReasoningEffort,
+    pub description: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ListModelsResponse {
+    pub items: Vec<Model>,
+    /// Opaque cursor to pass to the next call to continue after the last item.
+    /// if None, there are no more items to return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadFeedbackParams {
+    pub classification: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<ConversationId>,
+    pub include_logs: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadFeedbackResponse {
+    pub thread_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(tag = "type")]
+#[ts(tag = "type")]
+pub enum LoginAccountParams {
+    #[serde(rename = "apiKey")]
+    #[ts(rename = "apiKey")]
+    ApiKey {
+        #[serde(rename = "apiKey")]
+        #[ts(rename = "apiKey")]
+        api_key: String,
+    },
+    #[serde(rename = "chatgpt")]
+    #[ts(rename = "chatgpt")]
+    ChatGpt,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LoginAccountResponse {
+    /// Only set if the login method is ChatGPT.
+    #[schemars(with = "String")]
+    pub login_id: Option<Uuid>,
+
+    /// URL the client should open in a browser to initiate the OAuth flow.
+    /// Only set if the login method is ChatGPT.
+    pub auth_url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LogoutAccountResponse {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -609,6 +769,8 @@ pub struct SendUserMessageResponse {}
 #[serde(rename_all = "camelCase")]
 pub struct AddConversationListenerParams {
     pub conversation_id: ConversationId,
+    #[serde(default)]
+    pub experimental_raw_events: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -740,6 +902,8 @@ pub struct ExecCommandApprovalParams {
     pub cwd: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<SandboxCommandAssessment>,
     pub parsed_cmd: Vec<ParsedCommand>,
 }
 
@@ -831,6 +995,13 @@ pub struct AuthStatusChangeNotification {
 #[serde(tag = "method", content = "params", rename_all = "camelCase")]
 #[strum(serialize_all = "camelCase")]
 pub enum ServerNotification {
+    /// NEW NOTIFICATIONS
+    #[serde(rename = "account/rateLimits/updated")]
+    #[ts(rename = "account/rateLimits/updated")]
+    #[strum(serialize = "account/rateLimits/updated")]
+    AccountRateLimitsUpdated(RateLimitSnapshot),
+
+    /// DEPRECATED NOTIFICATIONS below
     /// Authentication status changed
     AuthStatusChange(AuthStatusChangeNotification),
 
@@ -844,6 +1015,7 @@ pub enum ServerNotification {
 impl ServerNotification {
     pub fn to_params(self) -> Result<serde_json::Value, serde_json::Error> {
         match self {
+            ServerNotification::AccountRateLimitsUpdated(params) => serde_json::to_value(params),
             ServerNotification::AuthStatusChange(params) => serde_json::to_value(params),
             ServerNotification::LoginChatGptComplete(params) => serde_json::to_value(params),
             ServerNotification::SessionConfigured(params) => serde_json::to_value(params),
@@ -880,13 +1052,13 @@ mod tests {
             request_id: RequestId::Integer(42),
             params: NewConversationParams {
                 model: Some("gpt-5-codex".to_string()),
+                model_provider: None,
                 profile: None,
                 cwd: None,
                 approval_policy: Some(AskForApproval::OnRequest),
                 sandbox: None,
                 config: None,
                 base_instructions: None,
-                include_plan_tool: None,
                 include_apply_patch_tool: None,
             },
         };
@@ -949,6 +1121,7 @@ mod tests {
             command: vec!["echo".to_string(), "hello".to_string()],
             cwd: PathBuf::from("/tmp"),
             reason: Some("because tests".to_string()),
+            risk: None,
             parsed_cmd: vec![ParsedCommand::Unknown {
                 cmd: "echo hello".to_string(),
             }],
@@ -994,6 +1167,96 @@ mod tests {
             json!({
                 "method": "account/rateLimits/read",
                 "id": 1,
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_login_api_key() -> Result<()> {
+        let request = ClientRequest::LoginAccount {
+            request_id: RequestId::Integer(2),
+            params: LoginAccountParams::ApiKey {
+                api_key: "secret".to_string(),
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "account/login",
+                "id": 2,
+                "params": {
+                    "type": "apiKey",
+                    "apiKey": "secret"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_login_chatgpt() -> Result<()> {
+        let request = ClientRequest::LoginAccount {
+            request_id: RequestId::Integer(3),
+            params: LoginAccountParams::ChatGpt,
+        };
+        assert_eq!(
+            json!({
+                "method": "account/login",
+                "id": 3,
+                "params": {
+                    "type": "chatgpt"
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_logout() -> Result<()> {
+        let request = ClientRequest::LogoutAccount {
+            request_id: RequestId::Integer(4),
+            params: None,
+        };
+        assert_eq!(
+            json!({
+                "method": "account/logout",
+                "id": 4,
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_get_account() -> Result<()> {
+        let request = ClientRequest::GetAccount {
+            request_id: RequestId::Integer(5),
+            params: None,
+        };
+        assert_eq!(
+            json!({
+                "method": "account/read",
+                "id": 5,
+            }),
+            serde_json::to_value(&request)?,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_list_models() -> Result<()> {
+        let request = ClientRequest::ListModels {
+            request_id: RequestId::Integer(6),
+            params: ListModelsParams::default(),
+        };
+        assert_eq!(
+            json!({
+                "method": "model/list",
+                "id": 6,
+                "params": {}
             }),
             serde_json::to_value(&request)?,
         );

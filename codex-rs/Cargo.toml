@@ -20,7 +20,6 @@ members = [
     "git-tooling",
     "linux-sandbox",
     "login",
-    "mcp-client",
     "mcp-server",
     "mcp-types",
     "ollama",
@@ -39,6 +38,7 @@ members = [
     "utils/pty",
     "utils/readiness",
     "utils/string",
+    "utils/tokenizer",
 ]
 resolver = "2"
 
@@ -69,7 +69,6 @@ codex-file-search = { path = "file-search" }
 codex-git-tooling = { path = "git-tooling" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-login = { path = "login" }
-codex-mcp-client = { path = "mcp-client" }
 codex-mcp-server = { path = "mcp-server" }
 codex-ollama = { path = "ollama" }
 codex-otel = { path = "otel" }
@@ -86,6 +85,7 @@ codex-utils-json-to-toml = { path = "utils/json-to-toml" }
 codex-utils-pty = { path = "utils/pty" }
 codex-utils-readiness = { path = "utils/readiness" }
 codex-utils-string = { path = "utils/string" }
+codex-utils-tokenizer = { path = "utils/tokenizer" }
 core_test_support = { path = "core/tests/common" }
 mcp-types = { path = "mcp-types" }
 mcp_test_support = { path = "mcp-server/tests/common" }
@@ -120,6 +120,7 @@ env_logger = "0.11.5"
 escargot = "0.5"
 eventsource-stream = "0.2.3"
 futures = { version = "0.3", default-features = false }
+http = "1.3.1"
 icu_decimal = "2.0.0"
 icu_locale_core = "2.0.0"
 ignore = "0.4.23"
@@ -158,7 +159,7 @@ ratatui = "0.29.0"
 ratatui-macros = "0.6.0"
 regex-lite = "0.1.7"
 reqwest = "0.12"
-rmcp = { version = "0.8.2", default-features = false }
+rmcp = { version = "0.8.3", default-features = false }
 schemars = "0.8.22"
 seccompiler = "0.5.0"
 sentry = "0.34.0"
@@ -251,7 +252,7 @@ unwrap_used = "deny"
 # cargo-shear cannot see the platform-specific openssl-sys usage, so we
 # silence the false positive here instead of deleting a real dependency.
 [workspace.metadata.cargo-shear]
-ignored = ["openssl-sys", "codex-utils-readiness"]
+ignored = ["openssl-sys", "codex-utils-readiness", "codex-utils-tokenizer"]
 
 [profile.release]
 lto = "fat"
