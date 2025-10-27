@@ -409,6 +409,7 @@ fn truncate_formatted_exec_output(content: &str, total_lines: usize) -> String {
     let head_slice = &content[..head_slice_end];
     let tail_slice = &content[tail_slice_start..];
     let truncated_by_bytes = content.len() > MODEL_FORMAT_MAX_BYTES;
+    // this is a bit wrong. We are counting metadata lines and not just shell output lines.
     let marker = if omitted > 0 {
         Some(format!(
             "\n[... omitted {omitted} of {total_lines} lines ...]\n\n"
