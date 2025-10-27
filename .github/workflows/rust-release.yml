@@ -55,7 +55,6 @@ jobs:
         working-directory: codex-rs
     env:
       RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
 
     strategy:
       fail-fast: false
@@ -98,7 +97,7 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-${{ matrix.runner }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-${{ matrix.runner }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('codex-rs/rust-toolchain.toml') }}
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Install musl build tools
@@ -350,11 +349,31 @@ jobs:
             zstd -T0 -19 --rm "$dest/$base"
           done
 
+      - name: Save sccache cache (fallback)
+        if: always() && !cancelled() && env.SCCACHE_GHA_ENABLED != 'true' && steps.cache_sccache_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+
 
       - name: sccache stats
         if: always()
         continue-on-error: true
         run: sccache --show-stats || true
+
+      - name: sccache summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "### sccache stats — ${{ matrix.target }} (release)";
+            echo;
+            echo '```';
+            sccache --show-stats || true;
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Remove signing keychain
         if: ${{ always() && matrix.runner == 'macos-15-xlarge' }}
