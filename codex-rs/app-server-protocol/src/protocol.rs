@@ -127,7 +127,7 @@ client_request_definitions! {
     #[ts(rename = "account/read")]
     GetAccount {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        response: GetAccountResponse,
+        response: Option<Account>,
     },
 
     /// DEPRECATED APIs below
@@ -544,12 +544,6 @@ pub struct GetAccountRateLimitsResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
-#[serde(transparent)]
-#[ts(export)]
-#[ts(type = "Account | null")]
-pub struct GetAccountResponse(#[ts(type = "Account | null")] pub Option<Account>);
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct GetAuthStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -725,6 +719,8 @@ pub struct SendUserMessageResponse {}
 #[serde(rename_all = "camelCase")]
 pub struct AddConversationListenerParams {
     pub conversation_id: ConversationId,
+    #[serde(default)]
+    pub experimental_raw_events: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
