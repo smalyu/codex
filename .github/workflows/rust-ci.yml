@@ -94,6 +94,9 @@ jobs:
     defaults:
       run:
         working-directory: codex-rs
+    env:
+      # Speed up repeated builds across CI runs by caching compiled objects.
+      RUSTC_WRAPPER: sccache
 
     strategy:
       fail-fast: false
@@ -147,6 +150,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
           components: clippy
+
+      # Install and restore sccache cache
+      - name: Install sccache
+        uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2
+        with:
+          tool: sccache
+          version: 0.7.5
+
+      - name: Restore sccache cache
+        id: cache_sccache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache/
+          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ hashFiles('**/Cargo.lock') }}
 
       # Explicit cache restore: split cargo home vs target, so we can
       # avoid caching the large target dir on the gnu-dev job.
@@ -229,6 +246,14 @@ jobs:
         with:
           path: ${{ github.workspace }}/codex-rs/target/
           key: cargo-target-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Save sccache cache
+        if: always() && !cancelled() && steps.cache_sccache_restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/sccache/
+          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ hashFiles('**/Cargo.lock') }}
 
       # Fail the job if any of the previous steps failed.
       - name: verify all steps passed
