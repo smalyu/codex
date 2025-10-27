@@ -22,6 +22,7 @@ use crate::tui::FrameRequester;
 pub(crate) struct StatusIndicatorWidget {
     /// Animated header text (defaults to "Working").
     header: String,
+    show_interrupt_hint: bool,
 
     elapsed_running: Duration,
     last_resume_at: Instant,
@@ -51,6 +52,7 @@ impl StatusIndicatorWidget {
     pub(crate) fn new(app_event_tx: AppEventSender, frame_requester: FrameRequester) -> Self {
         Self {
             header: String::from("Working"),
+            show_interrupt_hint: true,
             elapsed_running: Duration::ZERO,
             last_resume_at: Instant::now(),
             is_paused: false,
@@ -70,14 +72,21 @@ impl StatusIndicatorWidget {
 
     /// Update the animated header label (left of the brackets).
     pub(crate) fn update_header(&mut self, header: String) {
-        if self.header != header {
-            self.header = header;
-        }
+        self.header = header;
+    }
+
+    pub(crate) fn set_interrupt_hint_visible(&mut self, visible: bool) {
+        self.show_interrupt_hint = visible;
     }
 
     #[cfg(test)]
     pub(crate) fn header(&self) -> &str {
         &self.header
+    }
+
+    #[cfg(test)]
+    pub(crate) fn interrupt_hint_visible(&self) -> bool {
+        self.show_interrupt_hint
     }
 
     pub(crate) fn pause_timer(&mut self) {
@@ -140,12 +149,16 @@ impl WidgetRef for StatusIndicatorWidget {
         spans.push(spinner(Some(self.last_resume_at)));
         spans.push(" ".into());
         spans.extend(shimmer_spans(&self.header));
-        spans.extend(vec![
-            " ".into(),
-            format!("({pretty_elapsed} • ").dim(),
-            key_hint::plain(KeyCode::Esc).into(),
-            " to interrupt)".dim(),
-        ]);
+        spans.push(" ".into());
+        if self.show_interrupt_hint {
+            spans.extend(vec![
+                format!("({pretty_elapsed} • ").dim(),
+                key_hint::plain(KeyCode::Esc).into(),
+                " to interrupt)".dim(),
+            ]);
+        } else {
+            spans.push(format!("({pretty_elapsed})").dim());
+        }
 
         Line::from(spans).render_ref(area, buf);
     }
