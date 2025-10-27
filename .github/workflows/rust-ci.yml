@@ -97,6 +97,7 @@ jobs:
     env:
       # Speed up repeated builds across CI runs by caching compiled objects.
       RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
 
     strategy:
       fail-fast: false
@@ -170,7 +171,6 @@ jobs:
             echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
             echo "Using sccache local disk + actions/cache fallback"
           fi
-
 
       # Explicit cache restore: split cargo home vs target, so we can
       # avoid caching the large target dir on the gnu-dev job.
@@ -291,8 +291,6 @@ jobs:
         with:
           path: ${{ github.workspace }}/.sccache/
           key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ hashFiles('**/Cargo.lock') }}
-
-
 
       - name: sccache stats
         if: always()

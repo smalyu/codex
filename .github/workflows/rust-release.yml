@@ -55,6 +55,7 @@ jobs:
         working-directory: codex-rs
     env:
       RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
 
     strategy:
       fail-fast: false
@@ -88,7 +89,6 @@ jobs:
         with:
           tool: sccache
           version: 0.7.5
-
 
       - uses: actions/cache@v4
         with:
@@ -388,7 +388,6 @@ jobs:
         with:
           path: ${{ github.workspace }}/.sccache/
           key: sccache-${{ matrix.runner }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
-
 
       - name: sccache stats
         if: always()
