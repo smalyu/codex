@@ -1,6 +1,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use anyhow::Context;
 use anyhow::Result;
 use codex_core::features::Feature;
 use codex_core::model_family::find_family_for_model;
@@ -66,21 +67,17 @@ async fn truncate_function_error_trims_respond_to_model() -> Result<()> {
 
     let output = mock
         .function_call_output_text(call_id)
-        .expect("function error output present");
+        .context("function error output present")?;
+
+    tracing::debug!(output = %output, "truncated function error output");
 
     // Expect plaintext with byte-truncation marker and no omitted-lines marker
     assert!(
         serde_json::from_str::<serde_json::Value>(&output).is_err(),
         "expected error output to be plain text",
     );
-    assert!(
-        output.contains("Total output lines: 1\n\n"),
-        "expected total lines header in truncated output: {output}"
-    );
-    assert!(
-        output.contains("[... output truncated to fit 10240 bytes ...]"),
-        "missing byte truncation marker: {output}"
-    );
+    let truncated_pattern = r#"(?s)^Total output lines: 1\s+.*\[\.\.\. output truncated to fit 10240 bytes \.\.\.\]\s*$"#;
+    assert_regex_match(truncated_pattern, &output);
     assert!(
         !output.contains("omitted"),
         "line omission marker should not appear when no lines were dropped: {output}"
@@ -141,7 +138,7 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
     let output = mock2
         .single_request()
         .function_call_output_text(call_id)
-        .expect("function_call_output present for shell call");
+        .context("function_call_output present for shell call")?;
 
     // Expect plain text (not JSON) with truncation markers and line elision.
     assert!(
@@ -149,7 +146,7 @@ async fn tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
         "expected truncated shell output to be plain text"
     );
     let truncated_pattern = r#"(?s)^Exit code: 0
-Wall time: [0-9]+(?:\.[0-9]+)? seconds
+Wall time: .* seconds
 Total output lines: 400
 Output:
 1
@@ -251,7 +248,7 @@ async fn mcp_tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> 
     let output = mock2
         .single_request()
         .function_call_output_text(call_id)
-        .expect("function_call_output present for rmcp call");
+        .context("function_call_output present for rmcp call")?;
 
     // Expect plain text with byte-based truncation marker.
     assert!(

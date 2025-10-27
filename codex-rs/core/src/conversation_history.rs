@@ -75,6 +75,22 @@ impl ConversationHistory {
         }
     }
 
+    pub(crate) fn replace(&mut self, items: Vec<ResponseItem>) {
+        self.items = items;
+    }
+
+    pub(crate) fn update_token_info(
+        &mut self,
+        usage: &TokenUsage,
+        model_context_window: Option<i64>,
+    ) {
+        self.token_info = TokenUsageInfo::new_or_append(
+            &self.token_info,
+            &Some(usage.clone()),
+            model_context_window,
+        );
+    }
+
     /// This function enforces a couple of invariants on the in-memory history:
     /// 1. every call (function/custom) has a corresponding output entry
     /// 2. every output has a corresponding call entry
@@ -258,10 +274,6 @@ impl ConversationHistory {
         }
     }
 
-    pub(crate) fn replace(&mut self, items: Vec<ResponseItem>) {
-        self.items = items;
-    }
-
     /// Removes the corresponding paired item for the provided `item`, if any.
     ///
     /// Pairs:
@@ -331,24 +343,10 @@ impl ConversationHistory {
         }
     }
 
-    pub(crate) fn update_token_info(
-        &mut self,
-        usage: &TokenUsage,
-        model_context_window: Option<i64>,
-    ) {
-        self.token_info = TokenUsageInfo::new_or_append(
-            &self.token_info,
-            &Some(usage.clone()),
-            model_context_window,
-        );
-    }
-}
-
-impl ConversationHistory {
     fn process_item(item: &ResponseItem) -> ResponseItem {
         match item {
             ResponseItem::FunctionCallOutput { call_id, output } => {
-                let truncated = truncate_context_output(output.content.as_str());
+                let truncated = format_output_for_model_body(output.content.as_str());
                 ResponseItem::FunctionCallOutput {
                     call_id: call_id.clone(),
                     output: FunctionCallOutputPayload {
@@ -358,7 +356,7 @@ impl ConversationHistory {
                 }
             }
             ResponseItem::CustomToolCallOutput { call_id, output } => {
-                let truncated = truncate_context_output(output);
+                let truncated = format_output_for_model_body(output);
                 ResponseItem::CustomToolCallOutput {
                     call_id: call_id.clone(),
                     output: truncated,
@@ -375,11 +373,7 @@ impl ConversationHistory {
     }
 }
 
-fn truncate_context_output(content: &str) -> String {
-    format_exec_output(content)
-}
-
-pub(crate) fn format_exec_output(content: &str) -> String {
+pub(crate) fn format_output_for_model_body(content: &str) -> String {
     // Head+tail truncation for the model: show the beginning and end with an elision.
     // Clients still receive full streams; only this formatted summary is capped.
     let total_lines = content.lines().count();
@@ -740,7 +734,7 @@ mod tests {
         let line = "very long execution error line that should trigger truncation\n";
         let large_error = line.repeat(2_500); // way beyond both byte and line limits
 
-        let truncated = format_exec_output(&large_error);
+        let truncated = format_output_for_model_body(&large_error);
 
         let total_lines = large_error.lines().count();
         assert_truncated_message_matches(&truncated, line, total_lines);
@@ -750,7 +744,7 @@ mod tests {
     #[test]
     fn format_exec_output_marks_byte_truncation_without_omitted_lines() {
         let long_line = "a".repeat(MODEL_FORMAT_MAX_BYTES + 50);
-        let truncated = format_exec_output(&long_line);
+        let truncated = format_output_for_model_body(&long_line);
 
         assert_ne!(truncated, long_line);
         let marker_line =
@@ -769,7 +763,7 @@ mod tests {
     fn format_exec_output_returns_original_when_within_limits() {
         let content = "example output\n".repeat(10);
 
-        assert_eq!(format_exec_output(&content), content);
+        assert_eq!(format_output_for_model_body(&content), content);
     }
 
     #[test]
@@ -779,7 +773,7 @@ mod tests {
             .map(|idx| format!("line-{idx}\n"))
             .collect();
 
-        let truncated = format_exec_output(&content);
+        let truncated = format_output_for_model_body(&content);
         let omitted = total_lines - MODEL_FORMAT_MAX_LINES;
         let expected_marker = format!("[... omitted {omitted} of {total_lines} lines ...]");
 
@@ -807,7 +801,7 @@ mod tests {
             .map(|idx| format!("line-{idx}-{long_line}\n"))
             .collect();
 
-        let truncated = format_exec_output(&content);
+        let truncated = format_output_for_model_body(&content);
 
         assert!(
             truncated.contains("[... omitted 42 of 298 lines ...]"),
