@@ -53,6 +53,9 @@ jobs:
     defaults:
       run:
         working-directory: codex-rs
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
 
     strategy:
       fail-fast: false
@@ -87,12 +90,6 @@ jobs:
           tool: sccache
           version: 0.7.5
 
-      - name: Restore sccache cache
-        id: cache_sccache_restore
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/sccache/
-          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
 
       - uses: actions/cache@v4
         with:
@@ -101,7 +98,6 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            ${{ github.workspace }}/codex-rs/target/
           key: cargo-${{ matrix.runner }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
@@ -110,9 +106,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools pkg-config
 
+      - name: Install cargo-chef
+        uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2
+        with:
+          tool: cargo-chef
+          version: 0.1.71
+
+      - name: Pre-warm dependency cache (cargo-chef)
+        run: |
+          cargo chef prepare --recipe-path target/chef-recipe.json
+          cargo chef cook --recipe-path target/chef-recipe.json --target ${{ matrix.target }} --release --all-features
+
       - name: Cargo build
-        env:
-          RUSTC_WRAPPER: sccache
         run: cargo build --target ${{ matrix.target }} --release --bin codex --bin codex-responses-api-proxy
 
       - if: ${{ matrix.runner == 'macos-15-xlarge' }}
@@ -342,13 +347,11 @@ jobs:
             zstd -T0 -19 --rm "$dest/$base"
           done
 
-      - name: Save sccache cache
-        if: always() && !cancelled() && steps.cache_sccache_restore.outputs.cache-hit != 'true'
+
+      - name: sccache stats
+        if: always()
         continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/sccache/
-          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-release-${{ hashFiles('**/Cargo.lock') }}
+        run: sccache --show-stats || true
 
       - name: Remove signing keychain
         if: ${{ always() && matrix.runner == 'macos-15-xlarge' }}
