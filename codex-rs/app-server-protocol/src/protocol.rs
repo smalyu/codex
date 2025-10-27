@@ -1006,6 +1006,7 @@ mod tests {
             request_id: RequestId::Integer(42),
             params: NewConversationParams {
                 model: Some("gpt-5-codex".to_string()),
+                model_provider: None,
                 profile: None,
                 cwd: None,
                 approval_policy: Some(AskForApproval::OnRequest),
