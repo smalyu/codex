@@ -451,6 +451,14 @@ async fn read_head_and_tail(
     Ok(summary)
 }
 
+pub async fn read_head_records(
+    path: &Path,
+    head_limit: usize,
+) -> io::Result<Vec<serde_json::Value>> {
+    let summary = read_head_and_tail(path, head_limit, 0).await?;
+    Ok(summary.head)
+}
+
 async fn read_tail_records(
     path: &Path,
     max_records: usize,
