@@ -60,6 +60,7 @@ use std::time::Instant;
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+const DOUBLE_SPACE_TIMEOUT: Duration = Duration::from_millis(400);
 
 /// Result returned when the user interacts with the text area.
 #[derive(Debug, PartialEq)]
@@ -109,6 +110,8 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<i64>,
+    last_space_press: Option<(Instant, usize)>,
+    double_space_period_enabled: bool,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -152,6 +155,8 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutSummary,
             footer_hint_override: None,
             context_window_percent: None,
+            last_space_press: None,
+            double_space_period_enabled: Self::detect_double_space_period_preference(),
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -247,6 +252,7 @@ impl ChatComposer {
     }
 
     pub fn handle_paste(&mut self, pasted: String) -> bool {
+        self.last_space_press = None;
         let char_count = pasted.chars().count();
         if char_count > LARGE_PASTE_CHAR_THRESHOLD {
             let placeholder = format!("[Pasted Content {char_count} chars]");
@@ -297,6 +303,11 @@ impl ChatComposer {
         }
     }
 
+    #[cfg(test)]
+    fn set_double_space_period_enabled(&mut self, enabled: bool) {
+        self.double_space_period_enabled = enabled;
+    }
+
     /// Override the footer hint items displayed beneath the composer. Passing
     /// `None` restores the default shortcut footer.
     pub(crate) fn set_footer_hint_override(&mut self, items: Option<Vec<(String, String)>>) {
@@ -309,6 +320,7 @@ impl ChatComposer {
         self.textarea.set_text("");
         self.pending_pastes.clear();
         self.attached_images.clear();
+        self.last_space_press = None;
         self.textarea.set_text(&text);
         self.textarea.set_cursor(0);
         self.sync_command_popup();
@@ -1056,6 +1068,7 @@ impl ChatComposer {
                 // Mirror insert_str() behavior so popups stay in sync when a
                 // pending fast char flushes as normal typed input.
                 self.textarea.insert_str(ch.to_string().as_str());
+                self.handle_double_space_period(now, ch == ' ');
                 // Keep popup sync consistent with key handling: prefer slash popup; only
                 // sync file popup when slash popup is NOT active.
                 self.sync_command_popup();
@@ -1158,7 +1171,9 @@ impl ChatComposer {
         }
 
         // Normal input handling
+        let is_plain_space_press = Self::is_plain_space_press(&input);
         self.textarea.input(input);
+        self.handle_double_space_period(now, is_plain_space_press);
         let text_after = self.textarea.text();
 
         // Update paste-burst heuristic for plain Char (no Ctrl/Alt) events.
@@ -1210,6 +1225,103 @@ impl ChatComposer {
         }
 
         (InputResult::None, true)
+    }
+
+    fn is_plain_space_press(event: &KeyEvent) -> bool {
+        matches!(
+            event,
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                kind: KeyEventKind::Press,
+                modifiers,
+                ..
+            } if *modifiers == KeyModifiers::NONE || *modifiers == KeyModifiers::SHIFT
+        )
+    }
+
+    fn handle_double_space_period(&mut self, now: Instant, is_plain_space_press: bool) {
+        if !self.double_space_period_enabled {
+            self.last_space_press = None;
+            return;
+        }
+
+        if !is_plain_space_press {
+            self.last_space_press = None;
+            return;
+        }
+
+        let raw_cursor = self.textarea.cursor();
+        let cursor = {
+            let text = self.textarea.text();
+            Self::clamp_to_char_boundary(text, raw_cursor)
+        };
+
+        if let Some((pressed_at, previous_cursor)) = self.last_space_press
+            && now.duration_since(pressed_at) <= DOUBLE_SPACE_TIMEOUT
+        {
+            if cursor >= 2 && previous_cursor == cursor - 1 {
+                let should_replace = {
+                    let text = self.textarea.text();
+                    if text
+                        .get(cursor - 2..cursor)
+                        .is_some_and(|segment| segment == "  ")
+                    {
+                        let before = &text[..cursor - 2];
+                        let line_start = before.rfind('\n').map_or(0, |idx| idx + 1);
+                        before[line_start..].chars().any(|ch| !ch.is_whitespace())
+                    } else {
+                        false
+                    }
+                };
+                if should_replace {
+                    self.textarea.replace_range(cursor - 2..cursor, ". ");
+                }
+            }
+            self.last_space_press = None;
+        } else {
+            self.last_space_press = Some((now, cursor));
+        }
+    }
+
+    fn detect_double_space_period_preference() -> bool {
+        if let Some(forced) = Self::forced_double_space_period_preference() {
+            return forced;
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Command;
+            let output = Command::new("defaults")
+                .args(["read", "-g", "NSAutomaticPeriodSubstitutionEnabled"])
+                .output();
+            if let Ok(out) = output
+                && out.status.success()
+            {
+                let value = String::from_utf8_lossy(&out.stdout);
+                let trimmed = value.trim();
+                if matches!(trimmed, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON") {
+                    return true;
+                }
+                if matches!(
+                    trimmed,
+                    "0" | "false" | "FALSE" | "no" | "NO" | "off" | "OFF"
+                ) {
+                    return false;
+                }
+            }
+        }
+
+        false
+    }
+
+    fn forced_double_space_period_preference() -> Option<bool> {
+        let value = std::env::var("CODEX_TUI_FORCE_DOUBLE_SPACE_PERIOD").ok()?;
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        }
     }
 
     /// Attempts to remove an image or paste placeholder if the cursor is at the end of one.
@@ -1656,6 +1768,7 @@ mod tests {
     use image::Rgba;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     use crate::app_event::AppEvent;
@@ -2096,6 +2209,130 @@ mod tests {
             InputResult::Submitted(text) => assert_eq!(text, "1あ"),
             _ => panic!("expected Submitted"),
         }
+    }
+
+    #[test]
+    fn double_space_inserts_period() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_double_space_period_enabled(true);
+
+        type_chars_humanlike(&mut composer, &['h']);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        let _ = composer.flush_paste_burst_if_due();
+
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        let _ = composer.flush_paste_burst_if_due();
+
+        assert_eq!(composer.current_text(), "h. ");
+    }
+
+    #[test]
+    fn double_space_allows_existing_space() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_double_space_period_enabled(true);
+
+        type_chars_humanlike(&mut composer, &['h', ' ']);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        let _ = composer.flush_paste_burst_if_due();
+
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        let _ = composer.flush_paste_burst_if_due();
+
+        assert_eq!(composer.current_text(), "h.  ");
+    }
+
+    #[test]
+    fn double_space_preserves_line_indentation() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_double_space_period_enabled(true);
+
+        type_chars_humanlike(&mut composer, &['f', 'o', 'o']);
+        composer.textarea.insert_str("\n");
+        composer.textarea.set_cursor(composer.textarea.text().len());
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        let _ = composer.flush_paste_burst_if_due();
+
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        let _ = composer.flush_paste_burst_if_due();
+
+        assert_eq!(composer.current_text(), "foo\n  ");
+    }
+
+    #[test]
+    fn double_space_ignored_without_non_whitespace() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_double_space_period_enabled(true);
+
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        let _ = composer.flush_paste_burst_if_due();
+
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        let _ = composer.flush_paste_burst_if_due();
+
+        assert_eq!(composer.current_text(), "  ");
     }
 
     #[test]
