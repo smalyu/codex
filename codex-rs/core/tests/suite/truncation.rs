@@ -156,7 +156,7 @@ Output:
 5
 6
 .*
-\[\.{3} omitted \d+ of 400 lines \.{3}\]
+\[\.{3} omitted 144 of 400 lines \.{3}\]
 
 .*
 396
