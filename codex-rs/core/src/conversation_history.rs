@@ -4,6 +4,7 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_utils_string::take_bytes_at_char_boundary;
 use codex_utils_string::take_last_bytes_at_char_boundary;
+use std::ops::Deref;
 use tracing::error;
 
 // Model-formatting limits: clients get full streams; only content sent to the model is truncated.
@@ -49,7 +50,9 @@ impl ConversationHistory {
         I::Item: std::ops::Deref<Target = ResponseItem>,
     {
         for item in items {
-            if !is_api_message(&item) {
+            let item_ref = item.deref();
+            let is_ghost_snapshot = matches!(item_ref, ResponseItem::GhostSnapshot { .. });
+            if !is_api_message(item_ref) && !is_ghost_snapshot {
                 continue;
             }
 
@@ -191,6 +194,7 @@ impl ConversationHistory {
                 | ResponseItem::WebSearchCall { .. }
                 | ResponseItem::FunctionCallOutput { .. }
                 | ResponseItem::CustomToolCallOutput { .. }
+                | ResponseItem::GhostSnapshot { .. }
                 | ResponseItem::Other
                 | ResponseItem::Message { .. } => {
                     // nothing to do for these variants
@@ -257,6 +261,7 @@ impl ConversationHistory {
                 | ResponseItem::LocalShellCall { .. }
                 | ResponseItem::Reasoning { .. }
                 | ResponseItem::WebSearchCall { .. }
+                | ResponseItem::GhostSnapshot { .. }
                 | ResponseItem::Other
                 | ResponseItem::Message { .. } => {
                     // nothing to do for these variants
@@ -465,6 +470,7 @@ fn is_api_message(message: &ResponseItem) -> bool {
         | ResponseItem::LocalShellCall { .. }
         | ResponseItem::Reasoning { .. }
         | ResponseItem::WebSearchCall { .. } => true,
+        ResponseItem::GhostSnapshot { .. } => false,
         ResponseItem::Other => false,
     }
 }
