@@ -1530,6 +1530,7 @@ async fn derive_config_from_params(
 ) -> std::io::Result<Config> {
     let NewConversationParams {
         model,
+        model_provider,
         profile,
         cwd,
         approval_policy,
@@ -1545,7 +1546,7 @@ async fn derive_config_from_params(
         cwd: cwd.map(PathBuf::from),
         approval_policy,
         sandbox_mode,
-        model_provider: None,
+        model_provider,
         codex_linux_sandbox_exe,
         base_instructions,
         include_apply_patch_tool,
