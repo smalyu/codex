@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::io::Write;
 use std::io::{self};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,6 +11,9 @@ use anyhow::anyhow;
 use codex_protocol::ConversationId;
 use sentry::protocol::ItemContainer;
 use sentry::protocol::Log;
+use sentry::protocol::SpanId;
+use sentry::protocol::TraceContext;
+use sentry::protocol::TraceId;
 use sentry_tracing::log_from_event;
 use tracing::Event;
 use tracing::Subscriber;
@@ -120,7 +122,7 @@ impl CodexLogSnapshot {
 
     /// Upload feedback to Sentry with optional attachments.
     pub fn upload_feedback(
-        &self,
+        &mut self,
         classification: &str,
         reason: Option<&str>,
         cli_version: &str,
@@ -163,7 +165,6 @@ impl CodexLogSnapshot {
             _ => Level::Info,
         };
 
-        let mut envelope = Envelope::new();
         let title = format!(
             "[{}]: Codex session {}",
             display_classification(classification),
@@ -176,6 +177,7 @@ impl CodexLogSnapshot {
             tags,
             ..Default::default()
         };
+
         if let Some(r) = reason {
             use sentry::protocol::Exception;
             use sentry::protocol::Values;
@@ -186,12 +188,22 @@ impl CodexLogSnapshot {
                 ..Default::default()
             }]);
         }
-        envelope.add_item(EnvelopeItem::Event(event));
 
-        if include_logs {
-            envelope.add_item(EnvelopeItem::ItemContainer(ItemContainer::Logs(
-                self.logs.iter().cloned().collect(),
-            )));
+        let trace_id = TraceId::default();
+        let trace_context = TraceContext {
+            span_id: SpanId::default(),
+            trace_id,
+            ..Default::default()
+        };
+
+        let mut envelope = Envelope::new();
+        event.contexts.insert(
+            "trace".to_string(),
+            sentry::protocol::Context::Trace(Box::new(trace_context)),
+        );
+
+        for log in self.logs.iter_mut() {
+            log.trace_id = Some(trace_id);
         }
 
         if let Some((path, data)) = rollout_path.and_then(|p| fs::read(p).ok().map(|d| (p, d))) {
@@ -209,6 +221,15 @@ impl CodexLogSnapshot {
         }
 
         client.send_envelope(envelope);
+
+        if include_logs {
+            let mut log_envelope = Envelope::new();
+            log_envelope.add_item(EnvelopeItem::ItemContainer(ItemContainer::Logs(
+                self.logs.iter().cloned().collect(),
+            )));
+            client.send_envelope(log_envelope);
+        }
+
         client.flush(Some(Duration::from_secs(UPLOAD_TIMEOUT_SECS)));
         Ok(())
     }
