@@ -306,7 +306,11 @@ impl CodexMessageProcessor {
             }
         }
 
-        match login_with_api_key(&self.config.codex_home, &params.api_key) {
+        match login_with_api_key(
+            &self.config.codex_home,
+            &params.api_key,
+            self.config.cli_auth_credentials_store_mode,
+        ) {
             Ok(()) => {
                 self.auth_manager.reload();
                 self.outgoing
@@ -350,6 +354,7 @@ impl CodexMessageProcessor {
                 config.codex_home.clone(),
                 CLIENT_ID.to_string(),
                 config.forced_chatgpt_workspace_id.clone(),
+                config.cli_auth_credentials_store_mode,
             )
         };
 
